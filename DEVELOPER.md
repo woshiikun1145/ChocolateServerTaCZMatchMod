@@ -1,0 +1,271 @@
+# Chocolate Server Tacz Match Mod（CSTMM）调试与技术文档
+
+面向调试人员与维护者，说明模组的运行原理、架构与网络协议细节。
+
+> 玩家操作说明请查阅 [README.md](README.md)（玩家手册），地图/商店/全局参数的配置方法请查阅 [CONFIG.md](CONFIG.md)（配置手册）。
+> 网络层的完全展开（线路格式、线程模型、分片管道、防护机制、调试方法）请查阅 [NETWORK.md](NETWORK.md)。
+> 对外 API（MatchApi/QueueApi/VoteApi）的调用方法与语义请查阅 [API.md](API.md)（面向二次开发）。
+
+---
+
+## 目录
+
+1. [基本信息](#1-基本信息)
+2. [运行架构](#2-运行架构)
+3. [网络协议（详细）](#3-网络协议详细)
+4. [配置同步与分片机制](#4-配置同步与分片机制)
+5. [对局生命周期](#5-对局生命周期)
+6. [数据持久化与保护](#6-数据持久化与保护)
+7. [管理员与调试命令](#7-管理员与调试命令)
+8. [配置文件字段参考](#8-配置文件字段参考)
+9. [日志规范](#9-日志规范)
+10. [常见问题排查](#10-常见问题排查)
+
+---
+
+## 1. 基本信息
+
+- **模组 ID**：`chocolateservertaczmatchmod`（网络通道命名空间 `cstmm`）
+- **MC 版本**：1.21.1 ｜ **Fabric Loader**：0.16.0+（`gradle.properties` 构建目标即最低要求，fabric.mod.json 自动展开 `>=0.16.0`）｜ **Fabric API**：0.115.6+1.21.1
+- **形态**：服务端 + 客户端双端模组，**必须同版本同步部署**
+- **版本号来源**：`gradle.properties` 的 `mod_version` → Gradle processResources 展开到 `fabric.mod.json` → 运行时 FabricLoader 元数据读取（无硬编码版本常量），改版本只需改 `mod_version` 重新构建
+
+## 2. 运行架构
+
+### 2.1 服务端模块
+
+| 模块 | 职责 |
+|---|---|
+| `Cstmm` | 主入口，注册网络包、命令、事件 |
+| `NetworkHandler` | 服务端网络分发，C2S 包处理与限频 |
+| `MatchManager` | 统一对局引擎：开局、记分、边界检测、结束、补位注册（`registerAndSetupPlayer`） |
+| `QueueManager` | 匹配队列（按 `mapId@mode` 复合键），开局条件判定、跨队列合并、快速匹配、补位流程 |
+| `VoteManager` | 踢人投票、加时投票（含冷却与超时静默清理） |
+| `ConfigManager` | 配置加载/校验/落盘（原子写盘）、保存后全服广播 |
+| `InventoryManager` | 竞技模式存包/清包/恢复快照 |
+| `EquipmentManager` | 竞技模式默认装备发放、购买物品发放（双校验） |
+| `PlayerDataManager` | 战绩记录（仅对局结束时记录一次）与档案持久化 |
+| `MatchScheduler` | 全局调度 tick，各 manager tick 用独立 try-catch 隔离异常 |
+| `EventListener` | 玩家加入（握手触发）、死亡重生（回出生点）、伤害（友伤判定）、断线清理 |
+
+### 2.2 客户端模块
+
+| 模块 | 职责 |
+|---|---|
+| `CstmmClient` | 客户端入口，快捷键注册（; 菜单 / ' 商店 / F7 F8 投票） |
+| `ClientNetworkHandler` | S2C 包解码与分发 |
+| `ClientHandshakeState` | 握手状态机，全部功能的门禁 |
+| `ConfigDataCache` | 配置同步结果的客户端缓存（供界面渲染） |
+| `MatchMenuScreen` | 匹配菜单（欢迎/匹配/履历页，卡片背景 cover 裁剪渲染） |
+| `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新） |
+| `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存 |
+| `HudOverlay` | 对局 HUD 渲染（淡入淡出动画，断线重置） |
+
+### 2.3 关键设计约束
+
+- **握手门禁**：客户端未握手成功时禁用全部功能（快捷键点击仅提示，不发包）。
+- **匹配模式**：竞技/休闲由玩家入队时选择（`MatchActionPayload` 的 `target` 字段），不在 MapConfig 中配置。
+- **原子写盘**：所有 JSON 保存均为临时文件 + `Files.move(ATOMIC_MOVE)`；加载失败（`JsonParseException`）绝不回写默认值覆盖用户文件。
+- **活跃对局保护**：活跃对局的地图禁止删除/修改（服务端 `handleConfigUpdate` 校验 + 客户端弹窗提示）。
+- **快照保护**：`InventoryManager.saveInventory` 绝不覆盖未恢复的旧快照；恢复流程为"清背包 → 恢复 → 成功才删快照"。
+
+## 3. 网络协议（详细）
+
+所有自定义包基于 Fabric Networking v1 的 `CustomPayload`，命名空间 `cstmm`。
+
+**字符串长度限制均为 UTF-8 字节数**（`PacketByteBuf.writeString` 的校验口径），发送端在编码前按字节截断且不切断多字节字符（中文安全）。
+
+### 3.1 包一览
+
+| ID | 方向 | 用途 |
+|---|---|---|
+| `cstmm:handshake_s2c` | S2C | 握手请求（携带服务端版本） |
+| `cstmm:handshake_c2s` | C2S | 握手应答（携带客户端版本） |
+| `cstmm:config_sync` | S2C | 配置同步（JSON 分片） |
+| `cstmm:config_update` | C2S | 配置保存（JSON 分片） |
+| `cstmm:request_config_sync` | C2S | 请求配置同步（空包，限频 2 次/秒/人） |
+| `cstmm:match_action` | C2S | 匹配/投票/购买等动作 |
+| `cstmm:match_status` | S2C | 对局状态消息广播 |
+| `cstmm:hud_data` | S2C | HUD 数据（每秒推送） |
+| `cstmm:player_profile` | S2C | 玩家履历（JSON） |
+| `cstmm:open_config_screen` | S2C | 服务端请求打开 OP 配置界面（空包） |
+| `cstmm:shop_data` | S2C | 商店数据（购买资格 + 商品列表） |
+
+### 3.2 握手流程
+
+```
+玩家加入 ──► 服务端 JOIN 事件：发 handshake_s2c{serverVersion}，登记待应答
+客户端收到 ──► 本地比对版本 ──► 回发 handshake_c2s{clientVersion}（无论匹配与否都回发）
+              └─► 首次结果提示聊天消息（handshakeMessageShown 去重，服务端重试不会重复提示）
+服务端收到应答 ──► 移除待应答记录；版本不一致仅 WARN（功能在客户端侧禁用）
+未收到应答 ──► 服务端每秒重试，最多 2 次（防丢包）；客户端 8 秒未握手成功显示超时提示
+```
+
+- 版本号双方各自从 FabricLoader mod 元数据读取（与握手同源，也用于界面右下角版本显示）。
+- **版本不一致时客户端禁用全部功能**，因此两端版本必须一致，服务端与客户端需同步更新部署。
+
+### 3.3 各包字段与编码
+
+**match_action**（C2S）：`enum action` + `string mapName(64B)` + `int team` + `string target(64B)`
+
+- `ActionType` 枚举（ordinal 序列化，**只能在末尾追加**）：
+  `JOIN_QUEUE, LEAVE_QUEUE, VOTE_YES, VOTE_NO, VOTE_OVERTIME, SELECT_TEAM, BUY_ITEM, REQUEST_PROFILE, REQUEST_SHOP`
+- `JOIN_QUEUE`：mapName=地图 ID 或 `quick`；team=队伍偏好（1 红 / 2 蓝 / 其他=自动）；**target=模式**（`COMPETITIVE`/`CASUAL`，空或非法按竞技兜底）
+- `BUY_ITEM`：mapName 空闲，team=商品下标
+- `REQUEST_SHOP`：请求当前可购买的商品数据
+
+**hud_data**（S2C）：`string mapName(64B)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame`。对局期间每秒广播，结束时发 `inGame=false` 清除包。
+
+**match_status**（S2C）：`enum type（MATCH_STARTING / MATCH_ENDED / VOTE_STARTED / VOTE_RESULT / COUNTDOWN）` + `string message(128B)` + `int redKills` + `int blueKills`。
+
+**player_profile**（S2C）：履历 JSON 字符串；**UTF-8 字节数 ≥ 65536 时跳过发送**并 WARN（按字节校验，不是字符数）。
+
+**shop_data**（S2C）：`bool eligible` + `varInt itemCount` + 循环 `string itemId(256B)` + `varInt price` + `varInt maxPurchase`。数据流：客户端打开 ShopScreen 时在**构造器**发送 `REQUEST_SHOP`（放 init 会因界面刷新循环重复请求）→ 服务端校验（活跃对局 + isCompetitive）→ 回 `shop_data` → `ShopDataCache` 缓存并刷新界面。
+
+**open_config_screen**（S2C）/ **request_config_sync**（C2S）：空包。后者服务端限频 **2 次/秒/玩家**，超限拒绝并提示。
+
+**config_sync / config_update**：分片机制详见第 4 节。
+
+### 3.4 限频与防护汇总
+
+| 位置 | 规则 |
+|---|---|
+| `request_config_sync`（C2S） | 服务端限频 2 次/秒/玩家，超限拒绝并提示 |
+| `config_update`（C2S） | 重组防护：`totalParts ∈ [1,64]`、`partIndex` 越界丢弃、重复分片（位图去重）丢弃、单玩家累积 > 2MB 清空重组状态并 WARN、断线清理缓冲 |
+| 客户端自身发包 | 客户端自超 50 次/秒抛 `ConfigSyncRateLimitException` 崩溃（自检） |
+
+### 3.5 兼容性注意
+
+- 枚举字段使用 **ordinal 序列化**：`ActionType`、`MatchStatusPayload.StatusType` 只能在枚举**末尾**追加新值，中间插入/删除会导致两端语义错位。
+- 服务端与客户端模组版本必须一致；Fabric API 使用锁定的 0.115.6+1.21.1（`fabric.mod.json` 声明 `"fabric-api": "*"`，可按需收紧为 `>=0.115.6+1.21.1`）。
+- 新增 S2C/C2S 包时两端必须同步注册，否则解码不一致会被原版断开连接。
+- 原版限制：S2C 单包 64KB、C2S 单包 32768 字节——配置同步因此引入分片（下节）。
+
+## 4. 配置同步与分片机制
+
+配置 JSON（含 Base64 背景图）可能远超原版单包限制，两端均分片：
+
+- **分片单位**：按 **UTF-8 字节**切分，每片 ≤ 30000 字节，且不切断多字节字符（中文安全）。
+- **S2C `config_sync`**：`varInt partIndex` + `varInt totalParts` + `string data(≤32767B)`。触发时机：玩家加入、任意 OP 保存配置后全服广播、玩家主动请求。
+- **C2S `config_update`**：字段同上，客户端同样按 30000 字节/片发送（绕过原版 C2S 32768 字节硬限制）。
+- **`buildConfigJson`** 包含 `inUseMaps`（当前活跃对局的地图列表），客户端据此在配置界面阻止删除活跃地图并弹窗。
+- **服务端重组防护**（防 OOM/DoS）：
+  - `totalParts` 必须 ∈ [1, 64]，否则丢弃并 WARN；
+  - `partIndex` 必须在范围内，重复分片（位图去重）直接丢弃；
+  - 单玩家累积数据 > **2 MB** 时清空其重组状态并 WARN（合法上限 64 片 × 30KB ≈ 1.92MB，不会误伤）；
+  - 断线自动清理重组缓冲。
+- **重组完成后校验流程**：出生点非空、地图 ID 去重（新 ID 查重复）、活跃对局的地图禁删改 → 落盘（原子写）→ 全服广播新配置。
+- **开局时序**：`MatchManager.startMatch` 仅在初始化成功后才将玩家移出队列。
+
+### 4.1 客户端同步保护
+
+- 配置界面有未保存修改时，**阻断被动配置同步刷新**（防覆盖编辑内容）。
+- 保存前校验失败（出生点为空 / ID 重复）的地图拒绝落盘。
+- 旧 `maps.json` 的 `minPlayers` 自动迁移为 `minRedPlayers = minBluePlayers = minPlayers/2`（至少 1）；旧 `matchMode` 字段由 Gson 自动忽略。
+
+## 5. 对局生命周期
+
+```
+入队（mapId@mode 复合键，红/蓝偏好）
+  ──► 开局条件：红队列 ≥ minRedPlayers 且蓝队列 ≥ minBluePlayers
+  ──► 同图竞技/休闲队列先到先得；开局成功后 dissolveQueuesForMap 解散该图全部剩余队列并提示玩家
+  ──► startMatch（session.setCompetitive(queueMode)）
+        竞技：InventoryManager 存包清包 + 发 defaultGear + 商店可用 + 友伤启用
+        休闲：不动背包 + 不发装备 + 商店禁用 + 友伤禁用（同队伤害取消）
+  ──► 准备阶段（prepareTime）→ 计分/计时 → 结束
+        胜负：KILLS 先达 targetKills / TIMER 到 maxDuration 击杀多者
+        平局：tieRule = DRAW 直接结束 / OVERTIME 发起加时投票（全票通过延长）
+        结束：竞技恢复背包 + 传送原点；休闲仅传送原点；记录战绩（仅此时一次）
+  ──► 地图进入 cooldownSeconds 冷却
+```
+
+**快速匹配**：每秒尝试 → 优先搜未占用且不在冷却的地图直接开局 → 人数不足时与同模式地图队列合并（`tryStartWithOtherQueue`，合并后达两队最低人数之和即开）→ 超过 `quickTimeout` 秒进入补位。
+
+**补位**：加入同模式进行中对局（需 `reinforceable: true`），遵守队伍平衡，统一走 `MatchManager.registerAndSetupPlayer()`；CONDITIONAL 补到该队最低人数，ALWAYS 补到 `maxPlayers` 满员（无上限地图补所有可用玩家）。冷却中的地图被快速匹配过滤。
+
+**边界系统**：对局内玩家离开 `boundary` 矩形开始警告计时 → 超过 `boundaryWarningTime` 秒处决，对方队 + `boundaryPenaltyKills`，本人记惩罚死亡，计时重置。判定细节：坐标 floor 到方块后判定（站在边界方块上算界内）；某维 Min > Max 时自动交换；全 0 边界整体跳过。
+
+**重生**：对局未结束自动传回本队出生点（`dimension` 维度正确传送）。
+
+**计时器**：对局结束（含超时）需等待投票结果再终局，禁止重复调用 `handleTimerEnd`；投票超时/对局已结束时静默清理。踢人发起者有 `kickCooldownSeconds` 冷却。
+
+**观战者**：无队伍玩家的击杀不记录、不播报。
+
+## 6. 数据持久化与保护
+
+| 文件 | 内容 | 说明 |
+|---|---|---|
+| `config/cstmm/configs/maps.json` | 地图配置 | 原子写盘；单条坏数据仅跳过该条 |
+| `config/cstmm/configs/global.json` | 全局配置 | 原子写盘 |
+| `config/cstmm/data/profiles/` | 玩家战绩 | 原子写盘；**损坏档案不加载、不覆盖**，玩家进服收到聊天警告，管理员修复后重启生效 |
+| `config/cstmm/data/bags/<player_uuid>.json` | 对局背包快照（逐玩家一文件） | 原子写盘；已有未恢复快照绝不被覆盖；损坏文件不加载、不覆盖、不删除；恢复 = 清背包 → 恢复 → 成功才删快照（null 字段保护），失败保留可重试；旧版单文件 `bags.json` 启动时自动迁移并重命名为 `bags.json.migrated` |
+
+战绩只在**对局结束时**记录一次（防双重计分）；停服时统一保存（单点注册，不重复）。`getGlobalConfig()` 返回共享只读实例以减少开销。
+
+## 7. 管理员与调试命令
+
+| 命令 | 权限 | 说明 |
+|---|---|---|
+| `/cstmm match forceend <sessionId>` | OP≥2 | 强制结束指定对局；支持完整 UUID 或 `match list` 显示的 8 位短 ID（Tab 可补全，前缀歧义时会列出候选） |
+| `/cstmm config` | OP≥2 | 打开配置界面（唯一入口，匹配菜单不提供配置入口） |
+| `/cstmm reload` | OP≥2 | 从磁盘重新加载配置 |
+| `/cstmm data restore bags <玩家>` | OP≥2 | 恢复玩家全部已保存背包 |
+| `/cstmm data restore bags <玩家> <槽位>` | OP≥2 | 恢复指定槽位（0-40） |
+
+玩家可用命令见 [README.md](README.md)。
+
+## 8. 配置文件字段参考
+
+`maps.json`（数组，每项一张地图）：
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `id` | string | 必填 | 地图唯一 ID（不可重复） |
+| `displayName` | string | "" | 显示名 |
+| `enabled` | bool | true | 是否启用 |
+| `winCondition` | string | KILLS | `KILLS` / `TIMER` |
+| `targetKills` | int | 10 | 击杀目标 |
+| `maxDuration` | int | 1800 | 时限（秒，TIMER 用） |
+| `tieRule` | string | OVERTIME | `OVERTIME` / `DRAW` |
+| `minRedPlayers` / `minBluePlayers` | int | 1 / 1 | 两队各自最低人数（开局门槛 + CONDITIONAL 补位阈值） |
+| `maxRedPlayers` / `maxBluePlayers` | int | 0 | 最高人数，0 = 无上限 |
+| `cooldownSeconds` | int | 0 | 对局结束后的地图冷却 |
+| `reinforceable` | bool | false | 是否允许补位 |
+| `reinforcementMode` | string | CONDITIONAL | `CONDITIONAL` / `ALWAYS` |
+| `prepareTime` | int | 5 | 准备阶段秒数 |
+| `boundaryWarningTime` | int | 10 | 边界警告秒数 |
+| `boundaryPenaltyKills` | int | 5 | 越界处决惩罚击杀 |
+| `kickCooldownSeconds` | int | 60 | 踢人投票发起冷却 |
+| `dimension` | string | minecraft:overworld | 对局维度 ID（非法值回退主世界） |
+| `boundary` | object | 全 0 | 边界 `minX..maxZ` 六个 int |
+| `redSpawns` / `blueSpawns` | 数组 | [] | 出生点 `{"x","y","z"}`（保存校验非空） |
+| `shopItems` | 数组 | [] | 本图商品 `{"itemId","price","maxPurchase"}`（ShopItem 类保留在 GlobalConfig） |
+| `backgroundBase64` | string | "" | 卡片背景图（PNG 的 Base64） |
+
+`global.json`：`quickTimeout`（快速匹配超时秒数，唯一全局对局参数）、`defaultGear`（竞技默认装备 `{"slot","itemId"}`，slot ∈ head/chest/legs/feet）。
+
+## 9. 日志规范
+
+所有 LOGGER 消息统一 `[CSTMM - 模块名]` 前缀，例如：
+
+```
+[CSTMM - MatchManager] Started match on town with 8 players
+[CSTMM - ClientNetwork] Failed to parse config sync
+```
+
+模块名与类/职责对应：`Main`、`Network`、`ClientNetwork`、`Client`、`ConfigManager`、`MatchManager`、`QueueManager`、`VoteManager`、`InventoryManager`、`PlayerDataManager`、`EquipmentManager`、`EventListener`、`MatchScheduler`、`BlockPosAdapter`、`Commands`。
+
+## 10. 常见问题排查
+
+| 现象 | 原因与处理 |
+|---|---|
+| 进服提示"未与服务端握手成功" | 服务端未装本模组或两端版本不一致；核对 `gradle.properties` 的 `mod_version`（构建后部署两端）与 Fabric API 版本 |
+| 配置界面空白/地图列表空 | 配置同步未完成（等几秒）或分片失败，查看客户端 `[CSTMM - ClientNetwork]` 日志 |
+| 保存配置后部分地图消失 | 保存校验拒绝（出生点为空或 ID 重复），看服务端 `[CSTMM - ConfigManager]` WARN |
+| 保存配置时提示地图正在使用 | 该地图处于活跃对局中（`inUseMaps` 保护），先结束对局再改 |
+| 匹配一直不开局 | 检查地图 `minRedPlayers/minBluePlayers`、是否已有对局占用、`cooldownSeconds` 冷却 |
+| 商店显示"无法购买" | 仅竞技模式对局内可购买（BUY_ITEM 预检 + 发放双校验）；确认对局未 ENDED |
+| 玩家战绩丢失且提示档案损坏 | `profiles/` 下 JSON 损坏；按日志中的玩家 UUID 修复或删除该文件（删除后从零开始） |
+| 对局中玩家卡在边界外被反复处决 | 检查 `boundary` 是否配置正确；死亡重生会自动送回出生点 |
+| HUD 一直显示旧对局数据 | 客户端未收到 `inGame=false` 清除包或断线未重置；查看 `[CSTMM - ClientNetwork]` 日志 |
+| 客户端商店数据不刷新 | `shop_data` 缓存问题；ShopScreen 构造器会发 REQUEST_SHOP，检查服务端限频与 isCompetitive 校验 |
