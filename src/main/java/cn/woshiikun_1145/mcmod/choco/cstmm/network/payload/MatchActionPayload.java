@@ -45,6 +45,7 @@ public record MatchActionPayload(
         SELECT_TEAM,
         BUY_ITEM,
         REQUEST_PROFILE,  // 新增
-        REQUEST_SHOP      // 请求商店数据（按地图下发，末尾追加保持 ordinal 兼容）
+        REQUEST_SHOP,     // 请求商店数据（按地图下发，末尾追加保持 ordinal 兼容）
+        JOIN_QUICK        // 快速匹配：不再复用 JOIN_QUEUE + "quick" 伪地图 ID，避免与真实地图名冲突（末尾追加保持 ordinal 兼容）
     }
 }

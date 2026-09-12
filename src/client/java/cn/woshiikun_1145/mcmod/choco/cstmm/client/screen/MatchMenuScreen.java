@@ -14,10 +14,13 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.sound.PositionedSoundInstance;
 import net.minecraft.client.texture.NativeImage;
 import net.minecraft.client.texture.NativeImageBackedTexture;
+import net.minecraft.sound.SoundEvent;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.Util;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -26,6 +29,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 
 @Environment(EnvType.CLIENT)
 public class MatchMenuScreen extends Screen {
@@ -39,9 +43,15 @@ public class MatchMenuScreen extends Screen {
     private static final int CARDS_START_X = SIDEBAR_WIDTH + 30;
     private static final int CARDS_START_Y = HEADER_HEIGHT + 20;
 
+    /** 快速匹配卡片的本地标识：仅用于客户端卡片识别（内置背景图/走 JOIN_QUICK 专用动作），不作为地图 ID 外发 */
+    private static final String QUICK_CARD_ID = "quick";
+
     private final List<SidebarButton> sidebarButtons = new ArrayList<>();
     private int selectedTab = 0;
     private List<MapCardData> mapCards = new ArrayList<>();
+
+    /** 侧边栏橙色标记当前 Y（像素，浮点做滑动动画；目标为选中按钮实际索引位置） */
+    private float markerY;
 
     private int scrollOffset = 0;
 
@@ -49,6 +59,11 @@ public class MatchMenuScreen extends Screen {
     private String selectedMode = "COMPETITIVE";
     private ButtonWidget casualModeBtn;
     private ButtonWidget competitiveModeBtn;
+
+    // 关于页面按钮（仅 tab == 4 时可见）
+    private ButtonWidget repoBtn;
+    private ButtonWidget issueBtn;
+    private ButtonWidget secretBtn;
 
     public MatchMenuScreen() {
         super(Text.literal("匹配菜单"));
@@ -70,7 +85,7 @@ public class MatchMenuScreen extends Screen {
         mapCards.clear();
 
         // 快速匹配入口：独立队列，服务端自动搜索未占用地图开局，超时后补位
-        mapCards.add(new MapCardData("quick", "⚡ 快速匹配", "自动选择地图", ""));
+        mapCards.add(new MapCardData(QUICK_CARD_ID, "⚡ 快速匹配", "自动选择地图", ""));
 
         ConfigDataCache cache = ConfigDataCache.getInstance();
         List<MapConfig> maps = cache.getMaps();
@@ -101,9 +116,13 @@ public class MatchMenuScreen extends Screen {
                     Text.literal(btn.label),
                     button -> {
                         selectedTab = tabId;
-                        // 模式切换按钮仅在"匹配"页显示
+                        // 模式切换按钮仅在"匹配"页显示，关于页按钮仅在"关于"页显示
                         casualModeBtn.visible = tabId == 1;
                         competitiveModeBtn.visible = tabId == 1;
+                        boolean about = tabId == 4;
+                        repoBtn.visible = about;
+                        issueBtn.visible = about;
+                        secretBtn.visible = about;
                         if (tabId == 2) {
                             requestProfile();
                         }
@@ -130,6 +149,41 @@ public class MatchMenuScreen extends Screen {
         updateModeButtonMessages();
         casualModeBtn.visible = selectedTab == 1;
         competitiveModeBtn.visible = selectedTab == 1;
+
+        // 关于页面按钮：位于文字介绍下方（drawAbout 文字止于 contentY + 110 = 170）
+        int aboutBtnX = SIDEBAR_WIDTH + 20 + 20;
+        repoBtn = this.addDrawableChild(ButtonWidget.builder(
+                Text.literal("§9模组仓库"),
+                button -> openUrl("https://github.com/woshiikun1145/ChocolateServerTaCZMatchMod")
+        ).dimensions(aboutBtnX, 180, 190, 20).build());
+        issueBtn = this.addDrawableChild(ButtonWidget.builder(
+                Text.literal("§9报告问题"),
+                button -> openUrl("https://github.com/woshiikun1145/ChocolateServerTaCZMatchMod/issues")
+        ).dimensions(aboutBtnX, 206, 190, 20).build());
+        secretBtn = this.addDrawableChild(ButtonWidget.builder(
+                Text.literal("§4千万别点"),
+                button -> triggerSecretAction()
+        ).dimensions(aboutBtnX, 232, 190, 20).build());
+        boolean aboutVisible = selectedTab == 4;
+        repoBtn.visible = aboutVisible;
+        issueBtn.visible = aboutVisible;
+        secretBtn.visible = aboutVisible;
+
+        // 橙色标记初始化为当前选中按钮位置，避免打开界面时从顶部滑入
+        markerY = markerTargetY();
+    }
+
+    /** 侧边栏橙色标记的目标 Y：按选中 tab 对应按钮的实际索引定位（tab id ≠ 按钮索引） */
+    private float markerTargetY() {
+        return HEADER_HEIGHT + 10 + buttonIndexOf(selectedTab) * 34f;
+    }
+
+    /** tab id 对应的按钮索引（找不到按 0 处理） */
+    private int buttonIndexOf(int tabId) {
+        for (int i = 0; i < sidebarButtons.size(); i++) {
+            if (sidebarButtons.get(i).id == tabId) return i;
+        }
+        return 0;
     }
 
     /** 刷新模式按钮文案：选中项加 §a✔ 高亮，未选中置灰 */
@@ -171,8 +225,12 @@ public class MatchMenuScreen extends Screen {
         context.fill(0, HEADER_HEIGHT, SIDEBAR_WIDTH, screenHeight, 0xCC1A1A1A);
         context.fill(SIDEBAR_WIDTH, HEADER_HEIGHT, SIDEBAR_WIDTH + 1, screenHeight, 0x44FFFFFF);
 
-        int highlightY = HEADER_HEIGHT + 10 + selectedTab * 34;
-        context.fill(2, highlightY, 6, highlightY + 28, 0xFFFFAA00);
+        // 侧边栏橙色标记：按按钮实际索引定位（修复"关于"页黄条错位：tab id 4 ≠ 按钮索引 3），
+        // 切换时向目标位置滑动而非直接跳变
+        float markerTarget = markerTargetY();
+        markerY += (markerTarget - markerY) * Math.min(1f, delta * 0.25f);
+        int markerTop = Math.round(markerY);
+        context.fill(2, markerTop, 6, markerTop + 28, 0xFFFFAA00);
 
         int contentX = SIDEBAR_WIDTH + 20;
         int contentY = HEADER_HEIGHT + 10;
@@ -240,7 +298,7 @@ public class MatchMenuScreen extends Screen {
             // 卡片背景：等比裁剪铺满（cover）；快速匹配用内置 quick.png，其余用配置的 Base64 图，均无则纯色兜底
             int bgX = cardX + 2, bgY = cardY + 2;
             int bgW = CARD_WIDTH - 4, bgH = CARD_HEIGHT - 4;
-            CardTexture tex = "quick".equals(card.id) ? getQuickCardTexture()
+            CardTexture tex = QUICK_CARD_ID.equals(card.id) ? getQuickCardTexture()
                     : decodeBase64Texture(card.backgroundBase64);
             if (tex != null) {
                 // 与外层内容区裁剪求交集后再裁剪，保证滚动出可视区的卡片不会画到内容区外
@@ -334,9 +392,12 @@ public class MatchMenuScreen extends Screen {
             return;
         }
         // 第 4 个字段携带匹配模式（COMPETITIVE/CASUAL），服务端按模式分队列
+        boolean quick = QUICK_CARD_ID.equals(mapId);
+        // 快速匹配走专用 JOIN_QUICK 动作，不再以 "quick" 伪地图 ID 复用 JOIN_QUEUE，
+        // 消除与真实地图 ID "quick" 的冲突
         MatchActionPayload payload = new MatchActionPayload(
-                MatchActionPayload.ActionType.JOIN_QUEUE,
-                mapId,
+                quick ? MatchActionPayload.ActionType.JOIN_QUICK : MatchActionPayload.ActionType.JOIN_QUEUE,
+                quick ? "" : mapId,
                 0,
                 selectedMode
         );
@@ -344,7 +405,7 @@ public class MatchMenuScreen extends Screen {
         close();
         if (MinecraftClient.getInstance().player != null) {
             String modeName = "COMPETITIVE".equals(selectedMode) ? "竞技模式" : "休闲模式";
-            String message = "quick".equals(mapId)
+            String message = quick
                     ? "§a已加入快速匹配队列（" + modeName + "），系统将自动分配地图..."
                     : "§a已加入 " + mapId + "（" + modeName + "）队列，等待匹配...";
             MinecraftClient.getInstance().player.sendMessage(Text.literal(message), false);
@@ -386,6 +447,38 @@ public class MatchMenuScreen extends Screen {
         context.drawText(textRenderer, "§7版本: " + ClientHandshakeState.getClientVersion(), x + 20, y + 70, 0xAAAAAA, true);
         context.drawText(textRenderer, "§7作者: woshiikun_1145", x + 20, y + 90, 0xAAAAAA, true);
         context.drawText(textRenderer, "§7为 Chocolate Server TaCZ 子服设计", x + 20, y + 110, 0xAAAAAA, true);
+        // 按钮位于文字下方（见 init 中 aboutBtnX/y 布局）
+    }
+
+    // ==================== 关于页面按钮行为 ====================
+
+    private void openUrl(String url) {
+        Util.getOperatingSystem().open(url);
+    }
+
+    /** 播放模组内置音效（assets/cstmm/sound/<name>.ogg，经 sounds.json 注册） */
+    private void playModSound(String name) {
+        MinecraftClient.getInstance().getSoundManager().play(
+                PositionedSoundInstance.master(SoundEvent.of(Identifier.of("cstmm", name)), 1.0f));
+    }
+
+    /** 以玩家本人身份发送聊天消息（等效于玩家在聊天栏主动发送） */
+    static void sendChatMessage(String message) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player != null && client.getNetworkHandler() != null) {
+            client.getNetworkHandler().sendChatMessage(message);
+        }
+    }
+
+    /** "千万别点"：五选一随机行为（B 站视频 / otto / 遗言崩溃 / 警报音 / 猫娘发言） */
+    private void triggerSecretAction() {
+        switch (ThreadLocalRandom.current().nextInt(5)) {
+            case 0 -> openUrl("https://www.bilibili.com/video/BV1GJ411x7h7");
+            case 1 -> playModSound("otto");
+            case 2 -> MinecraftClient.getInstance().setScreen(new LastWordsScreen());
+            case 3 -> playModSound("wt_rwr");
+            default -> sendChatMessage("我是小猫娘喵~");
+        }
     }
 
     @Override

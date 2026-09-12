@@ -153,11 +153,8 @@ public class QueueManager implements QueueApi {
             return;
         }
 
-        // 快速匹配是伪地图入口，必须在地图配置校验之前处理
-        if (QUICK_MAP_ID.equals(mapId)) {
-            joinQuickQueue(player, queueMode);
-            return;
-        }
+        // 快速匹配走专用 JOIN_QUICK 动作（joinQuickQueue），
+        // 此处 mapId 一律视为真实地图 ID，不再对 "quick" 字符串做特殊处理
 
         MapConfig config = ConfigManager.getInstance().getMap(mapId);
         if (config == null || !config.isEnabled()) {
@@ -202,9 +199,10 @@ public class QueueManager implements QueueApi {
             return;
         }
 
-        // 快速匹配条目同时存在于快速队列和 playerQueueMap，必须一并清理，
-        // 否则快速队列中会残留幽灵条目，断线/退出后仍被匹配拉走
-        if (QUICK_MAP_ID.equals(entry.mapId)) {
+        // 快速匹配条目（team == -1 标记）同时存在于快速队列和 playerQueueMap，必须一并清理，
+        // 否则快速队列中会残留幽灵条目，断线/退出后仍被匹配拉走。
+        // 用 team 标记而非 mapId 字符串判断，真实地图 ID 恰为 "quick" 时不会被误判
+        if (entry.team == -1) {
             engine.removeFromQuickQueues(uuid);
             player.sendMessage(Text.literal("§e你已离开快速匹配队列！"), false);
             return;
@@ -219,7 +217,8 @@ public class QueueManager implements QueueApi {
         Cstmm.LOGGER.debug("[CSTMM - QueueManager] {} left queue", player.getName());
     }
 
-    private void joinQuickQueue(ServerPlayerEntity player, String mode) {
+    /** 加入快速匹配队列（网络入口 JOIN_QUICK；mode 空/非法按竞技兜底） */
+    public void joinQuickQueue(ServerPlayerEntity player, String mode) {
         UUID uuid = player.getUuid();
 
         if (engine.quickQueueContains(mode, uuid)) {

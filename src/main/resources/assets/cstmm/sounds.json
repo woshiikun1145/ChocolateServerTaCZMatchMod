@@ -1,0 +1,18 @@
+{
+  "otto": {
+    "sounds": [
+      {
+        "name": "cstmm:otto",
+        "stream": false
+      }
+    ]
+  },
+  "wt_rwr": {
+    "sounds": [
+      {
+        "name": "cstmm:wt_rwr",
+        "stream": false
+      }
+    ]
+  }
+}

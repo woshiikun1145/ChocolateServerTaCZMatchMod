@@ -149,6 +149,11 @@ public class NetworkHandler {
                 // 空/非法值由 QueueManager 按竞技模式兜底
                 QueueManager.getInstance().joinQueue(player, mapId, team, payload.target());
             }
+            case JOIN_QUICK -> {
+                // 快速匹配专用动作：不再以 "quick" 伪地图 ID 复用 JOIN_QUEUE，
+                // 消除与真实地图 ID "quick" 的冲突；模式仍在 target 字段传递
+                QueueManager.getInstance().joinQuickQueue(player, payload.target());
+            }
             case LEAVE_QUEUE -> QueueManager.getInstance().leaveQueue(player);
             case VOTE_YES -> VoteManager.getInstance().handleVote(player, true);
             case VOTE_NO -> VoteManager.getInstance().handleVote(player, false);

@@ -140,11 +140,13 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 | 字段 | 编码 | 上限 | 语义 |
 |---|---|---|---|
 | `action` | enum ordinal | — | 见下表，**只能在末尾追加** |
-| `mapName` | string | 64B | JOIN_QUEUE：地图 ID 或 `quick`；BUY_ITEM：**商品下标的十进制字符串**（复用字段省一个包） |
+| `mapName` | string | 64B | JOIN_QUEUE：地图 ID（**不再接受 `quick` 伪地图 ID**）；BUY_ITEM：**商品下标的十进制字符串**（复用字段省一个包） |
 | `team` | int(4B) | — | JOIN_QUEUE：1 红/2 蓝/其他=自动（服务端把非 1/2 归一为 0，防客户端注入任意整数）；BUY_ITEM：忽略 |
-| `target` | string | 64B | JOIN_QUEUE：模式 `COMPETITIVE`/`CASUAL`（空/非法按竞技兜底）；其余动作空闲 |
+| `target` | string | 64B | JOIN_QUEUE / JOIN_QUICK：模式 `COMPETITIVE`/`CASUAL`（空/非法按竞技兜底）；其余动作空闲 |
 
-`ActionType` ordinal 表：`JOIN_QUEUE=0, LEAVE_QUEUE=1, VOTE_YES=2, VOTE_NO=3, VOTE_OVERTIME=4, SELECT_TEAM=5, BUY_ITEM=6, REQUEST_PROFILE=7, REQUEST_SHOP=8`
+`ActionType` ordinal 表：`JOIN_QUEUE=0, LEAVE_QUEUE=1, VOTE_YES=2, VOTE_NO=3, VOTE_OVERTIME=4, SELECT_TEAM=5, BUY_ITEM=6, REQUEST_PROFILE=7, REQUEST_SHOP=8, JOIN_QUICK=9`
+
+> 快速匹配走专用 `JOIN_QUICK` 动作，不再以 `"quick"` 伪地图 ID 复用 `JOIN_QUEUE`（否则真实地图 ID 恰为 `quick` 时会被劫持进快速队列）。
 
 **`cstmm:hud_data`（S2C）**：`string mapName(64B，发送前 truncate)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame`。结束时发 `inGame=false` 清除包。
 

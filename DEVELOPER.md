@@ -109,8 +109,9 @@
 **match_action**（C2S）：`enum action` + `string mapName(64B)` + `int team` + `string target(64B)`
 
 - `ActionType` 枚举（ordinal 序列化，**只能在末尾追加**）：
-  `JOIN_QUEUE, LEAVE_QUEUE, VOTE_YES, VOTE_NO, VOTE_OVERTIME, SELECT_TEAM, BUY_ITEM, REQUEST_PROFILE, REQUEST_SHOP`
-- `JOIN_QUEUE`：mapName=地图 ID 或 `quick`；team=队伍偏好（1 红 / 2 蓝 / 其他=自动）；**target=模式**（`COMPETITIVE`/`CASUAL`，空或非法按竞技兜底）
+  `JOIN_QUEUE, LEAVE_QUEUE, VOTE_YES, VOTE_NO, VOTE_OVERTIME, SELECT_TEAM, BUY_ITEM, REQUEST_PROFILE, REQUEST_SHOP, JOIN_QUICK`
+- `JOIN_QUEUE`：mapName=地图 ID（**不再接受 `quick` 伪地图 ID**，与真实地图名冲突已修复）；team=队伍偏好（1 红 / 2 蓝 / 其他=自动）；**target=模式**（`COMPETITIVE`/`CASUAL`，空或非法按竞技兜底）
+- `JOIN_QUICK`：快速匹配专用动作，mapName/team 空闲，**target=模式**（同上规则）；进入按模式独立的快速匹配队列
 - `BUY_ITEM`：mapName 空闲，team=商品下标
 - `REQUEST_SHOP`：请求当前可购买的商品数据
 

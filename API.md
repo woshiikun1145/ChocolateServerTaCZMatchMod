@@ -141,7 +141,7 @@ private static int matchStatus(CommandContext<ServerCommandSource> ctx) {
 
 ```java
 record QueueStatus(
-        String mapName,        // 地图 ID；快速匹配入口为 "quick"
+        String mapName,        // 地图 ID；末尾伪条目为 "quick"（快速匹配队列合计）
         int redCount,          // 红队排队人数（两种模式合计）
         int blueCount,         // 蓝队排队人数（两种模式合计）
         boolean isMapAvailable // 地图是否启用（quick 入口恒为 true）
@@ -157,10 +157,9 @@ record QueueStatus(
 
 1. 玩家不在线 → 静默返回（无任何效果）。
 2. 玩家已在队列或对局中 → 玩家收到聊天提示 `§c你已在队列或游戏中！...`，不入队。
-3. `mapName` 为 `"quick"` → 进入**快速匹配队列**（无队伍概念）。
-4. 地图不存在或未启用 → 提示 `§c该地图未启用或不存在！`。
-5. `team` 为偏好值（1=红 2=蓝，其他值也接受但按平衡规则分配）；红蓝人数相等时**随机分配**；某队满员（`maxRedPlayers/maxBluePlayers`）时强制进另一队；**两队均满员** → 提示 `§c该地图两队均已满员！`，不入队。
-6. 成功入队后无返回值，玩家收到确认提示。
+3. 地图不存在或未启用 → 提示 `§c该地图未启用或不存在！`（`"quick"` 不再是特殊值——快速匹配走专用 `JOIN_QUICK` 网络动作或 `QueueManager.joinQuickQueue(player, mode)`，此处一律视为真实地图 ID）。
+4. `team` 为偏好值（1=红 2=蓝，其他值也接受但按平衡规则分配）；红蓝人数相等时**随机分配**；某队满员（`maxRedPlayers/maxBluePlayers`）时强制进另一队；**两队均满员** → 提示 `§c该地图两队均已满员！`，不入队。
+5. 成功入队后无返回值，玩家收到确认提示。
 
 > ⚠️ 方法无返回值，调用方无法直接判断是否入队成功；入队结果可随后用 `isInQueue` 复查，或监听玩家的聊天提示。
 
