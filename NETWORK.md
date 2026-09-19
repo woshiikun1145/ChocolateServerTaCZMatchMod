@@ -35,8 +35,8 @@ CSTMM 网络层基于 **Fabric Networking API v1**（`fabric-networking-api-v1`�
 │  [客户端侧]                                  [服务端侧]                                │
 │  CstmmClient                                 Cstmm                                    │
 │    └─ ClientNetworkHandler.register()          └─ NetworkHandler.register()           │
-│         │  S2C 接收器 ×7                           │  Codec 注册（S2C×7 + C2S×4）      │
-│         │  ClientPlayConnectionEvents              │  C2S 接收器 ×4                   │
+│         │  S2C 接收器 ×11                          │  Codec 注册（S2C×11 + C2S×7）     │
+│         │  ClientPlayConnectionEvents              │  C2S 接收器 ×7                   │
 │         │  ClientTickEvents（握手超时）             │  ServerPlayConnectionEvents      │
 │         └─ 发送：ClientPlayNetworking.send         └─ 发送：ServerPlayNetworking.send  │
 │                                                                                       │
@@ -71,8 +71,8 @@ CSTMM 网络层基于 **Fabric Networking API v1**（`fabric-networking-api-v1`�
 
 | 侧 | 注册 |
 |---|---|
-| `playS2C()` ×7 | `hud_data` `match_status` `config_sync` `open_config_screen` `player_profile` `handshake_s2c` `shop_data` |
-| `playC2S()` ×4 | `match_action` `config_update` `request_config_sync` `handshake_c2s` |
+| `playS2C()` ×11 | `hud_data` `match_status` `config_sync` `open_config_screen` `player_profile` `handshake_s2c` `shop_data` `clan_data` `queue_status` `popup` `badge` |
+| `playC2S()` ×7 | `match_action` `config_update` `request_config_sync` `handshake_c2s` `clan_action` `request_queue_status` `request_badge` |
 
 **接收器注册**（只需数据流向的接收侧）：
 
@@ -82,7 +82,10 @@ CSTMM 网络层基于 **Fabric Networking API v1**（`fabric-networking-api-v1`�
 | `config_update` | C2S | 服务端 `handleConfigUpdatePart` | 同上 |
 | `request_config_sync` | C2S | 服务端（限频后回发） | 同上 |
 | `handshake_c2s` | C2S | 服务端（清理重试记录） | 同上 |
-| 其余 7 个 S2C 包 | S2C | 客户端各接收器 | `context.client().execute()` → 客户端主线程 |
+| `clan_action` | C2S | 服务端 `handleClanActionMaybeChunked`（徽标分片重组后进 `handleClanAction`） | 同上 |
+| `request_queue_status` | C2S | 服务端（订阅集增删 + 立即回发快照） | 同上 |
+| `request_badge` | C2S | 服务端（badgeId 反查战队补发全部分片） | 同上 |
+| 其余 11 个 S2C 包 | S2C | 客户端各接收器（`ClientNetworkHandler`） | `context.client().execute()` → 客户端主线程 |
 
 ### 3.2 线程模型（重要）
 
@@ -98,7 +101,7 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 | 事件 | 服务端动作 | 客户端动作 |
 |---|---|---|
 | JOIN | 发首个握手请求，登记 `pendingHandshakes[uuid]=0` | `ClientHandshakeState.onJoin()` 重置握手状态；配置/履历同步由 EventListener 的 JOIN 逻辑触发 |
-| DISCONNECT | 清空该玩家的配置重组缓冲 + 限频窗口（`clearPendingConfigUpdate` / `syncRequestWindows.remove`） | 重置握手状态、`HudOverlay.reset()`、清空 `ConfigDataCache`/`ShopDataCache`（防跨服残留） |
+| DISCONNECT | 清空该玩家的配置重组缓冲 + 限频窗口 + 队列状态订阅 + 徽标上传缓冲/已发集合（`clearPendingConfigUpdate` / `syncRequestWindows.remove` / `queueStatusSubscribers.remove` / `pendingBadgeUploads.remove` / `sentBadges.remove`） | 重置握手状态、`HudOverlay.reset()`、清空 `ConfigDataCache`/`ShopDataCache`/`ClanCache`/`QueueStatusCache`/`BadgeCache`（防跨服残留） |
 
 ## 4. 线路格式基础（wire format）
 
@@ -126,12 +129,19 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 | `cstmm:config_sync` | S2C | 加入 / OP 保存后全服广播 / 玩家请求 | 每次同步 N 片 |
 | `cstmm:config_update` | C2S | OP 在配置界面点保存 | 每次提交 N 片 |
 | `cstmm:request_config_sync` | C2S | 打开配置界面 / 点"重新加载" | 限频 2 次/秒/人 |
-| `cstmm:match_action` | C2S | 入队/退队/投票/购买/请求履历/请求商店 | 玩家操作驱动 |
+| `cstmm:match_action` | C2S | 入队/快速匹配/退队/投票/购买/请求履历/请求商店 | 玩家操作驱动 |
 | `cstmm:match_status` | S2C | 对局状态消息广播 | 事件驱动 |
 | `cstmm:hud_data` | S2C | 对局期间每秒推送（含结束清除包） | 1 次/秒/人 |
 | `cstmm:player_profile` | S2C | 加入时自动 + 玩家请求履历 | 低频 |
 | `cstmm:open_config_screen` | S2C | 服务端要求打开 OP 配置界面 | 空包 |
 | `cstmm:shop_data` | S2C | 响应 REQUEST_SHOP | 低频 |
+| `cstmm:clan_action` | C2S | 战队操作（创建/加入/退出/解散/转让/踢人/编辑/查询） | 玩家操作驱动 |
+| `cstmm:clan_data` | S2C | 战队数据（MINE/LIST/DETAIL JSON 快照） | 页面打开/搜索 + 战队变化时推送给全体成员 |
+| `cstmm:request_queue_status` | C2S | 队列状态订阅开关（打开匹配主菜单订阅、关闭菜单退订） | 菜单打开/关闭时 |
+| `cstmm:queue_status` | S2C | 队列状态快照（own/clan/maps JSON，蓝红人数/玩家列表按模式拆分） | 订阅后队列变化时推送 |
+| `cstmm:popup` | S2C | 弹窗通知（当前界面内弹对话框，无界面回退聊天：配置已保存/战队加入结果/重复入队拒绝等） | 事件驱动 |
+| `cstmm:badge` | S2C | 战队徽标分片下发（badgeId 内容寻址，每片 ≤30000 字符） | MINE/DETAIL 发送前（同一徽标每人只发一次）+ 缺失补发 |
+| `cstmm:request_badge` | C2S | 徽标缓存缺失请求（客户端收 MINE/DETAIL 后本地无该 badgeId 时请求补发） | 极低频 |
 
 ### 5.2 逐包字段表
 
@@ -155,6 +165,21 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 **`cstmm:config_sync` / `cstmm:config_update`（分片包，两端字段相同）**：`varInt partIndex` + `varInt totalParts` + `string data(32767B)`，`data` 实际每片 ≤ 30000 字节。
 
 **`cstmm:player_profile`（S2C）**：`string jsonData(65536B)`。服务端发送前检查：JSON 的 UTF-8 字节数 **≥ 65536 时跳过发送**并 WARN（不截断——履历截断会造成数据失真，宁可不发）。
+
+**`cstmm:clan_action`（C2S）**：`enum action（REQUEST_LIST/REQUEST_DETAIL/REQUEST_MINE/CREATE/JOIN/LEAVE/DISBAND/TRANSFER/KICK/EDIT，ordinal 末尾追加）` + `string text1(192B)` + `string text2(16B)` + `string badge(30000B)` + `int number` + `varInt badgePartIndex` + `varInt badgeTotalParts`。字段按动作复用：CREATE/EDIT=text1名称/text2缩写/badge徽标分片/number成员上限；JOIN、REQUEST_DETAIL=text1战队名；TRANSFER/KICK=text1目标玩家名；REQUEST_LIST=text1搜索词（空=随机10条）；其余空闲。
+**徽标分片上传**：badge ≤30000 字符时单包直发（badgePartIndex=0/totalParts=1）；更大时客户端拆成 N 片逐包发送（每片 ≤30000），服务端重组缓冲集齐后拼接执行动作（**只有最后一片触发**）。服务端防护：totalParts ∈ [1,64]、partIndex 越界拒绝、累计 ≤1.92M 字符、新序列（partIndex=0 或元数据不匹配）覆盖旧缓冲、断线清理。
+
+**`cstmm:badge`（S2C）**：`string badgeId(16B)` + `varInt partIndex` + `varInt totalParts` + `string data(30000B)`。badgeId = 完整徽标 base64 的 SHA-256 前 8 字节 hex（内容寻址，相同徽标跨玩家/战队复用缓存）；totalParts ∈ [1,128]。**触发时机**：发送携带徽标的 MINE/DETAIL JSON **之前**（TCP 保序保证客户端重组完成后再收到引用）；per-player 已发集合去重（同一 badgeId 只发一次），客户端缺失时经 `cstmm:request_badge` 请求全量补发。
+
+**`cstmm:request_badge`（C2S）**：`string badgeId(16B)`——服务端按 badgeId 反查战队（SHA-256 惰性计算，edit 徽标后 id 自动变化），重新下发全部分片；查不到静默忽略。
+
+**`cstmm:clan_data`（S2C）**：`string kind(16B)` + `string json(65536B)`。kind=MINE：`{"inClan":bool,"clan":{name,abbr,badge,leaderName,memberCount,limit,members:[{name,isLeader,online,matchState}]}}`（**badge 字段 = badgeId 内容寻址 id（16 字符 hex），非完整 base64**；matchState=""=空闲，否则"地图显示名-模式名"）；kind=LIST：`{"clans":[{name,abbr,leaderName,memberCount,limit}]}`（行内无徽标）；kind=DETAIL：`{"found":bool,"clan":{...同上}}`。客户端收到 MINE/DETAIL 后本地徽标缓存缺失 → 自动发 `request_badge`。
+
+**`cstmm:request_queue_status`（C2S）**：`bool subscribe`——true=加入队列状态订阅集并立即回发一次快照；false=退订。**事件驱动**：队列变化（加入/退出/开局/解散/补位）时服务端主动向订阅者推送，无轮询、无限频。
+
+**`cstmm:queue_status`（S2C）**：`string json(65536B)` = `{own:{inQueue,map,mapId,mode,matched,needed}, clan:{inClan,name,abbr,count,members:[{map,player}]}, maps:[{id,status,modes:[{mode,red,blue,players}]}]}`。status ∈ AVAILABLE/IN_MATCH/DISABLED/COOLDOWN；蓝红人数与玩家列表按"竞技"/"休闲"两模式分别下发（客户端每 3 秒轮换展示，地图名/类型/图片由客户端按 id 从配置缓存解析）。
+
+**`cstmm:popup`（S2C）**：`string message(256B)`——客户端在当前界面内弹对话框（MatchMenuScreen/ConfigScreen），无界面回退聊天栏。
 
 **`cstmm:shop_data`（S2C）**：`bool eligible` + `varInt itemCount` + 循环 `{string itemId(256B) + varInt price + varInt maxPurchase}`。解码端 `count = max(0, readVarInt)` 防负数，`create` 静态工厂保证 itemCount 与列表长度一致。
 

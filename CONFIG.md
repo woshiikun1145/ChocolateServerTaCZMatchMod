@@ -115,7 +115,7 @@
 
 ## 4. 商店物品配置
 
-商店按**地图**独立配置：玩家只有在对局中打开商店（U 键）时，加载所在地图的商品。
+商店按**地图**独立配置：玩家只有在对局中打开商店（' 键）时，加载所在地图的商品。
 
 | 列 | 说明 |
 |---|---|
@@ -134,7 +134,7 @@
 | 字段 | 说明 |
 |---|---|
 | **快速超时(秒)** | 快速匹配队列等待超过该秒数后进入补位流程 |
-| **默认装备** | 竞技模式开局发放的装备（清空背包后发放）。槽位 ID 参考 `/item replace entity` 的 `<slot>` 参数：`weapon.mainhand`、`armor.head`、`container.0`~`container.35` 等；非法槽位保存时会弹窗报错 |
+| **默认装备** | 竞技模式开局发放的装备（清空背包后发放）。槽位 ID 参考 `/item replace entity` 的 `<slot>` 参数，当前允许：`armor.head`/`armor.chest`/`armor.legs`/`armor.feet`/`armor.body`、`container.0`~`container.35`；其余槽位（如 `weapon.mainhand`）保存时会弹窗报错 |
 
 ---
 
