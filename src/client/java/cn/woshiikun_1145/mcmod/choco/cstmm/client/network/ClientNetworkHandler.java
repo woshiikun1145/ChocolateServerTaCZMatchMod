@@ -10,6 +10,7 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ShopDataCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.hud.HudOverlay;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.ConfigScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.MatchMenuScreen;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.PopupScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.ShopScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.GlobalConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
@@ -146,15 +147,17 @@ public class ClientNetworkHandler {
                 BadgeCache.apply(payload)
         ));
 
-        // ========== 弹窗通知接收（当前界面内弹出，无界面回退聊天栏） ==========
+        // ========== 弹窗通知接收（匹配菜单/配置界面内嵌弹窗，其他情况全局弹窗界面承载） ==========
         ClientPlayNetworking.registerGlobalReceiver(PopupPayload.ID, (payload, context) -> context.client().execute(() -> {
             MinecraftClient client = context.client();
             if (client.currentScreen instanceof MatchMenuScreen screen) {
                 screen.showPopup(payload.message());
             } else if (client.currentScreen instanceof ConfigScreen screen) {
                 screen.showPopup(payload.message());
-            } else if (client.player != null) {
-                client.player.sendMessage(Text.literal(payload.message()), false);
+            } else {
+                // 其他界面/无界面（如关掉菜单后在游戏中）：用全局弹窗界面承载，
+                // 确定后返回原界面——不再回退聊天栏（聊天显示丢失弹窗语义且易被刷屏冲走）
+                client.setScreen(new PopupScreen(payload.message(), client.currentScreen));
             }
         }));
 
