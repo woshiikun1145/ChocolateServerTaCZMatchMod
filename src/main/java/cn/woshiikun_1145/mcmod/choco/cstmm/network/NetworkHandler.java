@@ -405,10 +405,11 @@ public class NetworkHandler {
     }
 
     /**
-     * 按消息前缀分发：ClanManager 返回 "POPUP:" 前缀的消息走弹窗（如"已在战队"类提示），
-     * 其余走聊天栏。
+     * 按消息前缀分发：携带 "POPUP:" 前缀的消息走弹窗（如"已在战队"、重复入队类提示），
+     * 其余走聊天栏。服务端任意模块需要"按内容路由弹窗/聊天"时统一调用本方法——
+     * 直接 player.sendMessage 会把 "POPUP:" 前缀原样发给客户端聊天栏。
      */
-    private static void deliverMessage(ServerPlayerEntity player, String message) {
+    public static void deliverMessage(ServerPlayerEntity player, String message) {
         if (message != null && message.startsWith("POPUP:")) {
             sendPopup(player, message.substring(6));
         } else {

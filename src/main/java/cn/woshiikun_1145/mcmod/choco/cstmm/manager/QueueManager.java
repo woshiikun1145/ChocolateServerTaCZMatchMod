@@ -150,7 +150,8 @@ public class QueueManager implements QueueApi {
         String queueMode = normalizeMode(mode);
 
         if (playerQueueMap.containsKey(uuid)) {
-            player.sendMessage(Text.literal("POPUP:§c你已在队列或游戏中！使用 /cstmm match leave 离开"), false);
+            // 必须走 deliverMessage 分发：直接 sendMessage 会把 "POPUP:" 前缀原样打进聊天栏
+            NetworkHandler.deliverMessage(player, "POPUP:§c你已在队列或游戏中！使用 /cstmm match leave 离开");
             return;
         }
         if (MatchManager.getInstance().isInGame(uuid)) {
@@ -233,7 +234,8 @@ public class QueueManager implements QueueApi {
         // 缺少此拦截会导致：playerQueueMap 条目被覆盖为快速匹配，而地图队列名单仍残留该玩家，
         // 同一个人被两路队列各计一次（双倍计数），甚至可能被两边先后拉进对局
         if (playerQueueMap.containsKey(uuid)) {
-            player.sendMessage(Text.literal("POPUP:§c你已在队列或游戏中！使用 /cstmm match leave 离开"), false);
+            // 必须走 deliverMessage 分发：直接 sendMessage 会把 "POPUP:" 前缀原样打进聊天栏
+            NetworkHandler.deliverMessage(player, "POPUP:§c你已在队列或游戏中！使用 /cstmm match leave 离开");
             return;
         }
         if (MatchManager.getInstance().isInGame(uuid)) {
