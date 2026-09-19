@@ -1,6 +1,7 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm.manager;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
+import cn.woshiikun_1145.mcmod.choco.cstmm.data.Clan;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.GlobalConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.MatchSession;
@@ -9,8 +10,10 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -55,6 +58,11 @@ final class QuickMatchEngine {
 
     int getQuickQueueSize() {
         return quickQueues.values().stream().mapToInt(List::size).sum();
+    }
+
+    /** 指定模式的快速队列人数 */
+    int quickQueueSizeOf(String mode) {
+        return quickQueueOf(mode).size();
     }
 
     // ==================== 快速匹配（按模式独立） ====================
@@ -276,10 +284,22 @@ final class QuickMatchEngine {
             ServerPlayerEntity player = world.getServer().getPlayerManager().getPlayer(uuid);
             if (player == null) continue;
 
-            // 队伍平衡原则：两队均可补时优先补人少的一队
+            // 队伍平衡原则：两队均可补时优先补人少的一队；
+            // 战队偏好（尽量）：补进已有同战队成员的一队
             boolean toRed;
             if (redNeed > 0 && blueNeed > 0) {
-                toRed = session.getRedPlayers().size() <= session.getBluePlayers().size();
+                Clan clan = ClanManager.getInstance().getClanByPlayer(player.getUuid());
+                if (clan != null) {
+                    boolean redHas = hasClanUuids(session.getRedPlayers(), clan);
+                    boolean blueHas = hasClanUuids(session.getBluePlayers(), clan);
+                    if (redHas != blueHas) {
+                        toRed = redHas;
+                    } else {
+                        toRed = session.getRedPlayers().size() <= session.getBluePlayers().size();
+                    }
+                } else {
+                    toRed = session.getRedPlayers().size() <= session.getBluePlayers().size();
+                }
             } else {
                 toRed = redNeed > 0;
             }
@@ -304,6 +324,7 @@ final class QuickMatchEngine {
         if (assigned > 0) {
             Cstmm.LOGGER.info("[CSTMM - QueueManager] Reinforced {} players into {} ({})",
                     assigned, config.getId(), session.getSessionId());
+            qm.onQueueChanged();
             return true;
         }
         return false;
@@ -334,23 +355,30 @@ final class QuickMatchEngine {
         List<ServerPlayerEntity> bluePlayers = new ArrayList<>();
         List<ServerPlayerEntity> overflow = new ArrayList<>();
 
-        // 先解析在线玩家，开局成功后才移出队列，避免开局失败导致玩家凭空脱离队列。
-        // 分队顺序：先保证两队各自达到最低人数，再按人数平衡分配（遵守 maxRed/maxBlue 上限）
-        for (UUID uuid : players) {
-            ServerPlayerEntity player = world.getServer().getPlayerManager().getPlayer(uuid);
-            if (player == null) continue;
+        // 战队聚组：同战队成员相邻（组间按大小降序，无战队在后），配合战队优先分队让同战队尽量同队
+        List<ServerPlayerEntity> ordered = clanGroupedOrder(onlinePlayers(players, world));
 
+        // 分队顺序：战队优先（同战队进已有同战队成员的一队）→ 人数平衡分配（遵守 maxRed/maxBlue 上限）；
+        // 分完后再修正两队最低人数（见 fixMinPlayers）
+        for (ServerPlayerEntity player : ordered) {
             boolean toRed;
             if (redPlayers.size() >= redMax) {
                 toRed = false;
             } else if (bluePlayers.size() >= blueMax) {
                 toRed = true;
-            } else if (redPlayers.size() < minRed) {
-                toRed = true;
-            } else if (bluePlayers.size() < minBlue) {
-                toRed = false;
             } else {
-                toRed = redPlayers.size() <= bluePlayers.size();
+                Clan clan = ClanManager.getInstance().getClanByPlayer(player.getUuid());
+                if (clan != null) {
+                    boolean redHas = hasClanPlayers(redPlayers, clan);
+                    boolean blueHas = hasClanPlayers(bluePlayers, clan);
+                    if (redHas != blueHas) {
+                        toRed = redHas;
+                    } else {
+                        toRed = redPlayers.size() <= bluePlayers.size();
+                    }
+                } else {
+                    toRed = redPlayers.size() <= bluePlayers.size();
+                }
             }
 
             if (toRed && redPlayers.size() < redMax) {
@@ -361,6 +389,9 @@ final class QuickMatchEngine {
                 overflow.add(player);
             }
         }
+
+        // 战队聚组可能破坏两队最低人数：在两队间移动成员修正（尽量挑不拆散战队的成员）
+        fixMinPlayers(redPlayers, bluePlayers, minRed, minBlue, redMax, blueMax);
 
         // 溢出玩家尝试塞进对方队伍，塞不下则留在队列中等待下一轮
         for (ServerPlayerEntity player : overflow) {
@@ -417,6 +448,92 @@ final class QuickMatchEngine {
         // 所有地图都在使用或开局失败 → 按补位规则补位（限定同模式对局）；
         // 无法补位时玩家留在队列中等待下一轮超时重试（不发送误导性失败消息）
         tryReinforcement(players, mode);
+    }
+
+    // ==================== 战队聚组分队辅助 ====================
+
+    /** 解析在线玩家（开局成功后才移出队列，避免开局失败导致玩家凭空脱离队列） */
+    private List<ServerPlayerEntity> onlinePlayers(List<UUID> uuids, ServerWorld world) {
+        List<ServerPlayerEntity> online = new ArrayList<>();
+        for (UUID uuid : uuids) {
+            ServerPlayerEntity player = world.getServer().getPlayerManager().getPlayer(uuid);
+            if (player != null) online.add(player);
+        }
+        return online;
+    }
+
+    /** 战队聚组排序：同战队相邻（组内保持随机），组间按人数降序，无战队成员排在最后 */
+    private List<ServerPlayerEntity> clanGroupedOrder(List<ServerPlayerEntity> online) {
+        ClanManager cm = ClanManager.getInstance();
+        Map<Clan, List<ServerPlayerEntity>> groups = new LinkedHashMap<>();
+        List<ServerPlayerEntity> clanless = new ArrayList<>();
+        for (ServerPlayerEntity p : online) {
+            Clan clan = cm.getClanByPlayer(p.getUuid());
+            if (clan == null) clanless.add(p);
+            else groups.computeIfAbsent(clan, k -> new ArrayList<>()).add(p);
+        }
+        List<List<ServerPlayerEntity>> groupList = new ArrayList<>(groups.values());
+        groupList.sort((a, b) -> b.size() - a.size());
+        List<ServerPlayerEntity> ordered = new ArrayList<>();
+        for (List<ServerPlayerEntity> g : groupList) ordered.addAll(g);
+        ordered.addAll(clanless);
+        return ordered;
+    }
+
+    private boolean hasClanPlayers(List<ServerPlayerEntity> team, Clan clan) {
+        ClanManager cm = ClanManager.getInstance();
+        for (ServerPlayerEntity p : team) {
+            if (cm.getClanByPlayer(p.getUuid()) == clan) return true;
+        }
+        return false;
+    }
+
+    private boolean hasClanUuids(Collection<UUID> team, Clan clan) {
+        ClanManager cm = ClanManager.getInstance();
+        for (UUID uuid : team) {
+            if (cm.getClanByPlayer(uuid) == clan) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 战队聚组后修正两队最低人数：从超出需要的一队向不足的一队移动成员。
+     * 移动优先级：无战队成员 → 独自代表本战队的成员（整族迁移不拆队）→ 大战队成员（影响最小）。
+     */
+    private void fixMinPlayers(List<ServerPlayerEntity> red, List<ServerPlayerEntity> blue,
+                               int minRed, int minBlue, int redMax, int blueMax) {
+        while (red.size() < minRed && blue.size() - 1 >= minBlue) {
+            ServerPlayerEntity mover = pickMovable(blue);
+            if (mover == null || red.size() + 1 > redMax) break;
+            blue.remove(mover);
+            red.add(mover);
+        }
+        while (blue.size() < minBlue && red.size() - 1 >= minRed) {
+            ServerPlayerEntity mover = pickMovable(red);
+            if (mover == null || blue.size() + 1 > blueMax) break;
+            red.remove(mover);
+            blue.add(mover);
+        }
+    }
+
+    private ServerPlayerEntity pickMovable(List<ServerPlayerEntity> team) {
+        ClanManager cm = ClanManager.getInstance();
+        ServerPlayerEntity fallback = null;
+        int fallbackClanSize = -1;
+        for (ServerPlayerEntity p : team) {
+            Clan c = cm.getClanByPlayer(p.getUuid());
+            if (c == null) return p;
+            int count = 0;
+            for (ServerPlayerEntity q : team) {
+                if (cm.getClanByPlayer(q.getUuid()) == c) count++;
+            }
+            if (count == 1) return p;
+            if (count > fallbackClanSize) {
+                fallbackClanSize = count;
+                fallback = p;
+            }
+        }
+        return fallback;
     }
 
     // ==================== 队列成员操作（供 QueueManager 门面调用） ====================

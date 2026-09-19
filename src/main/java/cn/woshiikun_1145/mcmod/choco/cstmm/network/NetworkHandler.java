@@ -1,6 +1,7 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm.network;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
+import cn.woshiikun_1145.mcmod.choco.cstmm.data.Clan;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.GlobalConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.MatchSession;
@@ -10,6 +11,8 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.*;
 import cn.woshiikun_1145.mcmod.choco.cstmm.util.BlockPosAdapter;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -53,6 +56,9 @@ public class NetworkHandler {
     /** RequestConfigSync 限频状态：value: [窗口起始毫秒, 窗口内计数] */
     private static final Map<UUID, long[]> syncRequestWindows = new ConcurrentHashMap<>();
 
+    /** 队列状态订阅者（"队列"页打开的玩家）：队列变化时服务端主动推送，替代客户端每秒轮询 */
+    private static final Set<UUID> queueStatusSubscribers = ConcurrentHashMap.newKeySet();
+
     public static void register() {
         if (registered) return;
         registered = true;
@@ -65,12 +71,18 @@ public class NetworkHandler {
         PayloadTypeRegistry.playS2C().register(PlayerProfilePayload.ID, PlayerProfilePayload.CODEC);
         PayloadTypeRegistry.playS2C().register(HandshakeS2CPayload.ID, HandshakeS2CPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(ShopDataS2CPayload.ID, ShopDataS2CPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(ClanDataPayload.ID, ClanDataPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(QueueStatusPayload.ID, QueueStatusPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(PopupPayload.ID, PopupPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(BadgePayload.ID, BadgePayload.CODEC);
 
-        // ===== C2S 数据包注册 =====
         PayloadTypeRegistry.playC2S().register(MatchActionPayload.ID, MatchActionPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(ConfigUpdatePayload.ID, ConfigUpdatePayload.CODEC);
         PayloadTypeRegistry.playC2S().register(RequestConfigSyncPayload.ID, RequestConfigSyncPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(HandshakeC2SPayload.ID, HandshakeC2SPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(ClanActionPayload.ID, ClanActionPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(RequestQueueStatusPayload.ID, RequestQueueStatusPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(RequestBadgePayload.ID, RequestBadgePayload.CODEC);
 
         // ===== C2S 接收器（服务端处理客户端请求） =====
         ServerPlayNetworking.registerGlobalReceiver(MatchActionPayload.ID, (payload, context) -> {
@@ -112,6 +124,40 @@ public class NetworkHandler {
             });
         });
 
+        // ===== 战队操作 / 队列状态请求 / 徽标缺失请求 =====
+        ServerPlayNetworking.registerGlobalReceiver(ClanActionPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            if (player == null) return;
+            context.server().execute(() -> handleClanActionMaybeChunked(payload, player));
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(RequestBadgePayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            if (player == null) return;
+            context.server().execute(() -> {
+                Clan clan = ClanManager.getInstance().getClanByBadgeId(payload.badgeId());
+                if (clan != null) {
+                    sendBadgeParts(player, clan.getBadgeId(), clan.getBadgeBase64());
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(RequestQueueStatusPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            if (player == null) return;
+            context.server().execute(() -> {
+                UUID uuid = player.getUuid();
+                if (payload.subscribe()) {
+                    // 加入订阅集并立即回发一次快照；之后队列变化时服务端主动推送
+                    queueStatusSubscribers.add(uuid);
+                    ServerPlayNetworking.send(player, new QueueStatusPayload(
+                            QueueManager.getInstance().buildQueueStatusJson(player)));
+                } else {
+                    queueStatusSubscribers.remove(uuid);
+                }
+            });
+        });
+
         // 注意：OpenConfigScreenPayload 是 S2C，服务端不注册接收器，客户端注册。
 
         // ===== 玩家加入事件：服务端主动发起握手 =====
@@ -120,16 +166,337 @@ public class NetworkHandler {
             ServerPlayerEntity player = handler.getPlayer();
             sendHandshakeRequest(player);
             pendingHandshakes.put(player.getUuid(), 0);
+            // 刷新战队成员显示名（支持离线后按名踢出/展示）
+            ClanManager.getInstance().updateMemberName(player.getUuid(), player.getName().getString());
         });
 
-        // 断线清理：分包重组缓冲与限频状态
+        // 断线清理：分包重组缓冲与限频状态、队列状态订阅、徽标上传缓冲/已发集合
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             UUID uuid = handler.getPlayer().getUuid();
             clearPendingConfigUpdate(uuid);
             syncRequestWindows.remove(uuid);
+            queueStatusSubscribers.remove(uuid);
+            pendingBadgeUploads.remove(uuid);
+            sentBadges.remove(uuid);
         });
 
         Cstmm.LOGGER.info("[CSTMM - Network] Registered network handlers");
+    }
+
+    // ==================== 战队 ====================
+
+    // 徽标分片上传缓冲（C2S）：玩家 → 未集齐的徽标分片
+    private static final Map<UUID, BadgeUploadBuf> pendingBadgeUploads = new ConcurrentHashMap<>();
+    // 已完整下发过分片的徽标（S2C）：玩家 → badgeId 集合（内容寻址，同一徽标不重复下发）
+    private static final Map<UUID, Set<String>> sentBadges = new ConcurrentHashMap<>();
+
+    /** C2S 徽标分片上传缓冲 */
+    private static final class BadgeUploadBuf {
+        ClanActionPayload.ClanAction action;
+        String text1, text2;
+        int number;
+        int totalParts;
+        int receivedCount;
+        final String[] parts;
+        int accumulatedChars;
+
+        BadgeUploadBuf(int totalParts) {
+            this.totalParts = totalParts;
+            this.parts = new String[totalParts];
+        }
+    }
+
+    /**
+     * C2S 大徽标分片上传：totalParts>1 时先缓存分片（只有最后一片触发执行），
+     * 集齐后拼接为单片 payload 走正常处理。防护与配置同步分片一致：
+     * totalParts ∈ [1,64]、partIndex 越界拒绝、累计大小上限、新序列覆盖旧序列。
+     */
+    private static void handleClanActionMaybeChunked(ClanActionPayload payload, ServerPlayerEntity player) {
+        if (payload.badgeTotalParts() <= 1) {
+            handleClanAction(payload, player);
+            return;
+        }
+        UUID uuid = player.getUuid();
+        int total = payload.badgeTotalParts();
+        int index = payload.badgePartIndex();
+        if (total > ClanActionPayload.MAX_TOTAL_PARTS || index < 0 || index >= total) {
+            Cstmm.LOGGER.warn("[CSTMM - Network] Invalid badge upload chunk (index={}, total={}) from {}",
+                    index, total, player.getName().getString());
+            pendingBadgeUploads.remove(uuid);
+            return;
+        }
+        BadgeUploadBuf buf = pendingBadgeUploads.get(uuid);
+        // 新序列（第 0 片）或元数据不匹配时重置缓冲
+        if (buf == null || index == 0
+                || buf.totalParts != total || buf.action != payload.action()
+                || !Objects.equals(buf.text1, payload.text1()) || !Objects.equals(buf.text2, payload.text2())
+                || buf.number != payload.number()) {
+            buf = new BadgeUploadBuf(total);
+            buf.action = payload.action();
+            buf.text1 = payload.text1();
+            buf.text2 = payload.text2();
+            buf.number = payload.number();
+            pendingBadgeUploads.put(uuid, buf);
+        }
+        if (buf.parts[index] == null) {
+            buf.parts[index] = payload.badge();
+            buf.receivedCount++;
+            buf.accumulatedChars += payload.badge().length();
+            if (buf.accumulatedChars > ClanManager.MAX_BADGE_LENGTH) {
+                pendingBadgeUploads.remove(uuid);
+                Cstmm.LOGGER.warn("[CSTMM - Network] Badge upload exceeds size limit from {}", player.getName().getString());
+                return;
+            }
+        }
+        if (buf.receivedCount == total) {
+            pendingBadgeUploads.remove(uuid);
+            StringBuilder sb = new StringBuilder(buf.accumulatedChars);
+            for (String part : buf.parts) sb.append(part);
+            handleClanAction(ClanActionPayload.single(buf.action, buf.text1, buf.text2, sb.toString(), buf.number), player);
+        }
+    }
+
+    private static void handleClanAction(ClanActionPayload payload, ServerPlayerEntity player) {
+        ClanManager clans = ClanManager.getInstance();
+        String err;
+        switch (payload.action()) {
+            case REQUEST_LIST -> sendClanData(player, "LIST", buildClanListJson(payload.text1()));
+            case REQUEST_MINE -> sendMine(player);
+            case REQUEST_DETAIL -> {
+                Clan clan = clans.getClan(payload.text1());
+                sendDetail(player, clan);
+            }
+            case CREATE -> {
+                err = clans.create(player, payload.text1(), payload.text2(), payload.badge(), payload.number());
+                if (err == null) {
+                    sendPopup(player, "§a战队「" + payload.text1().trim() + "」创建成功！");
+                    sendMine(player);
+                } else {
+                    deliverMessage(player, err);
+                }
+            }
+            case JOIN -> {
+                err = clans.join(player, payload.text1());
+                if (err == null) {
+                    sendPopup(player, "§a你已加入战队「" + payload.text1().trim() + "」！");
+                    sendMine(player);
+                } else {
+                    deliverMessage(player, err);
+                }
+            }
+            case LEAVE -> {
+                err = clans.leave(player);
+                if (err == null) {
+                    sendPopup(player, "§e你已退出战队。");
+                    sendMine(player);
+                } else {
+                    deliverMessage(player, err);
+                }
+            }
+            case DISBAND -> {
+                err = clans.disband(player);
+                if (err == null) {
+                    player.sendMessage(Text.literal("§e战队已解散。"), false);
+                    sendMine(player);
+                } else {
+                    player.sendMessage(Text.literal(err), false);
+                }
+            }
+            case TRANSFER -> {
+                err = clans.transfer(player, payload.text1());
+                if (err == null) {
+                    player.sendMessage(Text.literal("§a已将队长转让给 " + payload.text1().trim() + "。"), false);
+                    sendMine(player);
+                } else {
+                    player.sendMessage(Text.literal(err), false);
+                }
+            }
+            case KICK -> {
+                err = clans.kick(player, payload.text1());
+                if (err == null) {
+                    player.sendMessage(Text.literal("§e已将 " + payload.text1().trim() + " 移出战队。"), false);
+                    sendMine(player);
+                } else {
+                    deliverMessage(player, err);
+                }
+            }
+            case EDIT -> {
+                err = clans.edit(player, payload.text1(), payload.text2(), payload.badge(), payload.number());
+                if (err == null) {
+                    sendPopup(player, "§a战队信息已更新！");
+                    sendMine(player);
+                } else {
+                    deliverMessage(player, err);
+                }
+            }
+        }
+    }
+
+    /** 发送我的战队状态：徽标分片（如未发过）先行，随后 MINE JSON（badge 字段为 badgeId） */
+    private static void sendMine(ServerPlayerEntity player) {
+        Clan clan = ClanManager.getInstance().getClanByPlayer(player.getUuid());
+        sendBadgeIfMissing(player, clan);
+        sendClanData(player, "MINE", buildClanMineJson(player));
+    }
+
+    /** 发送战队详情：徽标分片（如未发过）先行，随后 DETAIL JSON；clan 为 null 时回未找到 */
+    private static void sendDetail(ServerPlayerEntity player, Clan clan) {
+        if (clan == null) {
+            sendClanData(player, "DETAIL", "{\"found\":false}");
+        } else {
+            sendBadgeIfMissing(player, clan);
+            sendClanData(player, "DETAIL", buildClanJson(clan, true));
+        }
+    }
+
+    /** 徽标尚未向该玩家下发过时发送全部分片（内容寻址，同一徽标只发一次） */
+    private static void sendBadgeIfMissing(ServerPlayerEntity player, Clan clan) {
+        if (clan == null || clan.getBadgeBase64().isEmpty()) return;
+        String badgeId = clan.getBadgeId();
+        Set<String> sent = sentBadges.computeIfAbsent(player.getUuid(), k -> ConcurrentHashMap.newKeySet());
+        if (!sent.add(badgeId)) return;
+        sendBadgeParts(player, badgeId, clan.getBadgeBase64());
+    }
+
+    /** 按每片 ≤30000 字符拆分下发徽标（TCP 保序，客户端收齐后再收到引用该 id 的 JSON） */
+    private static void sendBadgeParts(ServerPlayerEntity player, String badgeId, String badgeBase64) {
+        if (badgeBase64 == null || badgeBase64.isEmpty()) return;
+        int total = (badgeBase64.length() + BadgePayload.MAX_PART_CHARS - 1) / BadgePayload.MAX_PART_CHARS;
+        for (int i = 0; i < total; i++) {
+            int from = i * BadgePayload.MAX_PART_CHARS;
+            int to = Math.min(from + BadgePayload.MAX_PART_CHARS, badgeBase64.length());
+            ServerPlayNetworking.send(player, new BadgePayload(badgeId, i, total, badgeBase64.substring(from, to)));
+        }
+    }
+
+    private static void sendClanData(ServerPlayerEntity player, String kind, String json) {
+        ServerPlayNetworking.send(player, new ClanDataPayload(kind, json));
+    }
+
+    /** 弹窗通知（客户端在当前界面内弹出对话框，无界面回退聊天栏） */
+    private static void sendPopup(ServerPlayerEntity player, String message) {
+        ServerPlayNetworking.send(player, new PopupPayload(message));
+    }
+
+    /**
+     * 队列发生变化时由 QueueManager 调用：向所有订阅者（"队列"页打开的玩家）推送最新快照。
+     * 事件驱动——只在变化时发包，替代客户端每秒轮询。
+     */
+    public static void pushQueueStatusToSubscribers() {
+        var server = Cstmm.getServer();
+        if (server == null || queueStatusSubscribers.isEmpty()) return;
+        for (UUID uuid : queueStatusSubscribers) {
+            ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
+            if (p != null) {
+                ServerPlayNetworking.send(p, new QueueStatusPayload(
+                        QueueManager.getInstance().buildQueueStatusJson(p)));
+            }
+        }
+    }
+
+    /** 向单个玩家推送其战队状态（MINE）；玩家不在线则跳过 */
+    public static void sendClanMineTo(UUID playerUuid) {
+        var server = Cstmm.getServer();
+        if (server == null) return;
+        ServerPlayerEntity p = server.getPlayerManager().getPlayer(playerUuid);
+        if (p != null) {
+            sendMine(p);
+        }
+    }
+
+    /**
+     * 按消息前缀分发：ClanManager 返回 "POPUP:" 前缀的消息走弹窗（如"已在战队"类提示），
+     * 其余走聊天栏。
+     */
+    private static void deliverMessage(ServerPlayerEntity player, String message) {
+        if (message != null && message.startsWith("POPUP:")) {
+            sendPopup(player, message.substring(6));
+        } else {
+            player.sendMessage(Text.literal(message), false);
+        }
+    }
+
+    /** 我的战队状态：{"inClan":bool, "clan":{...含成员列表}}（注意必须带 inClan 字段，客户端据此切换已加入视图） */
+    private static String buildClanMineJson(ServerPlayerEntity player) {
+        Clan clan = ClanManager.getInstance().getClanByPlayer(player.getUuid());
+        if (clan == null) return "{\"inClan\":false}";
+        JsonObject root = new JsonObject();
+        root.addProperty("inClan", true);
+        root.add("clan", buildClanObject(clan, true));
+        return GSON.toJson(root);
+    }
+
+    /** 战队列表：query 为空时随机取 10 条，否则按名称/缩写/队长搜索：{"clans":[...]} */
+    private static String buildClanListJson(String query) {
+        List<Clan> clanList = (query == null || query.isBlank())
+                ? ClanManager.getInstance().getRandomClans()
+                : ClanManager.getInstance().search(query);
+        JsonObject root = new JsonObject();
+        JsonArray arr = new JsonArray();
+        for (Clan clan : clanList) {
+            JsonObject o = new JsonObject();
+            o.addProperty("name", clan.getName());
+            o.addProperty("abbr", clan.getAbbreviation());
+            o.addProperty("leaderName", leaderName(clan));
+            o.addProperty("memberCount", clan.getMembers().size());
+            o.addProperty("limit", clan.getMemberLimit());
+            arr.add(o);
+        }
+        root.add("clans", arr);
+        return GSON.toJson(root);
+    }
+
+    /** 战队详情：{"found":true,"clan":{name,abbr,badge,leaderName,memberCount,limit,members:[...]}} */
+    private static String buildClanJson(Clan clan, boolean withBadge) {
+        JsonObject root = new JsonObject();
+        root.addProperty("found", true);
+        root.add("clan", buildClanObject(clan, withBadge));
+        return GSON.toJson(root);
+    }
+
+    /** 战队对象：{name,abbr,badge(=badgeId)?,leaderName,memberCount,limit,members:[{name,isLeader,online,matchState}]}；
+     *  badge 字段携带内容寻址 id（16 字符 hex），完整 base64 由 BadgePayload 分片单独下发 */
+    private static JsonObject buildClanObject(Clan clan, boolean withBadge) {
+        JsonObject c = new JsonObject();
+        c.addProperty("name", clan.getName());
+        c.addProperty("abbr", clan.getAbbreviation());
+        if (withBadge && !clan.getBadgeBase64().isEmpty()) c.addProperty("badge", clan.getBadgeId());
+        c.addProperty("leaderName", leaderName(clan));
+        c.addProperty("memberCount", clan.getMembers().size());
+        c.addProperty("limit", clan.getMemberLimit());
+        JsonArray members = new JsonArray();
+        for (Clan.Member m : clan.getMembers()) {
+            JsonObject mo = new JsonObject();
+            mo.addProperty("name", m.getName());
+            mo.addProperty("isLeader", m.getUuid().equals(clan.getLeader()));
+            UUID memberUuid = parseUuidOrNull(m.getUuid());
+            mo.addProperty("online", memberUuid != null && isOnline(memberUuid));
+            // 匹配状态："" = 空闲，否则 "地图显示名-模式名"（快速匹配为 "快速匹配-模式名"）
+            mo.addProperty("matchState", memberUuid == null ? "" : QueueManager.getInstance().matchStateOf(memberUuid));
+            members.add(mo);
+        }
+        c.add("members", members);
+        return c;
+    }
+
+    private static UUID parseUuidOrNull(String uuid) {
+        try {
+            return UUID.fromString(uuid);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static boolean isOnline(UUID uuid) {
+        var server = Cstmm.getServer();
+        return server != null && server.getPlayerManager().getPlayer(uuid) != null;
+    }
+
+    private static String leaderName(Clan clan) {
+        for (Clan.Member m : clan.getMembers()) {
+            if (m.getUuid().equals(clan.getLeader())) return m.getName();
+        }
+        return "?";
     }
 
     private static void handleMatchAction(MatchActionPayload payload, ServerPlayerEntity player) {
@@ -321,7 +688,7 @@ public class NetworkHandler {
             }
             configManager.updateGlobalConfig(global);
 
-            player.sendMessage(Text.literal("§a配置已保存！"), false);
+            sendPopup(player, "§a配置已保存！");
 
             // 广播给所有在线玩家：使用服务端权威重建的数据，而非客户端原始 JSON
             String syncJson = buildConfigJson();

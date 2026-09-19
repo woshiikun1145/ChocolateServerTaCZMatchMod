@@ -2,8 +2,13 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.manager;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
 import cn.woshiikun_1145.mcmod.choco.cstmm.api.QueueApi;
+import cn.woshiikun_1145.mcmod.choco.cstmm.data.Clan;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.MatchSession;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -145,7 +150,7 @@ public class QueueManager implements QueueApi {
         String queueMode = normalizeMode(mode);
 
         if (playerQueueMap.containsKey(uuid)) {
-            player.sendMessage(Text.literal("§c你已在队列或游戏中！使用 /cstmm match leave 离开"), false);
+            player.sendMessage(Text.literal("POPUP:§c你已在队列或游戏中！使用 /cstmm match leave 离开"), false);
             return;
         }
         if (MatchManager.getInstance().isInGame(uuid)) {
@@ -171,7 +176,7 @@ public class QueueManager implements QueueApi {
         });
 
         // 修复：当红蓝人数相等时，随机分配，不再要求玩家手动选择
-        int team = assignTeam(key, preferredTeam);
+        int team = assignTeam(key, preferredTeam, uuid);
         if (team == 0) {
             player.sendMessage(Text.literal("§c该地图两队均已满员！"), false);
             return;
@@ -184,6 +189,7 @@ public class QueueManager implements QueueApi {
         player.sendMessage(Text.literal("§a你已加入 " + config.getDisplayName() + "（"
                 + modeDisplayName(queueMode) + "） " + teamName + "！等待匹配中..."), false);
         Cstmm.LOGGER.debug("[CSTMM - QueueManager] {} joined {} {} queue as team {}", player.getName(), mapId, queueMode, team);
+        onQueueChanged();
     }
 
     public void leaveQueue(ServerPlayerEntity player) {
@@ -205,6 +211,7 @@ public class QueueManager implements QueueApi {
         if (entry.team == -1) {
             engine.removeFromQuickQueues(uuid);
             player.sendMessage(Text.literal("§e你已离开快速匹配队列！"), false);
+            onQueueChanged();
             return;
         }
 
@@ -215,11 +222,24 @@ public class QueueManager implements QueueApi {
 
         player.sendMessage(Text.literal("§e你已离开 " + entry.mapId + " 队列！"), false);
         Cstmm.LOGGER.debug("[CSTMM - QueueManager] {} left queue", player.getName());
+        onQueueChanged();
     }
 
     /** 加入快速匹配队列（网络入口 JOIN_QUICK；mode 空/非法按竞技兜底） */
     public void joinQuickQueue(ServerPlayerEntity player, String mode) {
         UUID uuid = player.getUuid();
+
+        // 玩家同时只能加入一个匹配队列：已在任意队列（地图队列或快速队列）时拒绝。
+        // 缺少此拦截会导致：playerQueueMap 条目被覆盖为快速匹配，而地图队列名单仍残留该玩家，
+        // 同一个人被两路队列各计一次（双倍计数），甚至可能被两边先后拉进对局
+        if (playerQueueMap.containsKey(uuid)) {
+            player.sendMessage(Text.literal("POPUP:§c你已在队列或游戏中！使用 /cstmm match leave 离开"), false);
+            return;
+        }
+        if (MatchManager.getInstance().isInGame(uuid)) {
+            player.sendMessage(Text.literal("§c你正在游戏中，无法加入队列！"), false);
+            return;
+        }
 
         if (engine.quickQueueContains(mode, uuid)) {
             player.sendMessage(Text.literal("§c你已在快速匹配队列中！"), false);
@@ -232,13 +252,15 @@ public class QueueManager implements QueueApi {
 
         player.sendMessage(Text.literal("§a✅ 你已加入快速匹配队列，系统将自动分配地图。"), false);
         Cstmm.LOGGER.debug("[CSTMM - QueueManager] {} joined quick queue ({})", player.getName(), mode);
+        onQueueChanged();
     }
 
     /**
      * 分配队伍 - 当红蓝人数相等时随机分配，不再要求玩家手动选择。
      * 若某队已达地图配置的最高人数（maxRedPlayers/maxBluePlayers，0 = 无上限），强制分配到另一队。
+     * 战队偏好（尽量而非必须）：优先分到已有同战队成员的一队；两队都有/都没有同战队时走原有平衡逻辑。
      */
-    private int assignTeam(String key, int preferredTeam) {
+    private int assignTeam(String key, int preferredTeam, UUID joiner) {
         Map<Integer, List<UUID>> teamMap = queues.get(key);
         if (teamMap == null) return 0;
 
@@ -256,6 +278,14 @@ public class QueueManager implements QueueApi {
         if (redFull) return 2;
         if (blueFull) return 1;
 
+        // 战队偏好：同战队尽量同队
+        Clan myClan = ClanManager.getInstance().getClanByPlayer(joiner);
+        if (myClan != null) {
+            boolean redHasClan = teamHasClan(teamMap.get(1), myClan);
+            boolean blueHasClan = teamHasClan(teamMap.get(2), myClan);
+            if (redHasClan != blueHasClan) return redHasClan ? 1 : 2;
+        }
+
         // 有偏好且该队人数不多于对方，优先分配
         if (preferredTeam == 1 && redSize <= blueSize) return 1;
         if (preferredTeam == 2 && blueSize <= redSize) return 2;
@@ -266,6 +296,15 @@ public class QueueManager implements QueueApi {
 
         // 红蓝人数相等 → 随机分配（修复点）
         return new Random().nextBoolean() ? 1 : 2;
+    }
+
+    /** 队伍列表中是否已有指定战队的成员 */
+    private boolean teamHasClan(List<UUID> team, Clan clan) {
+        ClanManager cm = ClanManager.getInstance();
+        for (UUID uuid : team) {
+            if (cm.getClanByPlayer(uuid) == clan) return true;
+        }
+        return false;
     }
 
     // ==================== 匹配检测 ====================
@@ -396,11 +435,156 @@ public class QueueManager implements QueueApi {
             Cstmm.LOGGER.info("[CSTMM - QueueManager] Dissolved {} queue for map {} ({} players, match started as {})",
                     mode, mapId, dissolved, startedMode);
         }
+        onQueueChanged();
     }
 
     /** 两条快速队列人数合计 */
     public int getQuickQueueSize() {
         return engine.getQuickQueueSize();
+    }
+
+    // ==================== 队列变化推送 ====================
+
+    /** 队列发生变化（加入/退出/开局/解散/补位）：向订阅了队列状态的玩家推送最新快照 */
+    void onQueueChanged() {
+        NetworkHandler.pushQueueStatusToSubscribers();
+    }
+
+    // ==================== 队列变化推送结束 ====================
+
+    // ==================== 队列状态快照（队列标签页） ====================
+
+    private static final Gson QUEUE_STATUS_GSON = new Gson();
+    /** 每张地图在状态包中的玩家名上限（防止大队列撑爆 65536B 单包） */
+    private static final int MAX_PLAYERS_PER_MAP = 40;
+
+    /**
+     * 构建队列状态快照 JSON（"队列"标签页数据源，每秒由客户端请求）：
+     * own = 自己的队列状态；clan = 自己战队的匹配状态；maps = 每张地图的队列状态。
+     * 地图显示名/类型/图片由客户端从 ConfigDataCache 按 id 解析，此处不重复下发。
+     */
+    public String buildQueueStatusJson(ServerPlayerEntity viewer) {
+        JsonObject root = new JsonObject();
+
+        // ===== own：自己的匹配状态 =====
+        JsonObject own = new JsonObject();
+        QueueEntry entry = playerQueueMap.get(viewer.getUuid());
+        own.addProperty("inQueue", entry != null);
+        if (entry != null) {
+            own.addProperty("mode", modeDisplayName(entry.mode));
+            if (entry.team == -1) {
+                // 快速匹配：已匹配 = 本模式快速队列人数；needed = -1（无固定门槛，等待开局/补位）
+                own.addProperty("map", "快速匹配");
+                own.addProperty("mapId", "quick");
+                own.addProperty("matched", engine.quickQueueSizeOf(entry.mode));
+                own.addProperty("needed", -1);
+            } else {
+                MapConfig cfg = ConfigManager.getInstance().getMap(entry.mapId);
+                own.addProperty("map", cfg != null ? cfg.getDisplayName() : entry.mapId);
+                own.addProperty("mapId", entry.mapId);
+                Map<Integer, List<UUID>> tm = queues.get(queueKey(entry.mapId, entry.mode));
+                int matched = tm == null ? 0 : tm.get(1).size() + tm.get(2).size();
+                own.addProperty("matched", matched);
+                int needed = cfg != null ? Math.max(0, cfg.getTotalMinPlayers() - matched) : 0;
+                own.addProperty("needed", needed);
+            }
+        }
+        root.add("own", own);
+
+        // ===== clan：自己战队的匹配状态 =====
+        Clan clan = ClanManager.getInstance().getClanByPlayer(viewer.getUuid());
+        JsonObject clanJson = new JsonObject();
+        clanJson.addProperty("inClan", clan != null);
+        if (clan != null) {
+            clanJson.addProperty("name", clan.getName());
+            clanJson.addProperty("abbr", clan.getAbbreviation());
+            int count = 0;
+            JsonArray members = new JsonArray();
+            for (Map.Entry<UUID, QueueEntry> e : playerQueueMap.entrySet()) {
+                if (ClanManager.getInstance().getClanByPlayer(e.getKey()) != clan) continue;
+                count++;
+                JsonObject m = new JsonObject();
+                m.addProperty("player", resolveName(e.getKey()));
+                QueueEntry qe = e.getValue();
+                if (qe.team == -1) {
+                    m.addProperty("map", "快速匹配");
+                } else {
+                    MapConfig c = ConfigManager.getInstance().getMap(qe.mapId);
+                    m.addProperty("map", c != null ? c.getDisplayName() : qe.mapId);
+                }
+                members.add(m);
+            }
+            clanJson.addProperty("count", count);
+            clanJson.add("members", members);
+        }
+        root.add("clan", clanJson);
+
+        // ===== maps：每张地图的队列状态（蓝红人数/玩家列表按竞技、休闲两模式分别下发） =====
+        JsonArray maps = new JsonArray();
+        for (MapConfig cfg : ConfigManager.getInstance().getMaps()) {
+            JsonObject mo = new JsonObject();
+            mo.addProperty("id", cfg.getId());
+            String status;
+            if (!cfg.isEnabled()) {
+                status = "DISABLED";
+            } else if (isMapInActiveMatch(cfg.getId())) {
+                status = "IN_MATCH";
+            } else if (MatchManager.getInstance().isMapInCooldown(cfg.getId())) {
+                status = "COOLDOWN";
+            } else {
+                status = "AVAILABLE";
+            }
+            mo.addProperty("status", status);
+            JsonArray modes = new JsonArray();
+            for (String mode : MODES) {
+                JsonObject modeJson = new JsonObject();
+                modeJson.addProperty("mode", modeDisplayName(mode));
+                Map<Integer, List<UUID>> tm = queues.get(queueKey(cfg.getId(), mode));
+                int red = tm == null ? 0 : tm.get(1).size();
+                int blue = tm == null ? 0 : tm.get(2).size();
+                modeJson.addProperty("red", red);
+                modeJson.addProperty("blue", blue);
+                JsonArray players = new JsonArray();
+                if (tm != null) {
+                    for (UUID u : tm.get(1)) addPlayerName(players, u);
+                    for (UUID u : tm.get(2)) addPlayerName(players, u);
+                }
+                modeJson.add("players", players);
+                modes.add(modeJson);
+            }
+            mo.add("modes", modes);
+            maps.add(mo);
+        }
+        root.add("maps", maps);
+        return QUEUE_STATUS_GSON.toJson(root);
+    }
+
+    private boolean isMapInActiveMatch(String mapId) {
+        return MatchManager.getInstance().getAllActiveSessions().stream()
+                .anyMatch(s -> s.getMapName().equals(mapId) && s.getPhase() != MatchSession.GamePhase.ENDED);
+    }
+
+    private void addPlayerName(JsonArray players, UUID uuid) {
+        if (players.size() >= MAX_PLAYERS_PER_MAP) return;
+        players.add(resolveName(uuid));
+    }
+
+    private String resolveName(UUID uuid) {
+        MinecraftServer server = Cstmm.getServer();
+        ServerPlayerEntity p = server == null ? null : server.getPlayerManager().getPlayer(uuid);
+        return p != null ? p.getName().getString() : uuid.toString().substring(0, 8);
+    }
+
+    /**
+     * 玩家当前匹配状态描述（战队页成员列表用）：空闲返回 ""，
+     * 正在匹配返回 "地图显示名-模式名"（快速匹配为 "快速匹配-模式名"）。
+     */
+    public String matchStateOf(UUID uuid) {
+        QueueEntry e = playerQueueMap.get(uuid);
+        if (e == null) return "";
+        if (e.team == -1) return "快速匹配-" + modeDisplayName(e.mode);
+        MapConfig cfg = ConfigManager.getInstance().getMap(e.mapId);
+        return (cfg != null ? cfg.getDisplayName() : e.mapId) + "-" + modeDisplayName(e.mode);
     }
 
     static ServerWorld getWorld() {

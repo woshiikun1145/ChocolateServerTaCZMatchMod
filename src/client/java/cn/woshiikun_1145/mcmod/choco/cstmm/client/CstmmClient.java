@@ -3,6 +3,7 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.client;
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.hud.HudOverlay;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.network.ClientNetworkHandler;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.LastWordsScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.MatchMenuScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.ShopScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.MatchActionPayload;
@@ -69,6 +70,10 @@ public class CstmmClient implements ClientModInitializer {
         ));
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            // "千万别点"挂起崩溃最先检查：tick 在主循环内且与当前屏幕无关，
+            // 被其他模组顶号/断线切屏也无法绕过（必须在 player 判空之前）
+            LastWordsScreen.throwIfCrashPending();
+
             if (client == null || client.player == null) return;
 
             // 未握手成功时禁用全部功能

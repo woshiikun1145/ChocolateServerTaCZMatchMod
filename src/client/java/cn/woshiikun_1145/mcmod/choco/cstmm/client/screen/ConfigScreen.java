@@ -19,6 +19,7 @@ import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.registry.Registries;
+import net.minecraft.client.font.TextRenderer;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
@@ -77,7 +78,18 @@ public class ConfigScreen extends Screen {
     private boolean allowNextSyncRefresh = false;
 
     // 内置确认对话框（在当前界面内弹出，不暂停游戏）
-    private final ConfirmDialog confirmDialog = new ConfirmDialog(this, textRenderer);
+    // textRenderer 懒获取：构造期 Screen.textRenderer 尚未赋值（init() 才赋值），直接传入会是 null（曾致 NPE 崩溃）
+    private final ConfirmDialog confirmDialog = new ConfirmDialog(this, this::font);
+
+    /** 面板/对话框桥接：Screen.textRenderer 是 protected */
+    public TextRenderer font() {
+        return textRenderer;
+    }
+
+    /** 服务端弹窗通知（如"配置已保存！"）：复用确认对话框的提示模式 */
+    public void showPopup(String message) {
+        confirmDialog.show(Text.literal("§6提示"), Text.literal(message), null);
+    }
 
     public ConfigScreen() {
         super(Text.literal("配置"));
@@ -777,7 +789,7 @@ public class ConfigScreen extends Screen {
             globalRowY += ROW_GAP;
 
             rightScrollables.add(new LabelWidget(tabX, globalRowY,
-                    Text.literal("槽位ID参考 /item replace entity 的 <slot>，如 weapon.mainhand / armor.head"), 9));
+                    Text.literal("槽位ID参考 /item replace entity 的 <slot>，可用 armor.head/chest/legs/feet/body 或 container.0~35"), 9));
             globalRowY += ROW_GAP;
 
         } else if (globalTab == 1) {

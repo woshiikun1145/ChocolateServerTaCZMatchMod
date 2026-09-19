@@ -18,7 +18,8 @@ import org.lwjgl.glfw.GLFW;
  */
 final class ConfirmDialog {
     private final Screen owner;
-    private final TextRenderer textRenderer;
+    /** 懒获取 textRenderer：Screen.textRenderer 在 init() 才赋值，构造期传入会是 null（曾致 NPE 崩溃） */
+    private final java.util.function.Supplier<TextRenderer> textRendererSupplier;
 
     private boolean showingConfirm = false;
     private Text confirmTitle = null;
@@ -27,9 +28,14 @@ final class ConfirmDialog {
     private ButtonWidget confirmYesBtn = null;
     private ButtonWidget confirmNoBtn = null;
 
-    ConfirmDialog(Screen owner, TextRenderer textRenderer) {
+    ConfirmDialog(Screen owner, java.util.function.Supplier<TextRenderer> textRendererSupplier) {
         this.owner = owner;
-        this.textRenderer = textRenderer;
+        this.textRendererSupplier = textRendererSupplier;
+    }
+
+    /** 每次使用时即时获取（init() 之后恒非 null） */
+    private TextRenderer tr() {
+        return textRendererSupplier.get();
     }
 
     boolean isOpen() {
@@ -74,6 +80,7 @@ final class ConfirmDialog {
     }
 
     void render(DrawContext context, int mouseX, int mouseY, float delta) {
+        TextRenderer textRenderer = tr();
         context.fill(0, 0, owner.width, owner.height, 0xC8000000);
         int dialogWidth = 240;
         int dialogHeight = dialogHeightFor(confirmMessage);
@@ -128,7 +135,7 @@ final class ConfirmDialog {
 
     /** 根据消息行数计算对话框高度（消息按 220px 宽度自动换行） */
     private int dialogHeightFor(Text message) {
-        int lines = textRenderer.wrapLines(message, 220).size();
+        int lines = tr().wrapLines(message, 220).size();
         return 62 + lines * 12;
     }
 }

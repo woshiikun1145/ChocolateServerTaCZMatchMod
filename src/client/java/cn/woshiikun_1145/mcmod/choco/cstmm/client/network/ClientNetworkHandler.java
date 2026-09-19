@@ -2,7 +2,10 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.client.network;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.ClientHandshakeState;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.BadgeCache;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClanCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ConfigDataCache;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.QueueStatusCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ShopDataCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.hud.HudOverlay;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.ConfigScreen;
@@ -127,12 +130,47 @@ public class ClientNetworkHandler {
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> client.execute(
                 ClientHandshakeState::onJoin));
 
+        // ========== 战队数据接收 ==========
+        ClientPlayNetworking.registerGlobalReceiver(ClanDataPayload.ID, (payload, context) -> context.client().execute(() -> {
+            ClanCache.getInstance().update(payload.kind(), payload.json());
+            // MINE/DETAIL 引用的徽标若本地缺失（如断线重连后缓存被清），请求服务端补发分片
+            ClanCache.ClanInfo clan = ClanCache.getInstance().getMine().clan;
+            if (clan != null) BadgeCache.requestIfMissing(clan.badge);
+            if (ClanCache.getInstance().getSelectedDetail() != null) {
+                BadgeCache.requestIfMissing(ClanCache.getInstance().getSelectedDetail().badge);
+            }
+        }));
+
+        // ========== 战队徽标分片接收 ==========
+        ClientPlayNetworking.registerGlobalReceiver(BadgePayload.ID, (payload, context) -> context.client().execute(() ->
+                BadgeCache.apply(payload)
+        ));
+
+        // ========== 弹窗通知接收（当前界面内弹出，无界面回退聊天栏） ==========
+        ClientPlayNetworking.registerGlobalReceiver(PopupPayload.ID, (payload, context) -> context.client().execute(() -> {
+            MinecraftClient client = context.client();
+            if (client.currentScreen instanceof MatchMenuScreen screen) {
+                screen.showPopup(payload.message());
+            } else if (client.currentScreen instanceof ConfigScreen screen) {
+                screen.showPopup(payload.message());
+            } else if (client.player != null) {
+                client.player.sendMessage(Text.literal(payload.message()), false);
+            }
+        }));
+
+        // ========== 队列状态接收 ==========
+        ClientPlayNetworking.registerGlobalReceiver(QueueStatusPayload.ID, (payload, context) -> context.client().execute(() ->
+                QueueStatusCache.getInstance().update(payload.json())));
+
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             ClientHandshakeState.onDisconnect();
-            // 断线时重置 HUD 显示并清空配置/商店缓存，避免残留上一服务器的数据
+            // 断线时重置 HUD 显示并清空配置/商店/战队/队列/徽标缓存，避免残留上一服务器的数据
             HudOverlay.reset();
             ConfigDataCache.getInstance().clear();
             ShopDataCache.getInstance().clear();
+            ClanCache.getInstance().clear();
+            QueueStatusCache.getInstance().clear();
+            BadgeCache.clear();
         });
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> ClientHandshakeState.tick(client));
