@@ -65,7 +65,7 @@ public class PersonalizeTabPanel {
     /** 由 MatchMenuScreen.init() 调用（窗口尺寸变化时重建）；先摘除旧控件防重复累积 */
     public void initWidgets() {
         if (idField != null) disposeWidgets();
-        idField = makeField(160, "QQ号 / B站 UID（纯数字）");
+        idField = makeField(160, "QQ号/UID（纯数字）");
         idField.setMaxLength(PlayerProfile.MAX_AVATAR_ID_LENGTH);
         hexField = makeField(70, "RRGGBB");
         hexField.setMaxLength(6);
@@ -144,7 +144,7 @@ public class PersonalizeTabPanel {
         }
 
         // ===== 头像 =====
-        context.drawText(tr, "§7头像（仅支持自己的 QQ 或 B站 账号）", x + 20, y + 110, 0xAAAAAA, true);
+        context.drawText(tr, "§7头像（仅支持 QQ 或 B站 账号）", x + 20, y + 110, 0xAAAAAA, true);
         int previewY = y + 126;
         // 预览优先展示待保存的绑定，否则展示服务端下发的自己的绑定
         String previewType = !pendingType.isEmpty() ? pendingType : FaceCache.getOwnType();

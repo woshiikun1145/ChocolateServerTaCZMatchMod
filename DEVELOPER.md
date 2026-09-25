@@ -304,7 +304,7 @@
 | 保存配置时提示地图正在使用 | 该地图处于活跃对局中（`inUseMaps` 保护），先结束对局再改 |
 | 匹配一直不开局 | 检查地图 `minRedPlayers/minBluePlayers`、是否已有对局占用、`cooldownSeconds` 冷却 |
 | 商店显示"无法购买" | 仅竞技模式对局内可购买（BUY_ITEM 预检 + 发放双校验）；确认对局未 ENDED |
-| 玩家战绩丢失且提示档案损坏 | `profiles/` 下 JSON 损坏；按日志中的玩家 UUID 修复或删除该文件（删除后从零开始） |
+| 玩家战绩丢失且提示档案损坏 | `data/players/` 下 JSON 损坏；按日志中的玩家 UUID 修复或删除该文件（删除后从零开始） |
 | 对局中玩家卡在边界外被反复处决 | 检查 `boundary` 是否配置正确；死亡重生会自动送回出生点 |
 | HUD 一直显示旧对局数据 | 客户端未收到 `inGame=false` 清除包或断线未重置；查看 `[CSTMM - ClientNetwork]` 日志 |
 | 客户端商店数据不刷新 | `shop_data` 缓存问题；ShopScreen 构造器会发 REQUEST_SHOP，检查服务端限频与 isCompetitive 校验 |

@@ -75,8 +75,8 @@ public class PlayerProfile {
         if (!type.equals("qq") && !type.equals("bili")) {
             return "§c仅支持 QQ 或 B站账号头像！";
         }
-        if (id == null || !id.matches("\\d{3," + MAX_AVATAR_ID_LENGTH + "}")) {
-            return "§c账号 ID 必须是纯数字（QQ号或 B站 UID）！";
+        if (id == null || !id.matches("\\d{1," + MAX_AVATAR_ID_LENGTH + "}")) {
+            return "§cQQ号/UID 必须是纯数字！";
         }
         return null;
     }
