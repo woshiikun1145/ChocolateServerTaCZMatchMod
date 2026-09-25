@@ -5,15 +5,19 @@ import net.minecraft.item.ItemStack;
 import java.util.Arrays;
 
 /**
- * 玩家背包快照（内存存储 + 持久化）
+ * 【作用】玩家背包快照（内存存储 + 持久化）
  * 对应原 inventory/ 箱子存储
+ * 【被谁使用】InventoryManager 在对局开始时保存快照、结束/离队时恢复，
+ * 并随 Gson 持久化到背包数据文件（服务端）。
  */
 public class InventorySnapshot {
     private ItemStack[] mainInventory;      // 主背包 0-35
     private ItemStack[] armor;              // 盔甲 36-39
     private ItemStack offhand;              // 副手 40
+    // 快照保存时间戳（毫秒），持久化字段
     private long savedAt;
 
+    // Gson 反序列化所需的无参构造：初始化空背包结构
     public InventorySnapshot() {
         this.mainInventory = new ItemStack[36];
         this.armor = new ItemStack[4];
@@ -39,7 +43,9 @@ public class InventorySnapshot {
     public void setOffhand(ItemStack offhand) { this.offhand = offhand; }
     public void setSavedAt(long savedAt) { this.savedAt = savedAt; }
 
+    /** 【作用】快照是否为空（主背包、盔甲、副手全部无物品），InventoryManager 据此跳过无效存档。 */
     public boolean isEmpty() {
+        // 逐格检查主背包与盔甲，任一非空即不为空
         for (ItemStack stack : getMainInventory()) {
             if (stack != null && !stack.isEmpty()) return false;
         }

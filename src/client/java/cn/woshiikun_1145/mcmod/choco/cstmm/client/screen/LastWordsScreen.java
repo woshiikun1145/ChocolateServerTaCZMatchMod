@@ -12,7 +12,8 @@ import net.minecraft.text.Text;
 import org.lwjgl.glfw.GLFW;
 
 /**
- * "千万别点"触发后的遗言输入界面（不可取消）。
+ * 【作用】"千万别点"触发后的遗言输入界面（不可取消）。
+ * 【被谁使用】MatchMenuScreen#triggerSecretAction 打开本界面；CstmmClient 每 tick 调 throwIfCrashPending 触发崩溃。
  * 任何离开本界面的方式——"发送遗言"按钮、"算了(并不能取消)"按钮、回车、ESC——
  * 都会先以玩家本人身份把遗言发送到聊天栏（等效玩家主动发送，无遗言则不发），
  * 随后抛出 WhyYouClickThis 使游戏崩溃（遗言随异常消息进入崩溃报告）。
@@ -43,6 +44,10 @@ public class LastWordsScreen extends Screen {
         super(Text.literal("遗言"));
     }
 
+    /**
+     * 【作用】构建遗言输入框与两个按钮（均触发 send，"算了"并不能取消），
+     * 对话框按屏幕中心 + 固定尺寸布局。
+     */
     @Override
     protected void init() {
         super.init();
@@ -140,6 +145,7 @@ public class LastWordsScreen extends Screen {
         return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
+    // 不暂停游戏：服务器界面惯例（单人打开时世界继续运行）
     @Override
     public boolean shouldPause() {
         return false;

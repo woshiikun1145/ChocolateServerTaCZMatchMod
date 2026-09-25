@@ -26,18 +26,33 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
+/**
+ * 【作用】背包快照管理器：玩家进对局前保存整套背包（36 格主背包 + 盔甲 + 副手），
+ *         对局结束/离线/被踢后恢复原背包，支持管理员逐格恢复。
+ *         持久化到 config/cstmm/data/bags/<uuid>.json（每玩家一文件，临时文件 + 原子替换），
+ *         按 AUTO_SAVE_INTERVAL tick 周期自动落盘；损坏/非法命名文件绝不覆盖、绝不删除。
+ * 【被谁使用】Cstmm（启动 initialize、停服 saveAll）、MatchManager（开局 saveInventory、
+ *           结束/离线/踢出 restoreInventory、竞技标记 setCompetitive）、
+ *           EventListener（断线与重连时的快照检查与恢复）、ModCommands（管理员恢复指令）、
+ *           MatchScheduler（定时 autoSave）。仅服务端。
+ */
 public class InventoryManager {
     private static InventoryManager instance;
 
+    /** 未恢复的背包快照，key: 玩家 UUID；启动时从 bags/ 目录载入 */
     private final Map<UUID, InventorySnapshot> savedInventories;
+    /** 玩家是否处于竞技模式（进对局置 true，恢复背包后移除） */
     private final Map<UUID, Boolean> competitivePlayers;
 
+    /** 快照目录 config/cstmm/data/bags */
     private final Path bagsDir;
+    /** 旧版单文件 bags.json（迁移后重命名留档） */
     private final Path legacyBagsFile;
     /** 加载失败（损坏）的文件名：绝不覆盖、绝不删除，留待管理员修复 */
     private final Set<String> unloadableFiles = new HashSet<>();
     private final Gson gson;
     private final AtomicInteger saveCounter = new AtomicInteger(0);
+    /** 自动落盘间隔（tick）：每 300 tick（15 秒）随 MatchScheduler 调用 autoSave 落盘一次 */
     private static final int AUTO_SAVE_INTERVAL = 300;
 
     private static RegistryWrapper.WrapperLookup registryLookup;
@@ -64,6 +79,7 @@ public class InventoryManager {
         }
     }
 
+    // 单例入口（懒加载）
     public static InventoryManager getInstance() {
         if (instance == null) {
             instance = new InventoryManager();
@@ -72,6 +88,10 @@ public class InventoryManager {
     }
 
     // ===== 新增：初始化方法 =====
+    /**
+     * 【作用】注入注册表查询句柄（ItemStack NBT 序列化必需）并加载 bags/ 目录快照。
+     * 【被谁使用】Cstmm（服务器启动时调用一次）。仅服务端。
+     */
     public static void initialize(RegistryWrapper.WrapperLookup lookup) {
         registryLookup = lookup;
         getInstance().loadBags();
@@ -83,6 +103,10 @@ public class InventoryManager {
 
     // ===== 核心业务方法 =====
 
+    /**
+     * 【作用】保存玩家当前整套背包为快照（进对局前调用）；已有未恢复快照时拒绝覆盖（防原物品丢失）。
+     * 【被谁使用】MatchManager（对局开始传送玩家入地图前）。仅服务端。
+     */
     public void saveInventory(ServerPlayerEntity player) {
         UUID uuid = player.getUuid();
 
@@ -112,6 +136,11 @@ public class InventoryManager {
         Cstmm.LOGGER.debug("[CSTMM - InventoryManager] Saved inventory for {}", player.getName());
     }
 
+    /**
+     * 【作用】整体恢复玩家原背包：清空当前背包后按快照回填；恢复失败保留快照供下次重试。
+     * 【被谁使用】MatchManager（对局结束/玩家离线/被投票踢出）、EventListener（断线重连兜底恢复）、
+     *           ModCommands（管理员手动恢复命令）。仅服务端。
+     */
     public boolean restoreInventory(ServerPlayerEntity player) {
         UUID uuid = player.getUuid();
         // 先读取快照但暂不移除：恢复失败时保留条目，下次重连可重试
@@ -153,6 +182,10 @@ public class InventoryManager {
         return true;
     }
 
+    /**
+     * 【作用】从快照恢复单个格位（0-35 主背包、36-39 盔甲、40 副手），快照中该格清空并立即落盘。
+     * 【被谁使用】ModCommands（管理员恢复命令，玩家原背包未整体恢复时可逐格领取物品）。仅服务端。
+     */
     public boolean restoreSlot(ServerPlayerEntity player, int slotIndex) {
         UUID uuid = player.getUuid();
         InventorySnapshot snapshot = savedInventories.get(uuid);
@@ -188,18 +221,45 @@ public class InventoryManager {
         return true;
     }
 
+    // 查询玩家是否有未恢复的快照（EventListener 断线/重连时判断是否需要恢复）
     public boolean hasSavedInventory(UUID uuid) {
         return savedInventories.containsKey(uuid);
     }
 
+    /**
+     * 【作用】删除玩家保存的背包快照（内存移除 + 删除磁盘 bags/<uuid>.json），管理员命令用。
+     *         内存移除后下次 saveBags 的残留清理也会兜底删文件，此处立即删除语义更明确。
+     * 【被谁使用】ModCommands（/cstmm data delete player ... bags|all）。仅服务端。
+     * @return true 表示确实删除了内容（内存快照存在或磁盘文件存在）
+     */
+    public boolean deleteSavedInventory(UUID uuid) {
+        if (uuid == null) return false;
+        InventorySnapshot removed = savedInventories.remove(uuid);
+        boolean fileDeleted = false;
+        try {
+            fileDeleted = Files.deleteIfExists(bagsDir.resolve(uuid + ".json"));
+        } catch (IOException e) {
+            Cstmm.LOGGER.error("[CSTMM - InventoryManager] Failed to delete bag file for {}", uuid, e);
+        }
+        if (removed != null || fileDeleted) {
+            Cstmm.LOGGER.info("[CSTMM - InventoryManager] Saved inventory deleted for {} (inMemory={}, file={})",
+                    uuid, removed != null, fileDeleted);
+            return true;
+        }
+        return false;
+    }
+
+    // 标记/取消玩家竞技状态（MatchManager 开局置 true、对局结束置 false）
     public void setCompetitive(UUID uuid, boolean competitive) {
         competitivePlayers.put(uuid, competitive);
     }
 
+    // 查询玩家是否处于竞技状态（当前项目内暂无调用方，预留查询入口）
     public boolean isCompetitivePlayer(UUID uuid) {
         return competitivePlayers.getOrDefault(uuid, false);
     }
 
+    // 【作用】计数器达到 AUTO_SAVE_INTERVAL（300 tick）时触发一次落盘（MatchScheduler 每 tick 调用）
     public void autoSave() {
         int count = saveCounter.incrementAndGet();
         if (count % AUTO_SAVE_INTERVAL == 0) {
@@ -207,6 +267,7 @@ public class InventoryManager {
         }
     }
 
+    // 【作用】把全部快照逐玩家落盘到 bags/<uuid>.json（原子替换），并清理已恢复玩家的残留文件
     public void saveBags() {
         if (getRegistryLookup() == null) {
             Cstmm.LOGGER.warn("[CSTMM - InventoryManager] Cannot save bags: RegistryLookup is null");
@@ -250,6 +311,7 @@ public class InventoryManager {
         Cstmm.LOGGER.debug("[CSTMM - InventoryManager] Saved {} inventories to bags/", savedInventories.size());
     }
 
+    // 【作用】启动时从 bags/ 目录加载全部快照进内存（含旧版 bags.json 迁移）；仅执行一次
     public void loadBags() {
         if (loaded) return;
         if (getRegistryLookup() == null) {
@@ -297,6 +359,7 @@ public class InventoryManager {
         loaded = true;
     }
 
+    // 【作用】把旧版单文件 bags.json 的快照迁到 bags/<uuid>.json，迁移后重命名留档避免重复迁移
     private void migrateLegacyFile() {
         if (!Files.exists(legacyBagsFile)) {
             return;
@@ -322,12 +385,18 @@ public class InventoryManager {
         }
     }
 
+    // 停服时全量落盘（Cstmm 服务器停止事件调用）
     public void saveAll() {
         saveBags();
     }
 
     // ===== ItemStack 序列化适配器（修复版） =====
 
+    /**
+     * 【作用】ItemStack 的 Gson 序列化适配器：以物品 NBT 字符串形式与 JSON 互转
+     *         （空物品/注册表句柄缺失/解析失败时安全降级为 JsonNull 或 EMPTY）。
+     * 【被谁使用】InventoryManager 构造器中注册到 Gson，供快照读写 bags/<uuid>.json 使用。
+     */
     private static class ItemStackAdapter implements JsonSerializer<ItemStack>, JsonDeserializer<ItemStack> {
         @Override
         public JsonElement serialize(ItemStack src, Type typeOfSrc, JsonSerializationContext context) {

@@ -23,11 +23,15 @@ import net.minecraft.util.Identifier;
 import java.util.List;
 
 /**
- * 商店界面 - 商品按地图配置，打开时向服务端请求，仅竞技模式对局中可购买
+ * 【作用】商店界面：商品按钮列表（按服务端下发的 GlobalConfig.ShopItem 生成），点击发 BUY_ITEM 购买；
+ * 仅竞技模式对局中可购买，资格由服务端校验。
+ * 【被谁使用】CstmmClient（keyOpenShop 快捷键打开）；ClientNetworkHandler 收到商店数据包后调 refresh() 刷新。
+ * 构造时发 REQUEST_SHOP 请求数据，数据经 ShopDataCache 缓存后供本类读取。
  */
 @Environment(EnvType.CLIENT)
 public class ShopScreen extends Screen {
 
+    // 【作用】构造即向服务端请求商店数据（C2S REQUEST_SHOP），显示内容等回包后再刷新
     public ShopScreen() {
         super(Text.literal("商店"));
         // 打开商店时向服务端请求最新商店数据（仅在构造时请求一次，数据到达后由接收器刷新界面，避免循环请求）
@@ -165,13 +169,18 @@ public class ShopScreen extends Screen {
         init();
     }
 
+    /**
+     * 【作用】主渲染：绘制标题/提示文字，按 ShopDataCache 状态显示"获取中/不可购买"状态提示。
+     */
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         this.renderBackground(context, mouseX, mouseY, delta);
         super.render(context, mouseX, mouseY, delta);
 
         ShopDataCache cache = ShopDataCache.getInstance();
-        context.drawText(textRenderer, "§6━━━ 物品商店 ━━━", this.width / 2 - 90, 12, 0xFFFFFF, true);
+        // 页面标题跟随主题色（个性化页设置）
+        context.drawText(textRenderer, "━━━ 物品商店 ━━━", this.width / 2 - 90, 12,
+                cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig.getThemeColorArgb(), true);
         context.drawText(textRenderer, "§7点击下方按钮即可购买物品", 20, 32, 0xAAAAAA, true);
 
         // 显示物品数量
@@ -186,6 +195,7 @@ public class ShopScreen extends Screen {
         }
     }
 
+    // 不暂停游戏：服务器界面惯例（单人打开时世界继续运行）
     @Override
     public boolean shouldPause() {
         return false;

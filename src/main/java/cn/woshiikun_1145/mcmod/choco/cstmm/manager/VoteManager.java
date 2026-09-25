@@ -14,9 +14,19 @@ import net.minecraft.text.Text;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * 【作用】对局内投票管理器：加时赛投票与踢人投票的发起、计票、超时判定与结果执行。
+ *         每场对局同一时间最多一个投票（activeVotes 按 sessionId 存放），投票时长 30 秒，
+ *         同意票过在线人数半数即通过；也支持"剩余票不可能过半"时提前判负。
+ * 【被谁使用】MatchManager（加时赛触发 startOvertimeVote、对局结束前检查 hasActiveVote）、
+ *           NetworkHandler（玩家按 F7/F8 投票 handleVote）、ModCommands（/cstmm vote、/cstmm votekick 命令）、
+ *           MatchScheduler（每秒 tick 推进倒计时）；其中 startOvertimeVote(UUID)/startKickVote(UUID,UUID)/
+ *           handleVote(UUID,boolean)/getVoteStatus 为 VoteApi 外部 API 入口。仅服务端。
+ */
 public class VoteManager implements VoteApi {
+    // 单例实例（getInstance 懒加载）
     private static VoteManager instance;
-
+    /** 进行中的投票，key: 对局 sessionId（每场对局同时最多一个投票） */
     private final Map<String, VoteSession> activeVotes;
     // key: 发起者 UUID, value: 上次发起投票的时间戳（毫秒）
     private final Map<UUID, Long> kickCooldowns;
@@ -26,6 +36,7 @@ public class VoteManager implements VoteApi {
         this.kickCooldowns = new ConcurrentHashMap<>();
     }
 
+    // 单例入口（懒加载）
     public static VoteManager getInstance() {
         if (instance == null) {
             instance = new VoteManager();
@@ -35,6 +46,11 @@ public class VoteManager implements VoteApi {
 
     // ==================== API 实现 ====================
 
+    /**
+     * 【作用】发起加时赛投票：向对局全员广播投票提示（30 秒，同意过半则加时 30 秒）；
+     *         在线人数不足 2 人直接判平局结束对局。
+     * 【被谁使用】VoteApi 外部 API 入口；内部重载 startOvertimeVote(MatchSession) 委托到此。
+     */
     @Override
     public void startOvertimeVote(UUID matchId) {
         MatchSession session = resolveSession(matchId);
@@ -64,7 +80,7 @@ public class VoteManager implements VoteApi {
 
         activeVotes.put(sessionId, vote);
 
-        String message = "§6=== 加时赛投票 ===\n" +
+        String message = "§6=== 正在进行加时赛投票 ===\n" +
                 "§e是否进行30秒加时赛？\n" +
                 "§a需要 " + requiredYes + " 票同意 (过半)\n" +
                 "§7按 §aF7 §7同意  |  按 §cF8 §7反对  |  剩余 30 秒";
@@ -73,11 +89,19 @@ public class VoteManager implements VoteApi {
         Cstmm.LOGGER.info("[CSTMM - VoteManager] Started overtime vote for match {}", sessionId);
     }
 
+    /**
+     * 【作用】以 MatchSession 为参数的加时赛投票发起入口（把 session 转 UUID 后委托）。
+     * 【被谁使用】MatchManager（对局计时器走完且配置了加时赛规则时触发）。
+     */
     public void startOvertimeVote(MatchSession session) {
         if (session == null) return;
         startOvertimeVote(UUID.fromString(session.getSessionId()));
     }
 
+    /**
+     * 【作用】以 UUID 指定发起者与目标发起踢人投票（把 UUID 解析为在线玩家后委托）。
+     * 【被谁使用】VoteApi 外部 API 入口（集成方持有 UUID 时调用）。
+     */
     @Override
     public void startKickVote(UUID playerUuid, UUID targetUuid) {
         ServerWorld world = getWorld();
@@ -94,6 +118,11 @@ public class VoteManager implements VoteApi {
         startKickVote(initiator, target);
     }
 
+    /**
+     * 【作用】发起踢人投票：校验发起者冷却（按目标所在地图配置）、目标在对局中、
+     *         无进行中投票、在线人数 ≥2，通过后记录冷却并广播投票提示。
+     * 【被谁使用】ModCommands（/cstmm votekick 命令，支持控制台发起）、内部 UUID 重载委托。
+     */
     public void startKickVote(ServerPlayerEntity initiator, ServerPlayerEntity target) {
         UUID targetUuid = target.getUuid();
         MatchSession session = MatchManager.getInstance().getPlayerSession(targetUuid);
@@ -107,7 +136,7 @@ public class VoteManager implements VoteApi {
             long lastVoteTime = kickCooldowns.getOrDefault(initiatorUuid, 0L);
             if (lastVoteTime != 0 && System.currentTimeMillis() - lastVoteTime < cooldownMillis) {
                 long remaining = (cooldownMillis - (System.currentTimeMillis() - lastVoteTime)) / 1000;
-                initiator.sendMessage(Text.literal("§c你发起踢人过于频繁，请等待 " + remaining + " 秒"), false);
+                initiator.sendMessage(Text.literal("§c你发起踢人过于频繁。 " + remaining + " 秒"), false);
                 return;
             }
         }
@@ -162,7 +191,7 @@ public class VoteManager implements VoteApi {
         activeVotes.put(sessionId, vote);
 
         String initiatorName = (initiator != null) ? initiator.getName().getString() : "控制台";
-        String message = "§6=== 踢人投票 ===\n" +
+        String message = "§6=== 正在进行强制退场 ===\n" +
                 "§e" + initiatorName + " 发起投票踢出 " + target.getName().getString() + "\n" +
                 "§a需要 " + requiredYes + " 票同意 (过半)\n" +
                 "§7按 §aF7 §7同意  |  按 §cF8 §7反对  |  剩余 30 秒";
@@ -171,6 +200,10 @@ public class VoteManager implements VoteApi {
         Cstmm.LOGGER.info("[CSTMM - VoteManager] Started kick vote for {} by {}", target.getName().getString(), initiatorName);
     }
 
+    /**
+     * 【作用】以 UUID 指定投票人进行投票（解析为在线玩家后委托）。
+     * 【被谁使用】VoteApi 外部 API 入口（集成方持有 UUID 时调用）。
+     */
     @Override
     public void handleVote(UUID playerUuid, boolean agree) {
         ServerWorld world = getWorld();
@@ -182,6 +215,12 @@ public class VoteManager implements VoteApi {
         handleVote(voter, agree);
     }
 
+    /**
+     * 【作用】处理一次投票：去重校验 → 记票并广播进度 → 同意票达门槛立即通过 /
+     *         剩余票已不可能过半则立即判负（提前结束投票）。
+     * 【被谁使用】NetworkHandler（客户端 F7/F8 按键的 VOTE_YES/VOTE_NO payload）、
+     *           ModCommands（/cstmm vote yes/no 命令）、内部 UUID 重载委托。
+     */
     public void handleVote(ServerPlayerEntity voter, boolean agree) {
         UUID voterUuid = voter.getUuid();
 
@@ -228,6 +267,8 @@ public class VoteManager implements VoteApi {
         }
     }
 
+    // 【作用】执行投票结果：加时票通过则重置倒计时 30 秒回 FIGHTING，未过则判平局结束对局；
+    //        踢人票通过则恢复被踢者原点/背包后断开其连接，若踢空一队则直接判负
     private void executeVoteResult(VoteSession vote, MatchSession session, boolean passed) {
         String resultMessage;
 
@@ -281,6 +322,11 @@ public class VoteManager implements VoteApi {
         }
     }
 
+    /**
+     * 【作用】每秒推进所有投票倒计时：到时仍未通过的按"未通过"执行并移除；
+     *         对局已结束的投票直接清理（不执行结果、不发消息）。
+     * 【被谁使用】MatchScheduler（服务器每秒 tick 中调用）。仅服务端。
+     */
     public void tick(MinecraftServer server) {
         for (Map.Entry<String, VoteSession> entry : new HashMap<>(activeVotes).entrySet()) {
             VoteSession vote = entry.getValue();
@@ -300,6 +346,7 @@ public class VoteManager implements VoteApi {
 
     // ==================== 辅助方法 ====================
 
+    // 【作用】向对局全员广播投票消息（走 MatchStatusPayload，客户端统一展示避免重复）
     private void broadcastVoteMessage(MatchSession session, String message) {
         MinecraftServer server = Cstmm.getServer();
         if (server == null) return;
@@ -317,6 +364,7 @@ public class VoteManager implements VoteApi {
         }
     }
 
+    // 【作用】统计玩家集合中当前在线的人数（投票门槛按在线人数计算）
     private int countOnlinePlayers(Set<UUID> uuids) {
         MinecraftServer server = Cstmm.getServer();
         if (server == null) return 0;
@@ -330,6 +378,7 @@ public class VoteManager implements VoteApi {
         return count;
     }
 
+    // 【作用】获取主世界引用（仅用于按 UUID 查找在线玩家，与对局所在维度无关）
     private ServerWorld getWorld() {
         MinecraftServer server = Cstmm.getServer();
         if (server != null) {
@@ -338,10 +387,15 @@ public class VoteManager implements VoteApi {
         return null;
     }
 
+    // 查询某对局是否有进行中的投票（MatchManager 结束对局前检查用）
     public boolean hasActiveVote(String sessionId) {
         return activeVotes.containsKey(sessionId);
     }
 
+    /**
+     * 【作用】查询指定对局当前投票的状态快照（类型/目标/票数/剩余秒数）；无对局或无投票返回空状态。
+     * 【被谁使用】VoteApi 外部 API 入口（供外部集成方只读查询）。
+     */
     @Override
     public VoteStatus getVoteStatus(UUID matchId) {
         MatchSession session = resolveSession(matchId);
@@ -375,11 +429,16 @@ public class VoteManager implements VoteApi {
 
     // ==================== 内部类 ====================
 
+    /** 投票类型：加时赛 / 踢人（内部使用；对外经 VoteApi.VoteType 映射） */
     public enum VoteType {
         OVERTIME,
         KICK
     }
 
+    /**
+     * 【作用】单次投票的会话数据：类型、所属对局、踢人目标、票数门槛、当前票数、剩余秒数与已投玩家集合。
+     * 【被谁使用】VoteManager 内部（发起/计票/超时逻辑的数据载体）。仅服务端。
+     */
     public static class VoteSession {
         public final VoteType type;
         public final String sessionId;

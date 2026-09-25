@@ -6,6 +6,13 @@ import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
 
+/**
+ * 【作用】对局 HUD 快照（地图名/红蓝击杀数/剩余秒数/是否在局内），驱动客户端顶部 HUD 显示；
+ * mapName 为空且 inGame=false 表示清空 HUD（对局结束或玩家退出）。
+ * 【被谁使用】S2C（服务端→客户端）。服务端 MatchManager#broadcastHudData 每秒为对局内玩家构造，
+ * 经 NetworkHandler#sendHudData（快照去重后）发送；客户端 ClientNetworkHandler 注册接收器
+ * → HudOverlay#updateData 更新显示。
+ */
 public record HudDataPayload(
         String mapName,
         int redKills,
@@ -14,6 +21,7 @@ public record HudDataPayload(
         boolean inGame
 ) implements CustomPayload {
 
+    // 【作用】包类型标识（cstmm:hud_data），由 NetworkHandler 注册并由网络层路由
     public static final Id<HudDataPayload> ID = new Id<>(
             Identifier.of("cstmm", "hud_data")
     );

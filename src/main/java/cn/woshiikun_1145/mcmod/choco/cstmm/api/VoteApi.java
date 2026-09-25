@@ -2,6 +2,10 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.api;
 
 import java.util.UUID;
 
+/**
+ * 【作用】对局内投票对外 API：发起加时/踢人投票、处理投票、查询投票状态（供外部模组或集成调用）。
+ * 【被谁使用】api 包为对外整合入口；服务端由 VoteManager 实现（VoteManager implements VoteApi）。
+ */
 public interface VoteApi {
 
     /**
@@ -26,6 +30,7 @@ public interface VoteApi {
      */
     VoteStatus getVoteStatus(UUID matchId);
 
+    /** 【作用】当前投票状态快照：类型、被踢目标、赞成/反对票数、所需票数与剩余秒数。 */
     record VoteStatus(
             VoteType type,
             UUID target,
@@ -35,6 +40,7 @@ public interface VoteApi {
             int remainingSeconds
     ) {}
 
+    // 投票类型：加时赛 / 踢人
     enum VoteType {
         OVERTIME,
         KICK

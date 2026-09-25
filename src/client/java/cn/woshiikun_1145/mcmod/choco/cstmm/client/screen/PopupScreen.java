@@ -11,7 +11,8 @@ import org.lwjgl.glfw.GLFW;
 import java.util.List;
 
 /**
- * 全局弹窗界面：服务端弹窗到达时若当前不在匹配菜单/配置界面，用本界面承载弹窗
+ * 【作用】全局弹窗界面：服务端弹窗到达时若当前不在匹配菜单/配置界面，用本界面承载弹窗
+ * 【被谁使用】仅 ClientNetworkHandler 使用（弹窗包接收器中，当前界面非 MatchMenuScreen/ConfigScreen 时 setScreen 打开）。
  * （替代旧版"回退聊天栏"——弹窗语义不应随当前界面缺失而丢失）。
  * 样式与 MatchMenuScreen 内嵌弹窗一致（遮罩 + 对话框 + 确定按钮），
  * 确定后返回打开弹窗前的界面（previous 为 null 则回到游戏画面）。
@@ -26,12 +27,14 @@ public class PopupScreen extends Screen {
     /** "确定"按钮区域（render 每帧计算，mouseClicked 使用） */
     private int[] btnRect;
 
+    // 【作用】构造弹窗：记录消息文本与"确定后返回"的前置界面
     public PopupScreen(String message, Screen previous) {
         super(Text.literal("提示"));
         this.message = message;
         this.previous = previous;
     }
 
+    // 不暂停游戏：服务器界面惯例（单人打开时世界继续运行）
     @Override
     public boolean shouldPause() {
         return false;
@@ -42,6 +45,10 @@ public class PopupScreen extends Screen {
         // 留空：不绘制原版模糊背景（否则弹窗文字会被糊掉，同 MatchMenuScreen）
     }
 
+    /**
+     * 【作用】弹窗绘制：全屏遮罩 → 居中对话框（标题 + 按宽度自动换行的消息 + 确定按钮），
+     * 按钮区域每帧回写 btnRect 供点击命中使用。
+     */
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         context.fill(0, 0, this.width, this.height, 0xA0000000);
@@ -52,8 +59,10 @@ public class PopupScreen extends Screen {
         int bx = (this.width - boxW) / 2;
         int by = (this.height - boxH) / 2;
         context.fill(bx, by, bx + boxW, by + boxH, 0xFF212121);
-        context.drawBorder(bx, by, boxW, boxH, 0xFFDAA520);
-        context.drawCenteredTextWithShadow(this.textRenderer, "§6提示", this.width / 2, by + 8, 0xFFFFFF);
+        // 弹窗边框与标题跟随主题色（个性化页设置，与 MatchMenuScreen 内嵌弹窗一致）
+        int accent = cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig.getThemeColorArgb();
+        context.drawBorder(bx, by, boxW, boxH, accent);
+        context.drawCenteredTextWithShadow(this.textRenderer, "提示", this.width / 2, by + 8, accent);
         int ly = by + 26;
         for (OrderedText line : lines) {
             context.drawTextWithShadow(this.textRenderer, line, bx + 12, ly, 0xFFE0E0E0);

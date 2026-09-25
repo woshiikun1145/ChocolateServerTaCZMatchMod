@@ -15,6 +15,10 @@ import net.minecraft.text.Text;
 /**
  * 装备管理器 - 仅服务端
  * 负责竞技模式装备发放和商店购买（免费）
+ * 【作用】按全局配置给竞技玩家发放默认装备（配置缺失时发放钻石套兜底），
+ *         并处理商店购买请求（按地图商品配置免费发放物品）。
+ * 【被谁使用】MatchManager（开局 setupCompetitiveGear）、NetworkHandler（客户端商店购买请求
+ *           givePurchasedItem）。仅服务端。
  */
 public class EquipmentManager {
 
@@ -22,6 +26,7 @@ public class EquipmentManager {
 
     private EquipmentManager() {}
 
+    // 单例入口（懒加载）
     public static EquipmentManager getInstance() {
         if (instance == null) {
             instance = new EquipmentManager();
@@ -31,6 +36,7 @@ public class EquipmentManager {
 
     /**
      * 发放默认装备给玩家（竞技模式）
+     * 【被谁使用】setupCompetitiveGear（开局清空背包后调用）；仅服务端内部使用。
      */
     public void giveDefaultGear(ServerPlayerEntity player) {
         GlobalConfig config = ConfigManager.getInstance().getGlobalConfig();
@@ -67,6 +73,7 @@ public class EquipmentManager {
         Cstmm.LOGGER.debug("[CSTMM - EquipmentManager] Gave default gear to {}", player.getName());
     }
 
+    // 【作用】兜底装备：全局配置缺失/未配置装备时发钻石盔甲套装 + 64 熟牛肉
     private void giveFallbackGear(ServerPlayerEntity player) {
         applyToSlot(player, "head", new ItemStack(net.minecraft.item.Items.DIAMOND_HELMET));
         applyToSlot(player, "chest", new ItemStack(net.minecraft.item.Items.DIAMOND_CHESTPLATE));
@@ -76,6 +83,7 @@ public class EquipmentManager {
         Cstmm.LOGGER.debug("[CSTMM - EquipmentManager] Gave fallback gear to {}", player.getName());
     }
 
+    // 【作用】按槽位名（head/chest/legs/feet/mainhand/offhand）把物品放到对应装备栏，未知槽位塞背包或掉落
     private void applyToSlot(ServerPlayerEntity player, String slot, ItemStack stack) {
         if (stack.isEmpty()) return;
 
@@ -147,6 +155,7 @@ public class EquipmentManager {
     /**
      * 商店购买物品 - 免费发放，不扣费
      * 商品取自玩家所在地图的配置；购买资格按对局会话模式判定（地图配置已无模式）
+     * 【被谁使用】NetworkHandler（处理客户端 SHOP_BUY 购买请求 payload）。仅服务端。
      */
     public boolean givePurchasedItem(ServerPlayerEntity player, int itemIndex) {
         MatchSession session = MatchManager.getInstance().getPlayerSession(player.getUuid());
@@ -185,6 +194,7 @@ public class EquipmentManager {
 
     /**
      * 清空玩家背包并给予竞技装备
+     * 【被谁使用】MatchManager（对局开始把玩家传送入地图时）。仅服务端。
      */
     public void setupCompetitiveGear(ServerPlayerEntity player) {
         player.getInventory().clear();

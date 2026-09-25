@@ -6,7 +6,8 @@ import net.minecraft.client.gui.DrawContext;
 import net.minecraft.text.Text;
 
 /**
- * 配置界面标签（自 ConfigScreen 内部类提取，逻辑逐字保留）。
+ * 【作用】配置界面静态文字标签（自 ConfigScreen 内部类提取，逻辑逐字保留）。
+ * 【被谁使用】仅 ConfigScreen 使用（各字段标签/表头/灰色提示小字，加入 rightScrollables 随区滚动）。
  */
 final class LabelWidget implements Drawable {
     private final int x, y;
@@ -30,6 +31,7 @@ final class LabelWidget implements Drawable {
         this.text = text;
     }
 
+    // 【作用】绘制标签文字（灰色带阴影，使用全局字体渲染器）
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         context.drawText(MinecraftClient.getInstance().textRenderer, text, x, y, 0xAAAAAA, true);

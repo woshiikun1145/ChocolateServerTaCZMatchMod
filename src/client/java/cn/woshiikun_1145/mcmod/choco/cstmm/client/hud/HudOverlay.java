@@ -10,33 +10,56 @@ import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.render.RenderTickCounter;
 import net.minecraft.text.Text;
 
+/**
+ * 【作用】对战信息 HUD 覆盖层：在屏幕中央上方绘制地图名、红蓝双方击杀数、剩余时间与击杀占比色条，
+ *         支持进出对局的淡入淡出动画；未握手成功时不渲染。
+ * 【被谁使用】CstmmClient#onInitializeClient 调用 init() 注册到 HudRenderCallback；
+ *             ClientNetworkHandler 的 HudDataPayload 接收器调用 updateData、DISCONNECT 回调调用 reset。
+ */
 @Environment(EnvType.CLIENT)
 public class HudOverlay implements HudRenderCallback {
 
+    // 饿汉式单例（HudRenderCallback 事件监听器）
     private static final HudOverlay INSTANCE = new HudOverlay();
 
     // 当前 HUD 数据
+    // 地图显示名；空串表示未在对局
     private static String mapName = "";
+    // 红队击杀数
     private static int redKills = 0;
+    // 蓝队击杀数
     private static int blueKills = 0;
+    // 对局剩余秒数；0 表示非计时模式
     private static int remainingSeconds = 0;
+    // 当前是否处于对局中
     private static boolean inGame = false;
 
     // 动画相关
+    // HUD 整体透明度系数（0~1），进出对局时逐帧增减实现淡入淡出
     private static float fadeAlpha = 1.0f;
 
+    // 单例，禁止外部实例化
     private HudOverlay() {}
 
+    /**
+     * 【作用】将本类注册为 HUD 渲染回调，使 onHudRender 每帧被调用。
+     * 【被谁使用】仅被 CstmmClient#onInitializeClient 调用一次。
+     */
     public static void init() {
         HudRenderCallback.EVENT.register(INSTANCE);
     }
 
+    /**
+     * 【作用】每帧渲染对战信息面板：按淡入淡出系数绘制背景、边框、三行文本与红蓝击杀占比条。
+     * 【被谁使用】Fabric HudRenderCallback 事件（init 注册后由渲染循环每帧回调）。
+     */
     @Override
     public void onHudRender(DrawContext context, RenderTickCounter tickCounter) {
         // 未与服务端握手成功时不渲染 HUD
         if (!ClientHandshakeState.isHandshaked()) return;
 
         MinecraftClient client = MinecraftClient.getInstance();
+        // 【作用】按是否在对局中逐帧调整透明度，实现 HUD 淡入/淡出
         if (client.player == null || !inGame) {
             // 不在游戏中，淡出
             if (fadeAlpha > 0) {
@@ -125,6 +148,7 @@ public class HudOverlay implements HudRenderCallback {
         return (argb & 0xFFFFFF) | (a << 24);
     }
 
+    // 将秒数格式化为 "分:秒"（两位补零）
     private static String formatTime(int seconds) {
         int minutes = seconds / 60;
         int secs = seconds % 60;
@@ -133,6 +157,10 @@ public class HudOverlay implements HudRenderCallback {
 
     // ============ 数据更新方法 ============
 
+    /**
+     * 【作用】整体覆盖写入服务端推送的 HUD 对战数据（地图名/击杀数/剩余时间/对局状态）。
+     * 【被谁使用】仅被 ClientNetworkHandler 的 HudDataPayload 接收器调用。
+     */
     public static void updateData(String name, int red, int blue, int time, boolean game) {
         mapName = name;
         redKills = red;
@@ -141,6 +169,10 @@ public class HudOverlay implements HudRenderCallback {
         inGame = game;
     }
 
+    /**
+     * 【作用】断线时清空 HUD 数据并重置淡出动画状态。
+     * 【被谁使用】仅被 ClientNetworkHandler 的 DISCONNECT 回调调用。
+     */
     public static void reset() {
         mapName = "";
         redKills = 0;
@@ -150,6 +182,7 @@ public class HudOverlay implements HudRenderCallback {
         fadeAlpha = 0;
     }
 
+    // 是否处于对局中（当前无调用方，预留查询接口）
     public static boolean isInGame() {
         return inGame;
     }

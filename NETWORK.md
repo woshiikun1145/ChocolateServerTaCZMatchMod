@@ -35,8 +35,8 @@ CSTMM 网络层基于 **Fabric Networking API v1**（`fabric-networking-api-v1`�
 │  [客户端侧]                                  [服务端侧]                                │
 │  CstmmClient                                 Cstmm                                    │
 │    └─ ClientNetworkHandler.register()          └─ NetworkHandler.register()           │
-│         │  S2C 接收器 ×11                          │  Codec 注册（S2C×11 + C2S×7）     │
-│         │  ClientPlayConnectionEvents              │  C2S 接收器 ×7                   │
+│         │  S2C 接收器 ×12                          │  Codec 注册（S2C×12 + C2S×9）     │
+│         │  ClientPlayConnectionEvents              │  C2S 接收器 ×8                   │
 │         │  ClientTickEvents（握手超时）             │  ServerPlayConnectionEvents      │
 │         └─ 发送：ClientPlayNetworking.send         └─ 发送：ServerPlayNetworking.send  │
 │                                                                                       │
@@ -71,8 +71,8 @@ CSTMM 网络层基于 **Fabric Networking API v1**（`fabric-networking-api-v1`�
 
 | 侧 | 注册 |
 |---|---|
-| `playS2C()` ×11 | `hud_data` `match_status` `config_sync` `open_config_screen` `player_profile` `handshake_s2c` `shop_data` `clan_data` `queue_status` `popup` `badge` |
-| `playC2S()` ×7 | `match_action` `config_update` `request_config_sync` `handshake_c2s` `clan_action` `request_queue_status` `request_badge` |
+| `playS2C()` ×12 | `hud_data` `match_status` `config_sync` `config_meta` `open_config_screen` `player_profile` `handshake_s2c` `shop_data` `clan_data` `queue_status` `popup` `badge` |
+| `playC2S()` ×9 | `match_action` `config_update` `request_config_sync` `handshake_c2s` `clan_action` `request_queue_status` `request_badge` `badge_known` `set_face` |
 
 **接收器注册**（只需数据流向的接收侧）：
 
@@ -85,7 +85,8 @@ CSTMM 网络层基于 **Fabric Networking API v1**（`fabric-networking-api-v1`�
 | `clan_action` | C2S | 服务端 `handleClanActionMaybeChunked`（徽标分片重组后进 `handleClanAction`） | 同上 |
 | `request_queue_status` | C2S | 服务端（订阅集增删 + 立即回发快照） | 同上 |
 | `request_badge` | C2S | 服务端（badgeId 反查战队补发全部分片） | 同上 |
-| 其余 11 个 S2C 包 | S2C | 客户端各接收器（`ClientNetworkHandler`） | `context.client().execute()` → 客户端主线程 |
+| `set_face` | C2S | 服务端 `handleSetFace`（校验后写档案 + 同步档案/战队/队列三处下发） | 同上 |
+| 其余 12 个 S2C 包 | S2C | 客户端各接收器（`ClientNetworkHandler`） | `context.client().execute()` → 客户端主线程 |
 
 ### 3.2 线程模型（重要）
 
@@ -101,7 +102,7 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 | 事件 | 服务端动作 | 客户端动作 |
 |---|---|---|
 | JOIN | 发首个握手请求，登记 `pendingHandshakes[uuid]=0` | `ClientHandshakeState.onJoin()` 重置握手状态；配置/履历同步由 EventListener 的 JOIN 逻辑触发 |
-| DISCONNECT | 清空该玩家的配置重组缓冲 + 限频窗口 + 队列状态订阅 + 徽标上传缓冲/已发集合（`clearPendingConfigUpdate` / `syncRequestWindows.remove` / `queueStatusSubscribers.remove` / `pendingBadgeUploads.remove` / `sentBadges.remove`） | 重置握手状态、`HudOverlay.reset()`、清空 `ConfigDataCache`/`ShopDataCache`/`ClanCache`/`QueueStatusCache`/`BadgeCache`（防跨服残留） |
+| DISCONNECT | 清空该玩家的配置重组缓冲 + 限频窗口 + 队列状态订阅 + 徽标上传缓冲/已发集合（`clearPendingConfigUpdate` / `syncRequestWindows.remove` / `queueStatusSubscribers.remove` / `pendingBadgeUploads.remove` / `sentBadges.remove`） | 重置握手状态、`HudOverlay.reset()`、清空 `ConfigDataCache`/`ShopDataCache`/`ClanCache`/`QueueStatusCache`/`BadgeCache`/`FaceCache`/`UrlImageCache`/`FaceImageCache`（防跨服残留） |
 
 ## 4. 线路格式基础（wire format）
 
@@ -126,9 +127,10 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 |---|---|---|---|
 | `cstmm:handshake_s2c` | S2C | 玩家加入 + 未应答时每秒重试（≤2 次） | 加入时 1~3 次 |
 | `cstmm:handshake_c2s` | C2S | 每次收到 handshake_s2c | 与上成对 |
-| `cstmm:config_sync` | S2C | 加入 / OP 保存后全服广播 / 玩家请求 | 每次同步 N 片 |
+| `cstmm:config_sync` | S2C | JOIN 哈希不匹配/超时兜底 / OP 保存后全服广播 / 玩家请求（哈希不匹配） | 每次同步 N 片（哈希命中时 0 片） |
+| `cstmm:config_meta` | S2C | JOIN 哈希握手首包 / 哈希匹配回应 / 全量随行 / 保存广播随行 | 小包（哈希 + inUseMaps，约百字节） |
 | `cstmm:config_update` | C2S | OP 在配置界面点保存 | 每次提交 N 片 |
-| `cstmm:request_config_sync` | C2S | 打开配置界面 / 点"重新加载" | 限频 2 次/秒/人 |
+| `cstmm:request_config_sync` | C2S | JOIN 哈希握手回应 / 打开配置界面 / 点"重新加载"（携带客户端缓存哈希，服务端一致时免全量） | 限频 2 次/秒/人 |
 | `cstmm:match_action` | C2S | 入队/快速匹配/退队/投票/购买/请求履历/请求商店 | 玩家操作驱动 |
 | `cstmm:match_status` | S2C | 对局状态消息广播 | 事件驱动 |
 | `cstmm:hud_data` | S2C | 对局期间每秒推送（含结束清除包） | 1 次/秒/人 |
@@ -139,9 +141,11 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 | `cstmm:clan_data` | S2C | 战队数据（MINE/LIST/DETAIL JSON 快照） | 页面打开/搜索 + 战队变化时推送给全体成员 |
 | `cstmm:request_queue_status` | C2S | 队列状态订阅开关（打开匹配主菜单订阅、关闭菜单退订） | 菜单打开/关闭时 |
 | `cstmm:queue_status` | S2C | 队列状态快照（own/clan/maps JSON，蓝红人数/玩家列表按模式拆分） | 订阅后队列变化时推送 |
-| `cstmm:popup` | S2C | 弹窗通知（当前界面内弹对话框，无界面回退聊天：配置已保存/战队加入结果/重复入队拒绝等） | 事件驱动 |
-| `cstmm:badge` | S2C | 战队徽标分片下发（badgeId 内容寻址，每片 ≤30000 字符） | MINE/DETAIL 发送前（同一徽标每人只发一次）+ 缺失补发 |
-| `cstmm:request_badge` | C2S | 徽标缓存缺失请求（客户端收 MINE/DETAIL 后本地无该 badgeId 时请求补发） | 极低频 |
+| `cstmm:popup` | S2C | 弹窗通知（匹配菜单/配置界面内嵌弹窗，其他情况用全局弹窗界面承载、确定后返回原界面：配置已保存/战队加入结果/重复入队拒绝等） | 事件驱动 |
+| `cstmm:badge` | S2C | 战队徽标分片下发（badgeId 内容寻址，每片 ≤30000 字符） | MINE/DETAIL 发送前（同一徽标每人只发一次，客户端已上报的磁盘缓存 id 跳过）+ 缺失补发 |
+| `cstmm:request_badge` | C2S | 徽标缓存缺失请求（客户端收 MINE/DETAIL 后内存+磁盘均无该 badgeId 时请求补发） | 极低频 |
+| `cstmm:badge_known` | C2S | 客户端进服上报磁盘缓存已有的徽标 id 列表，服务端加入该玩家"已下发"集合（跳过重发） | 每次进服 1 次（有缓存才发） |
+| `cstmm:set_face` | C2S | 设置/清除自己的头像绑定（个性化页保存/清除按钮；服务端校验 qq/bili 平台 + 纯数字 ID） | 玩家操作驱动 |
 
 ### 5.2 逐包字段表
 
@@ -162,28 +166,36 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 
 **`cstmm:match_status`（S2C）**：`enum StatusType（MATCH_STARTING/MATCH_ENDED/VOTE_STARTED/VOTE_RESULT/COUNTDOWN，ordinal）` + `string message(128B，发送链路统一截断)` + `int redKills` + `int blueKills`。
 
-**`cstmm:config_sync` / `cstmm:config_update`（分片包，两端字段相同）**：`varInt partIndex` + `varInt totalParts` + `string data(32767B)`，`data` 实际每片 ≤ 30000 字节。
+**`cstmm:config_sync` / `cstmm:config_update`（分片包，两端字段相同）**：`varInt partIndex` + `varInt totalParts` + `string data(32767B)`，`data` 实际每片 ≤ 30000 字节。`config_sync` 的 data 拼接后为**核心配置 JSON** `{"hash":"<SHA-256 hex 64字符>","maps":[...],"global":{...}}`（不含 inUseMaps——对局开始/结束不改变哈希，客户端磁盘缓存可长期复用）。
 
-**`cstmm:player_profile`（S2C）**：`string jsonData(65536B)`。服务端发送前检查：JSON 的 UTF-8 字节数 **≥ 65536 时跳过发送**并 WARN（不截断——履历截断会造成数据失真，宁可不发）。
+**`cstmm:config_meta`（S2C）**：`string configHash(128B，SHA-256 hex)` + `string inUseMapsJson(32767B，如 `["id1","id2"]`)**。哈希握手省带宽的核心：核心配置（maps+global）的 SHA-256 先行下发，客户端与本机磁盘缓存比对，一致则回报哈希、服务端跳过全量下发；inUseMaps（对局使用中地图）随本包单独同步，供配置界面阻止删除活跃地图。
+
+**`cstmm:request_config_sync`（C2S）**：`string clientHash(128B)`——客户端本地缓存的核心配置哈希（无缓存/不适用为空串）。服务端一致 → 仅回 `config_meta`（更新 inUseMaps）；不一致 → 全量 `config_sync` + `config_meta`。编解码对空载荷防御（读到 0 字节按空串处理，兼容旧版客户端的空包）。
+
+**`cstmm:player_profile`（S2C）**：`string jsonData(65536B)`。JSON = PlayerProfile 序列化（战绩字段 + `avatarType`/`avatarId` 头像绑定，随档案持久化于 `config/cstmm/data/players/<uuid>.json`）。服务端发送前检查：JSON 的 UTF-8 字节数 **≥ 65536 时跳过发送**并 WARN（不截断——履历截断会造成数据失真，宁可不发）。
 
 **`cstmm:clan_action`（C2S）**：`enum action（REQUEST_LIST/REQUEST_DETAIL/REQUEST_MINE/CREATE/JOIN/LEAVE/DISBAND/TRANSFER/KICK/EDIT，ordinal 末尾追加）` + `string text1(192B)` + `string text2(16B)` + `string badge(30000B)` + `int number` + `varInt badgePartIndex` + `varInt badgeTotalParts`。字段按动作复用：CREATE/EDIT=text1名称/text2缩写/badge徽标分片/number成员上限；JOIN、REQUEST_DETAIL=text1战队名；TRANSFER/KICK=text1目标玩家名；REQUEST_LIST=text1搜索词（空=随机10条）；其余空闲。
 **徽标分片上传**：badge ≤30000 字符时单包直发（badgePartIndex=0/totalParts=1）；更大时客户端拆成 N 片逐包发送（每片 ≤30000），服务端重组缓冲集齐后拼接执行动作（**只有最后一片触发**）。服务端防护：totalParts ∈ [1,64]、partIndex 越界拒绝、累计 ≤1.92M 字符、新序列（partIndex=0 或元数据不匹配）覆盖旧缓冲、断线清理。
 
-**`cstmm:badge`（S2C）**：`string badgeId(16B)` + `varInt partIndex` + `varInt totalParts` + `string data(30000B)`。badgeId = 完整徽标 base64 的 SHA-256 前 8 字节 hex（内容寻址，相同徽标跨玩家/战队复用缓存）；totalParts ∈ [1,128]。**触发时机**：发送携带徽标的 MINE/DETAIL JSON **之前**（TCP 保序保证客户端重组完成后再收到引用）；per-player 已发集合去重（同一 badgeId 只发一次），客户端缺失时经 `cstmm:request_badge` 请求全量补发。
+**`cstmm:badge`（S2C）**：`string badgeId(16B)` + `varInt partIndex` + `varInt totalParts` + `string data(30000B)`。badgeId = 完整徽标 base64 的 SHA-256 前 8 字节 hex（内容寻址，相同徽标跨玩家/战队复用缓存）；totalParts ∈ [1,3]（48KiB 上限，base64 ≤ 65536 字符）。**触发时机**：发送携带徽标的 MINE/DETAIL JSON **之前**（TCP 保序保证客户端重组完成后再收到引用）；per-player 已发集合去重（同一 badgeId 只发一次，客户端进服经 `badge_known` 上报磁盘已有的 id 同样跳过），客户端内存+磁盘均缺失时经 `cstmm:request_badge` 请求全量补发。
 
 **`cstmm:request_badge`（C2S）**：`string badgeId(16B)`——服务端按 badgeId 反查战队（SHA-256 惰性计算，edit 徽标后 id 自动变化），重新下发全部分片；查不到静默忽略。
 
-**`cstmm:clan_data`（S2C）**：`string kind(16B)` + `string json(65536B)`。kind=MINE：`{"inClan":bool,"clan":{name,abbr,badge,leaderName,memberCount,limit,members:[{name,isLeader,online,matchState}]}}`（**badge 字段 = badgeId 内容寻址 id（16 字符 hex），非完整 base64**；matchState=""=空闲，否则"地图显示名-模式名"）；kind=LIST：`{"clans":[{name,abbr,leaderName,memberCount,limit}]}`（行内无徽标）；kind=DETAIL：`{"found":bool,"clan":{...同上}}`。客户端收到 MINE/DETAIL 后本地徽标缓存缺失 → 自动发 `request_badge`。
+**`cstmm:badge_known`（C2S）**：`string badgeIds(8192B)`——逗号分隔的 16 字符 hex id 列表（≤256 个）。客户端进服时读磁盘缓存目录 `config/cstmm/client/cache/badges/<host_port>/`（按服务器隔离；服务器标识中的冒号等非法字符替换为下划线）收集已有徽标并上报（客户端徽标磁盘化：分片收到即落盘，内容寻址跨重连复用）；服务端逐个校验 hex 格式后加入该玩家的"已下发"集合，MINE/DETAIL 引用这些徽标时只发 id 引用、跳过分片重发。谎报无害（客户端自己显示占位）；DISCONNECT 时该集合随 per-player 状态清空，重连重新上报。
+
+**`cstmm:clan_data`（S2C）**：`string kind(16B)` + `string json(65536B)`。kind=MINE：`{"inClan":bool,"clan":{name,abbr,badge,leaderName,memberCount,limit,members:[{name,isLeader,online,matchState,avatarType,avatarId}]}}`（**badge 字段 = badgeId 内容寻址 id（16 字符 hex）或徽标 URL（客户端自行下载），非完整 base64**；matchState=""=空闲，否则"地图显示名-模式名"；avatarType/avatarId = 成员头像绑定，未绑定为空串）；kind=LIST：`{"clans":[{name,abbr,leaderName,memberCount,limit}]}`（行内无徽标）；kind=DETAIL：`{"found":bool,"clan":{...同上}}`。客户端收到 MINE/DETAIL 后本地徽标缓存（内存+磁盘）缺失 → 自动发 `request_badge`。
 
 **`cstmm:request_queue_status`（C2S）**：`bool subscribe`——true=加入队列状态订阅集并立即回发一次快照；false=退订。**事件驱动**：队列变化（加入/退出/开局/解散/补位）时服务端主动向订阅者推送，无轮询、无限频。
 
-**`cstmm:queue_status`（S2C）**：`string json(65536B)` = `{own:{inQueue,map,mapId,mode,matched,needed}, clan:{inClan,name,abbr,count,members:[{map,player}]}, maps:[{id,status,modes:[{mode,red,blue,players}]}]}`。status ∈ AVAILABLE/IN_MATCH/DISABLED/COOLDOWN；蓝红人数与玩家列表按"竞技"/"休闲"两模式分别下发（客户端每 3 秒轮换展示，地图名/类型/图片由客户端按 id 从配置缓存解析）。
+**`cstmm:queue_status`（S2C）**：`string json(65536B)` = `{own:{inQueue,avatarType,avatarId,map,mapId,mode,matched,needed}, clan:{inClan,name,abbr,count,members:[{map,player}]}, maps:[{id,status,modes:[{mode,count,players}]}]}`。status ∈ AVAILABLE/IN_MATCH/DISABLED/COOLDOWN；排队人数与玩家列表按"竞技"/"休闲"两模式分别下发（客户端每 3 秒轮换展示，地图名/类型/图片由客户端按 id 从配置缓存解析）；own 的 avatarType/avatarId 为自己的头像绑定（队列页"战队徽标右侧"展示）。**战队任何变更也会触发向订阅者重推**（clan 行依赖战队数据，否则"先匹配后入队"会显示旧状态）。`count` 为该模式排队总人数——队伍在开局时才分配，队列层面无红蓝之分（旧 red/blue 字段已删除）。
 
-**`cstmm:popup`（S2C）**：`string message(256B)`——客户端在当前界面内弹对话框（MatchMenuScreen/ConfigScreen），无界面回退聊天栏。
+**`cstmm:set_face`（C2S）**：`string avatarType(16B)` + `string avatarId(32B)`——头像绑定（"qq"/"bili" + 纯数字账号 ID），空 avatarType = 清除。服务端校验（`PlayerProfile.validateAvatarBinding`）后写入玩家档案（`config/cstmm/data/players/<uuid>.json` 的 avatarType/avatarId 字段），成功后弹窗确认并向三处同步：重发自己的档案（履历页）、向战队全体在线成员重推 MINE（成员列表头像广播）、向本人重发队列快照（徽标右侧头像）。**服务端只存/发绑定，不解析图片直链**——头像图片由各客户端按绑定自行获取（QQ 拼接 qlogo 直链 / B站经 uapis 解析 face 字段）。
+
+**`cstmm:popup`（S2C）**：`string message(256B)`——客户端在匹配菜单/配置界面内弹对话框；其他界面或无界面时用全局弹窗界面（PopupScreen）承载，确定后返回原界面。
 
 **`cstmm:shop_data`（S2C）**：`bool eligible` + `varInt itemCount` + 循环 `{string itemId(256B) + varInt price + varInt maxPurchase}`。解码端 `count = max(0, readVarInt)` 防负数，`create` 静态工厂保证 itemCount 与列表长度一致。
 
-**`cstmm:handshake_s2c`**：`string serverVersion`。**`cstmm:handshake_c2s`**：`string clientVersion`。**`request_config_sync` / `open_config_screen`**：空包（codec 仅占位）。
+**`cstmm:handshake_s2c`**：`string serverVersion`。**`cstmm:handshake_c2s`**：`string clientVersion`。**`cstmm:open_config_screen`**：空包（codec 仅占位）；`cstmm:request_config_sync` 见 5.2（`string clientHash`）。
 
 ## 6. 握手协议——完整状态机
 
@@ -213,14 +225,26 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 - **版本号同源**：两端各从 `FabricLoader` 的 mod 容器元数据读取（`getModVersion()` / `getClientVersion()`），即 jar 的 `mod_version`，改 `gradle.properties` 重新构建即自动同步。
 - **门禁**：`ClientHandshakeState.isHandshaked()` 是全部客户端功能的总开关——快捷键、商店、匹配菜单在未握手时只弹提示不发任何包。
 
-## 7. 配置同步——分片管道详解
+## 7. 配置同步——哈希握手 + 分片管道详解
 
 ### 7.1 数据流总览
 
 ```
-[服务端权威状态]  ConfigManager（maps + global）
-      │ buildConfigJson()：{maps:[...], global:{...}, inUseMaps:[...]}
-      │                    ▲ inUseMaps = 当前非 ENDED 对局的地图 ID（客户端据此阻止删除活跃地图）
+[服务端权威状态]  ConfigManager（maps + global，任何变更 configVersion++）
+      │ ensureConfigCache()（按版本惰性重建，同一版本只序列化一次）
+      │ 核心配置 = {"hash":SHA-256(maps+global),"maps":[...],"global":{...}}（不含 inUseMaps）
+      │
+      │ JOIN ──► ConfigMetaPayload(hash, inUseMaps)   ← 约 100 字节小包先行
+      │            │
+      │            ▼
+      │ [客户端] ConfigMetaPayload 接收器（仅 JOIN 握手阶段比对）
+      │   ├─ 磁盘缓存哈希 == 服务端哈希
+      │   │    ├─ 磁盘缓存恢复 ConfigDataCache（零网络全量）
+      │   │    └─ ──► request_config_sync(hash) ──► 服务端：哈希一致 → 仅回 config_meta（更新 inUseMaps）
+      │   └─ 不一致/无缓存/损坏
+      │        └─ ──► request_config_sync("") ──► 服务端：全量 config_sync 分片 + config_meta
+      │
+      │ （3 秒未收到客户端回应 → tickHandshake 兜底全量下发，兼容旧版客户端/丢包）
       ▼
 splitByUtf8Bytes(json, 30000) ──► [片0][片1]...[片N-1]
       │ 逐片 ServerPlayNetworking.send(ConfigSyncPayload(i, N, chunk))
@@ -229,13 +253,16 @@ splitByUtf8Bytes(json, 30000) ──► [片0][片1]...[片N-1]
       │ partIndex==0 → 重置缓冲；丢首包 → 放弃本次同步
       │ 逐片 append，receivedParts == totalParts → 拼接完成
       ▼
-applyConfigSync(json)：GSON 解析 → ConfigDataCache.update* → 刷新 MatchMenuScreen / ConfigScreen
+applyConfigSync(json, persist=true)：解析 hash → ConfigDataCache.update* → 落盘 ConfigDiskCache
+      （按服务器标识隔离存 config/cstmm_client_cache/<serverKey>.json，重连免全量）
 ```
 
 ### 7.2 S2C 侧（服务端 → 客户端）
 
-- **触发点**：① 玩家加入（EventListener JOIN）② 任意 OP 保存成功后**全服广播** ③ 玩家发 `request_config_sync`（限频 2/s）。
+- **触发点（全量 config_sync）**：① JOIN 哈希握手不匹配或超时兜底 ② 任意 OP 保存成功后**全服广播**（配置刚变更、全员哈希必然失效，无法再省）③ 玩家发 `request_config_sync` 且哈希不匹配（限频 2/s）。
+- **触发点（config_meta 小包）**：JOIN 握手首包、哈希匹配回应、全量随行、保存广播随行。
 - **客户端重组为信任路径**：S2C 只做计数重组（`receivedParts >= pendingTotalParts`），无位图去重、无大小上限——因为服务端是自己人；防护全部集中在 C2S。
+- **为什么 inUseMaps 单独走 meta**：若计入哈希，每次对局开始/结束都会使全员缓存失效、触发无谓全量；剥离后哈希只覆盖 maps+global，客户端缓存可跨重连长期复用。
 
 ### 7.3 C2S 侧（OP 客户端 → 服务端）
 
@@ -255,11 +282,12 @@ applyConfigSync(json)：GSON 解析 → ConfigDataCache.update* → 刷新 Match
   → 活跃对局保护：本次提交中"消失"的地图 ID（服务端有、提交无）逐个检查，
      任一正处于非 ENDED 对局 → 整次保存取消并提示（防对局僵死）
   → updateMap(逐个) + removeMap(消失的) + updateGlobal —— 先全部校验后统一应用
-  → 权威重建 syncJson = buildConfigJson()（用服务端数据，不用客户端原始 JSON）
-  → 全服广播 config_sync
+     （configVersion++，NetworkHandler 核心配置 JSON/哈希缓存自动失效重建）
+  → 权威重建 syncJson = buildCoreConfigJson()（用服务端数据，不用客户端原始 JSON）
+  → 全服广播 config_sync（分片）+ config_meta（inUseMaps）
 ```
 
-注意：**保存失败是全有或全无**（先解析校验再应用）；**广播数据是服务端重建的**——即使客户端提交了被篡改的字段（如悄悄加进来的地图），广播回所有客户端的都是服务端认可后的状态。
+注意：**保存失败是全有或全无**（先解析校验再应用）；**广播数据是服务端重建的**——即使客户端提交了被篡改的字段（如悄悄加进来的地图），广播回所有客户端的都是服务端认可后的状态。保存后所有客户端收到新哈希并落盘，之后重连即可免全量。
 
 ## 8. 防护机制汇总
 

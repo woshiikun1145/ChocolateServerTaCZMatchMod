@@ -7,14 +7,16 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 配置界面纯函数辅助（自 ConfigScreen 提取，逻辑逐字保留）：
+ * 【作用】配置界面纯函数辅助（自 ConfigScreen 提取，逻辑逐字保留）：
  * 深拷贝与保存前校验。
+ * 【被谁使用】仅 ConfigScreen 使用（loadData/addNewMap 等处深拷贝，saveConfig 保存前校验）。
  */
 final class ConfigScreenSupport {
 
     private ConfigScreenSupport() {
     }
 
+    // 【作用】深拷贝单张地图配置（含商店物品/边界/出生点集合），编辑副本与缓存数据互不影响
     static MapConfig deepCopyMap(MapConfig src) {
         MapConfig dst = new MapConfig();
         dst.setId(src.getId());
@@ -59,6 +61,7 @@ final class ConfigScreenSupport {
         return dst;
     }
 
+    // 【作用】深拷贝全局配置（含默认装备槽位列表）
     static GlobalConfig deepCopyGlobal(GlobalConfig src) {
         GlobalConfig dst = new GlobalConfig();
         dst.setQuickTimeout(src.getQuickTimeout());

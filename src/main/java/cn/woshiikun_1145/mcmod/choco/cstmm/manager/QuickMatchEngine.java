@@ -22,14 +22,17 @@ import java.util.UUID;
  * 快速匹配引擎（自 QueueManager 簇 F 提取，逻辑逐字保留）。
  * 持有按模式独立的快速队列状态，通过回引用访问 QueueManager 的地图队列与玩家映射。
  * 匹配管线保持：直接开局 → 跨队列合并 → 超时补位，绝不混合两种模式。
+ * 【被谁使用】仅由 QueueManager 创建并持有（字段 engine），入口 tryQuickMatch 由 QueueManager#tryMatch 每秒驱动；服务端。
  */
 final class QuickMatchEngine {
+    // 回引用：访问 QueueManager 的地图队列、玩家映射与队列变化推送
     private final QueueManager qm;
     /** 快速匹配队列，按模式独立：key: 匹配模式 */
     private final Map<String, List<UUID>> quickQueues;
     /** 快速匹配等待计数（tryQuickMatch 每秒调用一次，实为秒数；与 quickTimeout 秒口径一致） */
     private int quickWaitSeconds;
 
+    // 构造：仅由 QueueManager 创建，初始化两条按模式独立的快速队列
     QuickMatchEngine(QueueManager qm) {
         this.qm = qm;
         this.quickQueues = new HashMap<>();
@@ -38,10 +41,15 @@ final class QuickMatchEngine {
         this.quickWaitSeconds = 0;
     }
 
+    // 取指定模式的快速队列（不存在时创建，模式规范化兜底）
     private List<UUID> quickQueueOf(String mode) {
         return quickQueues.computeIfAbsent(QueueManager.normalizeMode(mode), k -> new ArrayList<>());
     }
 
+    /**
+     * 【作用】从所有模式的快速队列中移除指定玩家。
+     * 【被谁使用】QueueManager#leaveQueue（退队清理，服务端）及本类开局/补位成功后的清理。
+     */
     boolean removeFromQuickQueues(UUID uuid) {
         for (List<UUID> queue : quickQueues.values()) {
             if (queue.remove(uuid)) return true;
@@ -49,6 +57,10 @@ final class QuickMatchEngine {
         return false;
     }
 
+    /**
+     * 【作用】判断玩家是否在任一模式的快速队列中。
+     * 【被谁使用】QueueManager#isInQueue（服务端队列状态判断）。
+     */
     boolean containsInQuickQueues(UUID uuid) {
         for (List<UUID> queue : quickQueues.values()) {
             if (queue.contains(uuid)) return true;
@@ -56,17 +68,27 @@ final class QuickMatchEngine {
         return false;
     }
 
+    /**
+     * 【作用】统计全部模式快速队列的人数合计。
+     * 【被谁使用】QueueManager#getQuickQueueSize（队列页/命令展示）及 tryQuickMatch 判空；服务端。
+     */
     int getQuickQueueSize() {
         return quickQueues.values().stream().mapToInt(List::size).sum();
     }
 
-    /** 指定模式的快速队列人数 */
+    /** 指定模式的快速队列人数
+     * 【被谁使用】QueueManager#buildQueueStatusJson（own.matched，服务端）。
+     */
     int quickQueueSizeOf(String mode) {
         return quickQueueOf(mode).size();
     }
 
     // ==================== 快速匹配（按模式独立） ====================
 
+    /**
+     * 【作用】快速匹配主流程（每秒一次）：按模式独立执行"直接开局 → 跨队列合并 → 超时强制开局/补位"三级管线。
+     * 【被谁使用】QueueManager#tryMatch（服务端每秒驱动）。
+     */
     void tryQuickMatch() {
         if (getQuickQueueSize() == 0) {
             quickWaitSeconds = 0;
@@ -119,6 +141,10 @@ final class QuickMatchEngine {
         }
     }
 
+    /**
+     * 【作用】收集当前可用（已启用、未冷却、无进行中对局）的地图 ID 列表。
+     * 【被谁使用】tryQuickMatch 直接开局、forceStartQuickMatch 超时强制开局（服务端内部）。
+     */
     private List<String> getAvailableMaps() {
         List<String> available = new ArrayList<>();
         List<MapConfig> maps = ConfigManager.getInstance().getMaps();
@@ -143,6 +169,7 @@ final class QuickMatchEngine {
      * 若快速队列 + 某地图队列的人数达到该图两队最低人数之和（minRedPlayers + minBluePlayers），
      * 则合并开该队列的地图。开局成功后被带走的玩家会同时移出快速队列与该地图队列，
      * 该图其余队列（含另一模式）被解散。
+     * 【被谁使用】tryQuickMatch（服务端内部，直接开局失败后尝试合并）。
      * @return 是否成功开局
      */
     private boolean tryStartWithOtherQueue(List<UUID> quickPlayers, String mode) {
@@ -150,8 +177,8 @@ final class QuickMatchEngine {
         if (world == null || quickPlayers.isEmpty()) return false;
 
         for (String key : new ArrayList<>(qm.queues.keySet())) {
-            Map<Integer, List<UUID>> teamMap = qm.queues.get(key);
-            if (teamMap == null) continue;
+            List<UUID> mapQueue = qm.queues.get(key);
+            if (mapQueue == null) continue;
             // 快速队列(mode M) 只与同模式 M 的地图队列合并
             if (!mode.equals(QueueManager.modeOf(key))) continue;
 
@@ -161,11 +188,11 @@ final class QuickMatchEngine {
             if (MatchManager.getInstance().isMapInCooldown(mapId)) continue;
 
             boolean inUse = MatchManager.getInstance().getAllActiveSessions().stream()
-                    .anyMatch(s -> s.getMapName().equals(mapId) && s.getPhase() != MatchSession.GamePhase.ENDED);
+                    .anyMatch(s -> s.getMapName().equals(mapId) &&
+                            s.getPhase() != MatchSession.GamePhase.ENDED);
             if (inUse) continue;
 
-            List<UUID> queued = new ArrayList<>(teamMap.get(1));
-            queued.addAll(teamMap.get(2));
+            List<UUID> queued = new ArrayList<>(mapQueue);
             if (quickPlayers.size() + queued.size() < config.getTotalMinPlayers()) continue;
 
             // 合并两路人马开该队列的地图（内部会移出快速队列与 playerQueueMap，
@@ -185,6 +212,7 @@ final class QuickMatchEngine {
      * 1. 优先补位到「双方人数下限（两队最低人数）均大于 1」且补位后不超过最高人数的地图；
      * 2. 若补位会超过最高人数，则寻找无人数上限的地图（maxRed/maxBlue == 0）补位；
      * 3. 均无候选时玩家留在队列中，等待下一轮超时重试。
+     * 【被谁使用】forceStartQuickMatch（服务端内部，超时且无法直接开局时补位）。
      * @return 是否有玩家成功补位
      */
     private boolean tryReinforcement(List<UUID> players, String mode) {
@@ -236,7 +264,9 @@ final class QuickMatchEngine {
         return false;
     }
 
-    /** 按目标对局地图自身的补位模式与最低人数执行补位 */
+    /** 按目标对局地图自身的补位模式与最低人数执行补位
+     * 【被谁使用】tryReinforcement（服务端内部，遍历候选会话时调用）。
+     */
     private boolean reinforceSession(MatchSession session, List<UUID> players, ServerWorld world) {
         MapConfig config = ConfigManager.getInstance().getMap(session.getMapName());
         if (config == null) return false;
@@ -246,6 +276,7 @@ final class QuickMatchEngine {
 
     /**
      * 计算某队可补位名额：CONDITIONAL 模式补到人数下限（阈值），ALWAYS 模式补到该队满员（cap=0 无上限时有多少补多少）。
+     * 【被谁使用】reinforceInto（服务端内部，计算两队可补名额）。
      * @param candidateCount 当前等待补位的候选人数，用于无上限时的 target 上限
      */
     private int reinforcementNeed(int currentSize, int threshold, int cap, boolean alwaysReinforce, int candidateCount) {
@@ -265,6 +296,7 @@ final class QuickMatchEngine {
      * 将快速队列玩家补位到指定对局。
      * 补位时遵守队伍平衡原则（两队均可补时优先补人少的一队），
      * 补位玩家统一走 registerAndSetupPlayer 完成登记与初始化（传送/装备/状态保存）。
+     * 【被谁使用】reinforceSession（服务端内部，快速匹配补位的最终执行点）。
      */
     private boolean reinforceInto(MatchSession session, List<UUID> players, ServerWorld world,
                                   boolean alwaysReinforce, int redThreshold, int blueThreshold) {
@@ -333,6 +365,7 @@ final class QuickMatchEngine {
     /**
      * @param mode   快速队列所属匹配模式
      * @param notify 开局失败时是否向玩家发送提示（超时前的静默重试传 false，避免刷屏）
+     * 【被谁使用】tryQuickMatch 直接开局、tryStartWithOtherQueue 合并开局、forceStartQuickMatch 超时强制开局（均服务端内部）。
      * @return 是否成功开局
      */
     private boolean startQuickMatch(String mapId, String mode, List<UUID> players, boolean notify) {
@@ -345,64 +378,10 @@ final class QuickMatchEngine {
         // 人数需达到该图两队最低人数之和才能开局
         if (players.size() < minRed + minBlue) return false;
 
-        // 随机打乱后分队
-        Collections.shuffle(players);
-
-        int redMax = config != null && config.getMaxRedPlayers() > 0 ? config.getMaxRedPlayers() : Integer.MAX_VALUE;
-        int blueMax = config != null && config.getMaxBluePlayers() > 0 ? config.getMaxBluePlayers() : Integer.MAX_VALUE;
-
+        // 开局时才分配队伍（与地图队列开局共用分队核心）
         List<ServerPlayerEntity> redPlayers = new ArrayList<>();
         List<ServerPlayerEntity> bluePlayers = new ArrayList<>();
-        List<ServerPlayerEntity> overflow = new ArrayList<>();
-
-        // 战队聚组：同战队成员相邻（组间按大小降序，无战队在后），配合战队优先分队让同战队尽量同队
-        List<ServerPlayerEntity> ordered = clanGroupedOrder(onlinePlayers(players, world));
-
-        // 分队顺序：战队优先（同战队进已有同战队成员的一队）→ 人数平衡分配（遵守 maxRed/maxBlue 上限）；
-        // 分完后再修正两队最低人数（见 fixMinPlayers）
-        for (ServerPlayerEntity player : ordered) {
-            boolean toRed;
-            if (redPlayers.size() >= redMax) {
-                toRed = false;
-            } else if (bluePlayers.size() >= blueMax) {
-                toRed = true;
-            } else {
-                Clan clan = ClanManager.getInstance().getClanByPlayer(player.getUuid());
-                if (clan != null) {
-                    boolean redHas = hasClanPlayers(redPlayers, clan);
-                    boolean blueHas = hasClanPlayers(bluePlayers, clan);
-                    if (redHas != blueHas) {
-                        toRed = redHas;
-                    } else {
-                        toRed = redPlayers.size() <= bluePlayers.size();
-                    }
-                } else {
-                    toRed = redPlayers.size() <= bluePlayers.size();
-                }
-            }
-
-            if (toRed && redPlayers.size() < redMax) {
-                redPlayers.add(player);
-            } else if (!toRed && bluePlayers.size() < blueMax) {
-                bluePlayers.add(player);
-            } else {
-                overflow.add(player);
-            }
-        }
-
-        // 战队聚组可能破坏两队最低人数：在两队间移动成员修正（尽量挑不拆散战队的成员）
-        fixMinPlayers(redPlayers, bluePlayers, minRed, minBlue, redMax, blueMax);
-
-        // 溢出玩家尝试塞进对方队伍，塞不下则留在队列中等待下一轮
-        for (ServerPlayerEntity player : overflow) {
-            if (redPlayers.size() < redMax && redPlayers.size() <= bluePlayers.size()) {
-                redPlayers.add(player);
-            } else if (bluePlayers.size() < blueMax) {
-                bluePlayers.add(player);
-            } else if (redPlayers.size() < redMax) {
-                redPlayers.add(player);
-            }
-        }
+        splitIntoTeams(config, players, world, redPlayers, bluePlayers);
 
         // 在线人数不足两队最低人数（如部分玩家离线）时无法开局
         if (redPlayers.size() < minRed || bluePlayers.size() < minBlue) return false;
@@ -435,6 +414,79 @@ final class QuickMatchEngine {
         return true;
     }
 
+    // ==================== 开局分队核心（快速匹配与地图队列开局共用） ====================
+
+    /**
+     * 开局分队：在人数达到开局条件、准备开局时才调用——
+     * 随机打乱 → 战队聚组（同战队相邻，组间按大小降序、无战队殿后）→
+     * 战队优先 + 人数平衡分队（遵守 maxRed/maxBlue 上限）→ fixMinPlayers 修正两队最低人数 →
+     * 溢出玩家尽量塞进未满一队（仍无处安放时丢弃，由调用方留在队列中）。
+     * 离线玩家在分队时被丢弃。
+     * 【被谁使用】QueueManager#startMatchFromQueue（地图队列开局）与本类 startQuickMatch（快速匹配开局）；服务端。
+     */
+    void splitIntoTeams(MapConfig config, List<UUID> players, ServerWorld world,
+                        List<ServerPlayerEntity> redOut, List<ServerPlayerEntity> blueOut) {
+        int minRed = config.getMinRedPlayers();
+        int minBlue = config.getMinBluePlayers();
+        int redMax = config.getMaxRedPlayers() > 0 ? config.getMaxRedPlayers() : Integer.MAX_VALUE;
+        int blueMax = config.getMaxBluePlayers() > 0 ? config.getMaxBluePlayers() : Integer.MAX_VALUE;
+
+        // 随机打乱后分队
+        Collections.shuffle(players);
+
+        // 战队聚组：同战队成员相邻（组间按大小降序，无战队在后），配合战队优先分队让同战队尽量同队
+        List<ServerPlayerEntity> ordered = clanGroupedOrder(onlinePlayers(players, world));
+
+        List<ServerPlayerEntity> overflow = new ArrayList<>();
+        for (ServerPlayerEntity player : ordered) {
+            boolean toRed;
+            if (redOut.size() >= redMax) {
+                toRed = false;
+            } else if (blueOut.size() >= blueMax) {
+                toRed = true;
+            } else {
+                Clan clan = ClanManager.getInstance().getClanByPlayer(player.getUuid());
+                if (clan != null) {
+                    boolean redHas = hasClanPlayers(redOut, clan);
+                    boolean blueHas = hasClanPlayers(blueOut, clan);
+                    if (redHas != blueHas) {
+                        toRed = redHas;
+                    } else {
+                        toRed = redOut.size() <= blueOut.size();
+                    }
+                } else {
+                    toRed = redOut.size() <= blueOut.size();
+                }
+            }
+
+            if (toRed && redOut.size() < redMax) {
+                redOut.add(player);
+            } else if (!toRed && blueOut.size() < blueMax) {
+                blueOut.add(player);
+            } else {
+                overflow.add(player);
+            }
+        }
+
+        // 战队聚组可能破坏两队最低人数：在两队间移动成员修正（尽量挑不拆散战队的成员）
+        fixMinPlayers(redOut, blueOut, minRed, minBlue, redMax, blueMax);
+
+        // 溢出玩家尝试塞进对方队伍，塞不下则留在队列中等待下一轮（快速匹配场景）
+        for (ServerPlayerEntity player : overflow) {
+            if (redOut.size() < redMax && redOut.size() <= blueOut.size()) {
+                redOut.add(player);
+            } else if (blueOut.size() < blueMax) {
+                blueOut.add(player);
+            } else if (redOut.size() < redMax) {
+                redOut.add(player);
+            }
+        }
+    }
+
+    /**
+     * 【作用】超时强制开局：随机逐张尝试可用地图直接开局，全部失败则进入同模式补位流程。
+     * 【被谁使用】tryQuickMatch（服务端内部，等待超过 quickTimeout 秒后调用）。
+     */
     private void forceStartQuickMatch(List<UUID> players, String mode) {
         // 优先找可用地图：随机顺序逐张尝试（避开单张地图人数要求过高导致的漏配）
         List<String> available = getAvailableMaps();
@@ -480,6 +532,7 @@ final class QuickMatchEngine {
         return ordered;
     }
 
+    // 判断队伍（玩家实体列表）中是否存在指定战队的成员
     private boolean hasClanPlayers(List<ServerPlayerEntity> team, Clan clan) {
         ClanManager cm = ClanManager.getInstance();
         for (ServerPlayerEntity p : team) {
@@ -488,6 +541,7 @@ final class QuickMatchEngine {
         return false;
     }
 
+    // 判断队伍（UUID 列表）中是否存在指定战队的成员
     private boolean hasClanUuids(Collection<UUID> team, Clan clan) {
         ClanManager cm = ClanManager.getInstance();
         for (UUID uuid : team) {
@@ -499,6 +553,7 @@ final class QuickMatchEngine {
     /**
      * 战队聚组后修正两队最低人数：从超出需要的一队向不足的一队移动成员。
      * 移动优先级：无战队成员 → 独自代表本战队的成员（整族迁移不拆队）→ 大战队成员（影响最小）。
+     * 【被谁使用】splitIntoTeams（服务端内部，分队后人数修正）。
      */
     private void fixMinPlayers(List<ServerPlayerEntity> red, List<ServerPlayerEntity> blue,
                                int minRed, int minBlue, int redMax, int blueMax) {
@@ -516,6 +571,7 @@ final class QuickMatchEngine {
         }
     }
 
+    // 从队伍中挑选可移动成员：优先无战队者，其次独自代表本战队者，最后最大战队成员
     private ServerPlayerEntity pickMovable(List<ServerPlayerEntity> team) {
         ClanManager cm = ClanManager.getInstance();
         ServerPlayerEntity fallback = null;

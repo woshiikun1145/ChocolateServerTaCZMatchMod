@@ -93,7 +93,7 @@ record KillsData(
 ) {}
 ```
 
-> ⚠️ **语义注意**：`playerKills`/`playerDeaths` 是**队伍口径**（随玩家所在队取整队击杀/死亡），不是个人 K/D。个人战绩存储在 `PlayerDataManager`（`config/cstmm/data/profiles/`），未通过 API 暴露。
+> ⚠️ **语义注意**：`playerKills`/`playerDeaths` 是**队伍口径**（随玩家所在队取整队击杀/死亡），不是个人 K/D。个人战绩存储在 `PlayerDataManager`（`config/cstmm/data/players/`），未通过 API 暴露。
 
 ### 3.3 空值行为
 
@@ -131,9 +131,9 @@ private static int matchStatus(CommandContext<ServerCommandSource> ctx) {
 
 | 方法 | 返回 | 说明 |
 |---|---|---|
-| `getQueueStatus(String mapName)` | `QueueStatus` | 单张地图的队列人数（**两种模式合计**） |
+| `getQueueStatus(String mapName)` | `QueueStatus` | 单张地图的排队人数（**两种模式合计**） |
 | `getAllQueueStatus()` | `List<QueueStatus>` | 全部启用地图 + 快速匹配入口的队列状态 |
-| `joinQueue(UUID playerUuid, String mapName, int team)` | `void` | 玩家加入地图队列（**固定按竞技模式**） |
+| `joinQueue(UUID playerUuid, String mapName, int team)` | `void` | 玩家加入地图队列（**固定按竞技模式**；`team` 参数已废弃） |
 | `leaveQueue(UUID playerUuid)` | `void` | 玩家离开任意队列（地图队列或快速队列） |
 | `isInQueue(UUID playerUuid)` | `boolean` | 是否在任一队列（含快速匹配队列） |
 
@@ -142,14 +142,14 @@ private static int matchStatus(CommandContext<ServerCommandSource> ctx) {
 ```java
 record QueueStatus(
         String mapName,        // 地图 ID；末尾伪条目为 "quick"（快速匹配队列合计）
-        int redCount,          // 红队排队人数（两种模式合计）
-        int blueCount,         // 蓝队排队人数（两种模式合计）
+        int playerCount,       // 排队总人数（两种模式合计；队伍在开局时才分配，队列无红蓝之分）
         boolean isMapAvailable // 地图是否启用（quick 入口恒为 true）
 ) {}
 ```
 
-- `getAllQueueStatus()` 末尾固定追加一条 `mapName="quick"` 的伪条目：`redCount` = 快速匹配队列总人数（竞技+休闲），`blueCount = 0`。
+- `getAllQueueStatus()` 末尾固定追加一条 `mapName="quick"` 的伪条目：`playerCount` = 快速匹配队列总人数（竞技+休闲）。
 - 快速匹配队列**按模式独立**（竞技/休闲互不混合），但 API 层不区分模式，只暴露合计值。
+- **破坏性变更**：`QueueStatus` 的 `redCount`/`blueCount` 已合并为 `playerCount`——队伍不再入队时分配，改为人数满足开局条件、准备开局时由系统一次性分队，队列层面不存在红蓝人数。
 
 ### 4.3 joinQueue 的行为细节
 
@@ -158,8 +158,8 @@ record QueueStatus(
 1. 玩家不在线 → 静默返回（无任何效果）。
 2. 玩家已在队列或对局中 → 玩家收到弹窗提示 `§c你已在队列或游戏中！...`（POPUP 协议），不入队。
 3. 地图不存在或未启用 → 提示 `§c该地图未启用或不存在！`（`"quick"` 不再是特殊值——快速匹配走专用 `JOIN_QUICK` 网络动作或 `QueueManager.joinQuickQueue(player, mode)`，此处一律视为真实地图 ID）。
-4. `team` 为偏好值（1=红 2=蓝，其他值也接受但按平衡规则分配）；红蓝人数相等时**随机分配**；某队满员（`maxRedPlayers/maxBluePlayers`）时强制进另一队；**两队均满员** → 提示 `§c该地图两队均已满员！`，不入队。
-5. 成功入队后无返回值，玩家收到确认提示。
+4. 容量检查：该模式排队人数已达两队最高人数之和（`maxRedPlayers + maxBluePlayers`，0 = 无上限）→ 提示 `§c该地图匹配人数已满！`，不入队。`team` 参数**已废弃**（队伍在开局时自动分配，保留参数仅为兼容旧签名）。
+5. 成功入队后无返回值，玩家收到确认提示（不提示队伍——队伍尚未分配）。
 
 > ⚠️ 方法无返回值，调用方无法直接判断是否入队成功；入队结果可随后用 `isInQueue` 复查。提示形式不统一：成功/离队提示走聊天栏，部分拒绝提示（如重复入队）走弹窗（POPUP 协议），调用方不宜依赖提示形式做逻辑判断。
 
@@ -169,7 +169,7 @@ record QueueStatus(
 > QueueManager.getInstance().joinQueue(
 >         serverPlayer,           // ServerPlayerEntity（需在线）
 >         "map_1",
->         1,                      // 偏好队伍：1=红 2=蓝
+>         0,                      // 已废弃：队伍在开局时自动分配
 >         QueueManager.MODE_CASUAL // "CASUAL"；非法/空值按 COMPETITIVE 兜底
 > );
 > ```
@@ -180,10 +180,9 @@ record QueueStatus(
 ServerTickEvents.END_SERVER_TICK.register(server -> {
     if (server.getTicks() % 200 != 0) return; // 200 tick = 10 秒
     for (QueueApi.QueueStatus st : QueueManager.getInstance().getAllQueueStatus()) {
-        int total = st.redCount() + st.blueCount();
-        if (total > 0 && !"quick".equals(st.mapName())) {
+        if (st.playerCount() > 0 && !"quick".equals(st.mapName())) {
             server.getPlayerManager().getPlayerList().forEach(p ->
-                    p.sendMessage(Text.literal("§7[" + st.mapName() + "] 排队中: " + total + " 人"), false));
+                    p.sendMessage(Text.literal("§7[" + st.mapName() + "] 排队中: " + st.playerCount() + " 人"), false));
         }
     }
 });
@@ -318,12 +317,12 @@ if (session != null && session.getPhase() != MatchSession.GamePhase.ENDED) {
 
 ```java
 for (ServerPlayerEntity member : party.members()) {
-    QueueManager.getInstance().joinQueue(member, mapId, preferredTeam, QueueManager.MODE_COMPETITIVE);
+    QueueManager.getInstance().joinQueue(member, mapId, 0, QueueManager.MODE_COMPETITIVE);
 }
-// 逐个复查入队结果（满员/已在队列的成员会收到聊天提示）
+// 逐个复查入队结果（人数已满/已在队列的成员会收到提示）
 ```
 
-> 组队同图入队无需额外同步：`assignTeam` 保证两队平衡，各成员按当时队列人数分配，可能被分到不同队伍。
+> 组队同图入队无需额外同步：队伍在开局时统一分配（战队聚组 + 平衡分队），**同战队的成员会尽量被分到同一队**（战队系统自动处理，无需外部干预）。
 
 ### 7.3 外部记分板/HUD 数据源
 

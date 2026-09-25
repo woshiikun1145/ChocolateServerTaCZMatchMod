@@ -10,13 +10,15 @@ import java.util.List;
  * 战队数据（Gson 持久化到 config/cstmm/data/clans.json）。
  * name 为全服唯一键（不区分大小写）；members 按加入顺序排列（最早在前，队长在首位），
  * 顺序用于队长退出时的自动转让（转让给最早加入的成员）。
- * 徽标为 PNG 的 Base64（留空 = 黑色实心正方形）；memberLimit 0 = 无上限。
+ * 徽标为图片 Base64 或图片 URL（http/https，客户端自行下载；留空 = 黑色实心正方形）；
+ * base64 解码后上限 48KiB（ClanManager.validateBadge 校验）；memberLimit 0 = 无上限。
  */
 public class Clan {
 
     /** 成员条目：uuid + 最近一次可见的玩家名（支持离线后按名踢出/展示） */
     public static class Member {
         public String uuid;
+        // 最近一次见到的玩家名（上线时由 ClanManager 刷新）
         public String name;
 
         public Member() {}
@@ -31,12 +33,19 @@ public class Clan {
         public void setName(String name) { this.name = name; }
     }
 
+    // 全服唯一战队名（不区分大小写），ClanManager 以此为键建图
     public String name;
+    // 战队缩写（聊天/计分板展示用）
     public String abbreviation;
+    // 徽标内容：图片 Base64 或 http(s) URL，空串表示默认黑色方块
     public String badgeBase64 = "";
+    // 队长的玩家 UUID（members 首位成员）
     public String leader;
+    // 人数上限，0 = 无上限
     public int memberLimit;
+    // 创建时间戳（毫秒）
     public long createdAt;
+    // 成员列表，按加入顺序排列（最早在前，队长在首位）
     public List<Member> members = new ArrayList<>();
 
     public String getName() { return name; }
@@ -53,6 +62,7 @@ public class Clan {
     public long getCreatedAt() { return createdAt; }
     public List<Member> getMembers() { return members; }
 
+    // 徽标内容寻址 id 缓存（transient：不随 Gson 持久化，按需计算）
     private transient String badgeIdCache = null;
 
     /**
@@ -61,6 +71,7 @@ public class Clan {
      * 编辑徽标后内容变化 → id 变化，旧 id 缓存自然失效。
      */
     public String getBadgeId() {
+        // 懒加载：首次调用时计算 SHA-256 并缓存，后续直接返回
         if (badgeIdCache == null) {
             try {
                 byte[] hash = MessageDigest.getInstance("SHA-256")

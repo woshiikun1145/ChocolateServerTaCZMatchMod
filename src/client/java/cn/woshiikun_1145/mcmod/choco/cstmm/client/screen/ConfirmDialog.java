@@ -11,7 +11,8 @@ import net.minecraft.text.Text;
 import org.lwjgl.glfw.GLFW;
 
 /**
- * 配置界面内置确认对话框（自 ConfigScreen 提取，逻辑逐字保留）。
+ * 【作用】配置界面内置确认对话框（自 ConfigScreen 提取，逻辑逐字保留）。
+ * 【被谁使用】仅 ConfigScreen 使用（保存校验失败/删除对局中地图/未保存退出确认、showPopup 提示）。
  * 在当前界面内弹出，不暂停游戏；弹出/关闭播放音符盒 harp 音效。
  * onConfirm 为 null 时为提示模式（仅“确定”按钮），否则为确认模式（是/否）。
  * 按钮为手动渲染 + 手动分发（不加入 Screen children），关闭界面重建不影响对话框状态。
@@ -28,6 +29,7 @@ final class ConfirmDialog {
     private ButtonWidget confirmYesBtn = null;
     private ButtonWidget confirmNoBtn = null;
 
+    // 【作用】构造：记录宿主界面与 textRenderer 惰性获取器
     ConfirmDialog(Screen owner, java.util.function.Supplier<TextRenderer> textRendererSupplier) {
         this.owner = owner;
         this.textRendererSupplier = textRendererSupplier;
@@ -79,6 +81,10 @@ final class ConfirmDialog {
         playNoteBlockSound(12);
     }
 
+    /**
+     * 【作用】绘制对话框：全屏遮罩 + 居中框（标题 + 自动换行消息），
+     * 是/否按钮手动渲染（不加入 Screen children）。
+     */
     void render(DrawContext context, int mouseX, int mouseY, float delta) {
         TextRenderer textRenderer = tr();
         context.fill(0, 0, owner.width, owner.height, 0xC8000000);
@@ -88,7 +94,9 @@ final class ConfirmDialog {
         int y = owner.height / 2 - dialogHeight / 2;
         context.fill(x, y, x + dialogWidth, y + dialogHeight, 0xFF212121);
         context.drawBorder(x, y, dialogWidth, dialogHeight, 0xFF555555);
-        context.drawCenteredTextWithShadow(textRenderer, confirmTitle, owner.width / 2, y + 10, 0xFFFFFF);
+        // 标题基底色跟随主题色（个性化页设置）；携带 § 色号的标题（如 §c 错误提示）不受影响
+        context.drawCenteredTextWithShadow(textRenderer, confirmTitle, owner.width / 2, y + 10,
+                cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig.getThemeColorArgb());
 
         // 消息自动换行
         int lineY = y + 26;
@@ -101,11 +109,13 @@ final class ConfirmDialog {
         if (confirmNoBtn != null) confirmNoBtn.render(context, mouseX, mouseY, delta);
     }
 
+    // 【作用】鼠标按下转发给是/否按钮（由宿主 Screen 在确认框打开时调用）
     void handleMouseClicked(double mouseX, double mouseY, int button) {
         if (confirmYesBtn != null) confirmYesBtn.mouseClicked(mouseX, mouseY, button);
         if (confirmNoBtn != null) confirmNoBtn.mouseClicked(mouseX, mouseY, button);
     }
 
+    // 【作用】鼠标释放转发给是/否按钮（同上，由宿主 Screen 调用）
     void handleMouseReleased(double mouseX, double mouseY, int button) {
         if (confirmYesBtn != null) confirmYesBtn.mouseReleased(mouseX, mouseY, button);
         if (confirmNoBtn != null) confirmNoBtn.mouseReleased(mouseX, mouseY, button);

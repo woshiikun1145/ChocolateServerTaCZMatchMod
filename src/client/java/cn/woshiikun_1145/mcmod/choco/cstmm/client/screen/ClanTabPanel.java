@@ -2,8 +2,8 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.client.screen;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.BadgeCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClanCache;
-import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.Base64ImageDecoder;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.Base64ImageDecoder.CardTexture;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.UrlImageCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClanCache.ClanInfo;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClanCache.ListData.ListRow;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClanCache.Mine;
@@ -22,7 +22,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 主菜单"战队"标签页面板。
+ * 【作用】主菜单"战队"标签页面板。
+ * 【被谁使用】仅 MatchMenuScreen 使用（init/onShow/draw/mouseClicked/handleRowClick/scroll 等处调用）。
  * 未加入战队：左侧 1/3 展示选中战队详情（名称/缩写/徽标/队长/人数上限/加入按钮），
  * 右侧 2/3 为战队列表（随机 10 条，可搜索）+ 底部搜索栏与创建战队按钮（弹出创建对话框）。
  * 已加入战队：顶部战队信息，中部成员列表（可滚动，队长可踢人/转让），底部退出/解散按钮。
@@ -57,6 +58,7 @@ public class ClanTabPanel {
     private final List<Btn> buttons = new ArrayList<>();
     private record Btn(String id, String arg, int x, int y, int w, int h) {}
 
+    // 【作用】构造面板并持有宿主 Screen（借用其 font/addTextField/removeTextField 等桥接方法）
     public ClanTabPanel(MatchMenuScreen menu) {
         this.menu = menu;
     }
@@ -72,15 +74,16 @@ public class ClanTabPanel {
         dlgNameField.setMaxLength(128);
         dlgAbbrField = makeField(240, "战队缩写（≤10字符）");
         dlgAbbrField.setMaxLength(10);
-        dlgBadgeField = makeField(240, "徽标 base64（可留空）");
-        // TextFieldWidget 默认上限 32 字符——徽标输入框不设长度上限，可任意粘贴超大 base64；
-        // 超过分片协议上限时在提交前拦截（send 上限 = 分片 64 片 × 每片 30000 字符）
+        dlgBadgeField = makeField(240, "徽标 Base64 或图片 URL（可留空）");
+        // TextFieldWidget 默认上限 32 字符——徽标输入框不设长度上限，可粘贴 base64 或 URL；
+        // 超限时（URL ≤512 字符 / base64 解码后 ≤48KiB）在提交前就地拦截，不发分片包
         dlgBadgeField.setMaxLength(Integer.MAX_VALUE);
         dlgLimitField = makeField(240, "成员数量限制（0=无限制）");
         dlgLimitField.setMaxLength(6);
         hideAllFields();
     }
 
+    // 【作用】创建文本输入框（默认隐藏、由绘制时定位），并经宿主 Screen 加入 children
     private TextFieldWidget makeField(int width, String hint) {
         TextFieldWidget field = new TextFieldWidget(menu.font(), 0, 0, width, 16, Text.literal(hint));
         menu.addTextField(field);
@@ -105,6 +108,7 @@ public class ClanTabPanel {
         dialogError = "";
     }
 
+    // 【作用】隐藏全部文本框（内部工具，hideWidgets/initWidgets/draw 共用）
     private void hideAllFields() {
         if (searchField != null) searchField.visible = false;
         if (dlgNameField != null) dlgNameField.visible = false;
@@ -174,6 +178,12 @@ public class ClanTabPanel {
 
     // ==================== 绘制 ====================
 
+    /**
+     * 【作用】战队页主渲染分发：创建/编辑对话框打开时独占绘制对话框，
+     * 否则按"已加入战队 / 未加入战队"分别委托 drawInClan / drawBrowse；
+     * 每帧先清空按钮命中表再重填。
+     * 【被谁使用】MatchMenuScreen#drawContent（selectedTab == 3 时委托）
+     */
     public void draw(DrawContext context, int x, int y, int width, int height, int mouseX, int mouseY) {
         // 控件已被摘除（界面退出流程）时跳过绘制，等待 initWidgets 重建
         if (searchField == null) return;
@@ -198,6 +208,10 @@ public class ClanTabPanel {
 
     // ---------- 未加入战队：详情(1/3) + 列表/搜索(2/3) ----------
 
+    /**
+     * 【作用】未加入战队的浏览视图：左侧 1/3 选中战队详情（徽标/信息/加入按钮），
+     * 右侧 2/3 战队表格（滚动 + 选中高亮），底部搜索栏与"创建战队"按钮。
+     */
     private void drawBrowse(DrawContext context, int x, int y, int width, int height, int mouseX, int mouseY) {
         TextRenderer tr = menu.font();
         int detailW = width / 3;
@@ -302,6 +316,11 @@ public class ClanTabPanel {
 
     // ---------- 已加入战队 ----------
 
+    /**
+     * 【作用】已加入战队视图：顶部战队信息（徽标/名称/队长/人数，队长显示标注），
+     * 中部可滚动成员列表（在线状态/匹配状态，队长行尾有踢出/转让按钮），
+     * 底部退出/解散/编辑信息按钮。
+     */
     private void drawInClan(DrawContext context, int x, int y, int width, int height,
                             int mouseX, int mouseY, Mine mine) {
         TextRenderer tr = menu.font();
@@ -339,17 +358,29 @@ public class ClanTabPanel {
                 context.drawText(tr, "§a[队长]", x + 10, ry + 7, 0x55FF55, true);
                 nameX = x + 10 + 46;
             }
+            // 成员头像（个性化绑定，名字左侧 16px；未设置的成员不占位保持原布局）
+            if (m.avatarType != null && !m.avatarType.isEmpty()) {
+                QueueTabPanel.drawAvatar(context, nameX, ry + 4, 16, m.avatarType, m.avatarId);
+                nameX += 20;
+            }
             // 名字颜色：在线绿色 / 离线灰色
             context.drawText(tr, (m.online ? "§a" : "§7") + m.name, nameX, ry + 7, 0xFFFFFF, true);
-            // 匹配状态：离线（灰色）/ 空闲（绿色）/ 正在匹配（"地图-模式"）
+            // 匹配状态：离线（灰色）/ 空闲（绿色）/ 正在匹配（主题色 "正在匹配：地图-模式"）
+            boolean matching = m.online && m.matchState != null && !m.matchState.isEmpty();
             String stateText;
             if (!m.online) {
                 stateText = "§7离线";
+            } else if (matching) {
+                stateText = "正在匹配：" + m.matchState;
             } else {
-                stateText = (m.matchState == null || m.matchState.isEmpty()) ? "§a空闲" : "§f" + m.matchState;
+                stateText = "§a空闲";
             }
-            int stateX = isLeader ? x + width - 250 : x + width - 110;
-            context.drawText(tr, stateText, stateX, ry + 7, 0xFFFFFF, true);
+            // 右对齐锚定右缘（长文案向左延伸，不超出面板右边界）；
+            // 队长视图右侧有踢出/转让按钮（占 x+width-122 起），状态文字右缘再左移让位
+            int stateRight = isLeader ? x + width - 150 : x + width - 10;
+            int stateX = Math.max(nameX + 20, stateRight - tr.getWidth(stateText));
+            context.drawText(tr, stateText, stateX, ry + 7,
+                    matching ? cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig.getThemeColorArgb() : 0xFFFFFF, true);
             if (isLeader && !m.isLeader) {
                 int bw = 52;
                 int bx = x + width - bw * 2 - 18;
@@ -371,6 +402,7 @@ public class ClanTabPanel {
         }
     }
 
+    // 【作用】判断当前玩家是否为本战队队长（决定踢出/转让/解散/编辑按钮的可见性）
     private boolean isMeLeader(ClanInfo clan) {
         String me = menu.getPlayerName();
         for (ClanInfo.MemberEntry m : clan.members) {
@@ -381,6 +413,10 @@ public class ClanTabPanel {
 
     // ---------- 创建战队对话框 ----------
 
+    /**
+     * 【作用】绘制创建/编辑战队共用的居中对话框：全屏遮罩 + 四组"标签+输入框"
+     * （名称/缩写/徽标/成员上限），错误提示行，创建(保存)/取消按钮；并保证焦点落在名称框。
+     */
     private void drawCreateDialog(DrawContext context, int x, int y, int width, int height,
                                   int mouseX, int mouseY) {
         TextRenderer tr = menu.font();
@@ -390,9 +426,11 @@ public class ClanTabPanel {
         int dx = x + (width - dw) / 2;
         int dy = y + (height - dh) / 2;
         context.fill(dx, dy, dx + dw, dy + dh, 0xFF212121);
-        context.drawBorder(dx, dy, dw, dh, 0xFFDAA520);
-        context.drawCenteredTextWithShadow(tr, dialogEditMode ? "§6编辑战队信息" : "§6创建战队",
-                dx + dw / 2, dy + 8, 0xFFFFFF);
+        // 对话框边框与标题跟随主题色（个性化页设置，与弹窗样式统一）
+        int accent = cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig.getThemeColorArgb();
+        context.drawBorder(dx, dy, dw, dh, accent);
+        context.drawCenteredTextWithShadow(tr, dialogEditMode ? "编辑战队信息" : "创建战队",
+                dx + dw / 2, dy + 8, accent);
 
         int lx = dx + 12;
         int ly = dy + 24;
@@ -402,8 +440,8 @@ public class ClanTabPanel {
         placeField(dlgNameField, lx, ly + 11, dw - 24); ly += 30;
         context.drawText(tr, "§7战队缩写（≤10字符）", lx, ly, 0xAAAAAA, true);
         placeField(dlgAbbrField, lx, ly + 11, dw - 24); ly += 30;
-        // 徽标输入框已不设长度限制（分片上传），标签不再标注 30000 上限
-        context.drawText(tr, "§7徽标Base64:（可留空）", lx, ly, 0xAAAAAA, true);
+        // 徽标支持 Base64（解码后 ≤48KiB）或图片 URL（≤512 字符），均可留空
+        context.drawText(tr, "§7徽标 Base64/URL:（可留空）", lx, ly, 0xAAAAAA, true);
         placeField(dlgBadgeField, lx, ly + 11, dw - 24); ly += 30;
         context.drawText(tr, "§7成员上限（0=无限制）", lx, ly, 0xAAAAAA, true);
         placeField(dlgLimitField, lx, ly + 11, dw - 24); ly += 30;
@@ -421,23 +459,23 @@ public class ClanTabPanel {
         }
     }
 
+    // 【作用】判断给定控件是否为本面板的任一文本框（用于焦点清理/对话框置焦判断）
     private boolean isDialogField(Object w) {
         return w == dlgNameField || w == dlgAbbrField || w == dlgBadgeField || w == dlgLimitField
                 || w == searchField;
     }
 
+    // 【作用】在对话框布局中定位并显示一个输入框（面板文本框是 Screen children，位置由绘制时指定）
     private void placeField(TextFieldWidget field, int x, int y, int w) {
         field.visible = true;
         field.setPosition(x, y);
         field.setWidth(w);
     }
 
-    /** 大徽标（详情/战队页顶部）：badgeId 查分片缓存，未到齐或无徽标 = 黑色实心正方形 */
-    private void drawBadgeLarge(DrawContext context, int x, int y, int size, String badgeId) {
+    /** 大徽标（详情/战队页顶部）：徽标字段统一解析（URL 徽标客户端下载 / base64 id 查分片缓存），未就绪或无徽标 = 黑色实心正方形 */
+    private void drawBadgeLarge(DrawContext context, int x, int y, int size, String badgeValue) {
         context.fill(x, y, x + size, y + size, 0xFF111111);
-        String base64 = BadgeCache.get(badgeId);
-        CardTexture tex = (base64 == null || base64.isEmpty())
-                ? null : Base64ImageDecoder.decode(base64);
+        CardTexture tex = UrlImageCache.resolveBadgeTexture(badgeValue);
         if (tex != null) {
             context.drawTexture(tex.id(), x, y, size, size, 0f, 0f, tex.width(), tex.height(), tex.width(), tex.height());
         }
@@ -446,6 +484,10 @@ public class ClanTabPanel {
 
     // ==================== 交互 ====================
 
+    /**
+     * 【作用】绘制一个手动按钮：底色/边框/居中文案（禁用置灰），hover 高亮；
+     * 非禁用时登记到 buttons 命中表，供 mouseClicked 分发。
+     */
     private void addBtn(DrawContext context, TextRenderer tr, List<Btn> list, String id, String label,
                         int x, int y, int w, int h, int mouseX, int mouseY, boolean disabled) {
         boolean hover = !disabled && mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h;
@@ -455,6 +497,10 @@ public class ClanTabPanel {
         if (!disabled) list.add(new Btn(id, "", x, y, w, h));
     }
 
+    /**
+     * 【作用】战队页按钮点击分发：按本帧 buttons 命中表匹配坐标，命中即调用 handleAction。
+     * 【被谁使用】MatchMenuScreen#mouseClicked（selectedTab == 3 时优先调用）
+     */
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (button != 0) return false;
         for (Btn b : buttons) {
@@ -467,6 +513,10 @@ public class ClanTabPanel {
         return false;
     }
 
+    /**
+     * 【作用】按钮动作路由：搜索/创建/编辑/对话框确认与取消/加入/退出/解散/踢出/转让，
+     * 统一经 send() 发 ClanActionPayload 到服务端；提交前做数字与徽标就地校验。
+     */
     private void handleAction(String id) {
         if (id.equals("search")) {
             searchQuery = searchField.getText();
@@ -489,8 +539,9 @@ public class ClanTabPanel {
                 dialogError = "";
                 dlgNameField.setText(mineNow.clan.name);
                 dlgAbbrField.setText(mineNow.clan.abbr);
-                // badge 字段是内容寻址 id，编辑预填需要完整 base64（分片未到齐时留空让玩家重贴）
-                String curBadge = BadgeCache.get(mineNow.clan.badge);
+                // 徽标字段：URL 徽标直接预填 URL；base64 徽标取完整数据（分片未到齐时留空让玩家重贴）
+                String curBadge = ClanManager.isBadgeUrl(mineNow.clan.badge)
+                        ? mineNow.clan.badge : BadgeCache.get(mineNow.clan.badge);
                 dlgBadgeField.setText(curBadge == null ? "" : curBadge);
                 dlgLimitField.setText(String.valueOf(mineNow.clan.limit));
                 menu.setFocused(dlgNameField);
@@ -518,10 +569,11 @@ public class ClanTabPanel {
             }
             if (name.isEmpty()) { dialogError = "战队名称不能为空"; return; }
             if (abbr.isEmpty()) { dialogError = "战队缩写不能为空"; return; }
-            // 输入框不设上限，但分片协议上限（64 片 × 30000 字符）仍生效：
-            // 提交前拦截而不是发 65+ 个分片包等服务端拒收（届时对话框已关闭，无法就地修正）
-            if (badge.length() > ClanManager.MAX_BADGE_LENGTH) {
-                dialogError = "徽标过大（base64 最多 " + ClanManager.MAX_BADGE_LENGTH + " 字符）";
+            // 徽标校验与服务端同规则（URL ≤512 字符 / base64 解码后 ≤48KiB）：
+            // 提交前就地拦截而不是发分片包等服务端拒收（届时对话框已关闭，无法就地修正）
+            String badgeError = ClanManager.validateBadge(badge);
+            if (badgeError != null) {
+                dialogError = badgeError.replaceFirst("^§c", "");
                 return;
             }
             send(dialogEditMode ? ClanAction.EDIT : ClanAction.CREATE, name, abbr, badge, limit);
@@ -541,7 +593,10 @@ public class ClanTabPanel {
         }
     }
 
-    /** 列表行点击选中（由 MatchMenuScreen 在战队页鼠标事件时调用，返回是否命中行） */
+    /**
+     * 【作用】战队列表行点击命中检测：浏览视图下按行高反推行号，选中该战队并请求详情。
+     * 【被谁使用】MatchMenuScreen#mouseClicked（selectedTab == 3 且按钮未命中时调用）
+     */
     public boolean handleRowClick(double mouseX, double mouseY, int x, int y, int width, int height) {
         Mine mine = ClanCache.getInstance().getMine();
         if (mine.inClan || createDialogOpen) return false;
@@ -559,6 +614,10 @@ public class ClanTabPanel {
         return true;
     }
 
+    /**
+     * 【作用】滚动战队页：已加入战队时滚成员列表，否则滚战队列表。
+     * 【被谁使用】MatchMenuScreen#mouseScrolled（selectedTab == 3 时转发）
+     */
     public void scroll(double verticalAmount) {
         Mine mine = ClanCache.getInstance().getMine();
         if (mine.inClan) {

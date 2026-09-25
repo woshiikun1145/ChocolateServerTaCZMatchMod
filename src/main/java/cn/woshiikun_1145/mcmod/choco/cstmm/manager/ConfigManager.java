@@ -22,6 +22,13 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 /**
  * 配置管理器 - 仅服务端
  * 管理 maps.json 和 global.json
+ * 【作用】加载/保存/更新全部配置：地图列表（出生点、边界、胜负规则、商店商品、
+ *         config/cstmm/configs/maps.json）与全局配置（默认装备、快超时等，global.json）。
+ *         读写用 ReentrantReadWriteLock 保护；加载失败保留内存配置，绝不回写覆盖用户文件。
+ * 【被谁使用】Cstmm（启动 load）、ModCommands（/cstmm reload）、NetworkHandler（配置界面下发
+ *           buildConfigJson、客户端提交保存 updateMap/removeMap/updateGlobalConfig）、
+ *           MatchManager / QueueManager / QuickMatchEngine（读地图配置）、
+ *           VoteManager / EquipmentManager（踢人冷却、商店商品、全局装备）。仅服务端。
  */
 public class ConfigManager {
     private static final Gson GSON = new GsonBuilder()
@@ -39,6 +46,11 @@ public class ConfigManager {
     private List<MapConfig> maps;
     private GlobalConfig globalConfig;
 
+    /** 配置版本号：任何配置变更（加载/更新/删除/重载）时递增，
+     *  供 NetworkHandler 判断"核心配置 JSON+哈希"缓存是否需要重建（哈希握手省带宽用） */
+    private volatile long configVersion = 0;
+
+    /** 读写锁：地图/全局配置的读（getMaps/getMap 等，tick 高频）与写（加载/保存/更新）互斥 */
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
     private ConfigManager() {
@@ -57,6 +69,7 @@ public class ConfigManager {
         }
     }
 
+    // 单例入口（懒加载）
     public static ConfigManager getInstance() {
         if (instance == null) {
             instance = new ConfigManager();
@@ -66,12 +79,14 @@ public class ConfigManager {
 
     /**
      * 加载所有配置
+     * 【被谁使用】Cstmm（服务器启动时调用一次）。仅服务端。
      */
     public void load() {
         lock.writeLock().lock();
         try {
             loadMaps();
             loadGlobal();
+            configVersion++;
             Cstmm.LOGGER.info("[CSTMM - ConfigManager] Loaded {} maps and global config", maps.size());
         } finally {
             lock.writeLock().unlock();
@@ -80,6 +95,7 @@ public class ConfigManager {
 
     /**
      * 保存所有配置
+     * 【被谁使用】当前项目内暂无外部调用方（预留的全量保存入口；实际写盘走 saveMaps/saveGlobal）。
      */
     public void save() {
         lock.writeLock().lock();
@@ -94,6 +110,8 @@ public class ConfigManager {
 
     // ========== Maps ==========
 
+    // 【作用】从 maps.json 加载地图列表：逐条跳过 null/无 id 条目，兼容旧版 minPlayers 字段迁移；
+    //        文件不存在则创建默认地图；加载失败保留内存配置不回写
     private void loadMaps() {
         if (!Files.exists(mapsPath)) {
             Cstmm.LOGGER.info("[CSTMM - ConfigManager] maps.json not found, creating default...");
@@ -164,6 +182,7 @@ public class ConfigManager {
         return true;
     }
 
+    // 【作用】把有效地图列表写盘到 maps.json（写前逐条校验，无效地图不落盘）
     private void saveMaps() {
         // 写盘之前校验：无效地图不落盘（内存列表保留原值，等管理员修正后可再保存）
         List<MapConfig> toSave = new ArrayList<>(maps.size());
@@ -179,7 +198,8 @@ public class ConfigManager {
         }
     }
 
-    /** 为单张地图填充默认商品（商店按地图各一份） */
+    /** 为单张地图填充默认商品（商店按地图各一份）
+     * 【被谁使用】createDefaultMaps（生成三张默认地图时）。 */
     private void addDefaultShopItems(MapConfig map) {
         map.getShopItems().add(new GlobalConfig.ShopItem("minecraft:diamond_sword", 0, 0));
         map.getShopItems().add(new GlobalConfig.ShopItem("minecraft:bow", 0, 0));
@@ -188,6 +208,7 @@ public class ConfigManager {
         map.getShopItems().add(new GlobalConfig.ShopItem("minecraft:totem_of_undying", 0, 0));
     }
 
+    // 【作用】生成内置默认地图（1v1 竞技场、花园、炼狱小镇）含边界/出生点/商品
     private void createDefaultMaps() {
         this.maps = new ArrayList<>();
 
@@ -249,6 +270,7 @@ public class ConfigManager {
 
     // ========== Global ==========
 
+    // 【作用】从 global.json 加载全局配置；文件不存在则创建默认；失败保留内存配置不回写
     private void loadGlobal() {
         if (!Files.exists(globalPath)) {
             Cstmm.LOGGER.info("[CSTMM - ConfigManager] global.json not found, creating default...");
@@ -275,6 +297,7 @@ public class ConfigManager {
         }
     }
 
+    // 【作用】把全局配置写盘到 global.json
     private void saveGlobal() {
         try (Writer writer = new OutputStreamWriter(Files.newOutputStream(globalPath), StandardCharsets.UTF_8)) {
             GSON.toJson(globalConfig, writer);
@@ -283,6 +306,7 @@ public class ConfigManager {
         }
     }
 
+    // 【作用】生成默认全局配置（钻石套默认装备、快超时 30 秒）
     private void createDefaultGlobal() {
         this.globalConfig = new GlobalConfig();
 
@@ -302,6 +326,11 @@ public class ConfigManager {
 
     // ========== Public Accessors ==========
 
+    /**
+     * 【作用】返回全部地图配置的副本列表（读锁保护）。
+     * 【被谁使用】QueueManager（可用地图列表）、QuickMatchEngine（快速匹配选图）、
+     *           NetworkHandler（配置界面下发、客户端提交时的删除检测）、ModCommands（列出地图）。
+     */
     public List<MapConfig> getMaps() {
         lock.readLock().lock();
         try {
@@ -311,6 +340,11 @@ public class ConfigManager {
         }
     }
 
+    /**
+     * 【作用】按 id 查询单张地图配置（不存在返回 null）。
+     * 【被谁使用】MatchManager / QueueManager / QuickMatchEngine（开局、排队、匹配选图）、
+     *           VoteManager（踢人冷却读取）、EquipmentManager（商店商品读取）、NetworkHandler。
+     */
     public MapConfig getMap(String id) {
         lock.readLock().lock();
         try {
@@ -323,6 +357,10 @@ public class ConfigManager {
         }
     }
 
+    /**
+     * 【作用】新增或更新一张地图（按 id 定位替换；写前校验无效地图直接拒绝）并写盘。
+     * 【被谁使用】NetworkHandler（客户端配置界面提交保存时逐张调用）。仅服务端。
+     */
     public void updateMap(MapConfig map) {
         // 校验放在写盘之前：无效地图直接拒绝（不更新内存、不落盘），保存入口拿不到玩家，仅 warn + 拒绝
         if (!isValidMapForSave(map)) {
@@ -334,21 +372,28 @@ public class ConfigManager {
                 if (maps.get(i).getId().equals(map.getId())) {
                     maps.set(i, map);
                     saveMaps();
+                    configVersion++;
                     return;
                 }
             }
             maps.add(map);
             saveMaps();
+            configVersion++;
         } finally {
             lock.writeLock().unlock();
         }
     }
 
+    /**
+     * 【作用】按 id 删除地图并写盘。
+     * 【被谁使用】NetworkHandler（客户端配置界面提交保存时删除被移除的地图，调用前已校验对局占用）。仅服务端。
+     */
     public void removeMap(String id) {
         lock.writeLock().lock();
         try {
             maps.removeIf(m -> m.getId().equals(id));
             saveMaps();
+            configVersion++;
         } finally {
             lock.writeLock().unlock();
         }
@@ -367,18 +412,32 @@ public class ConfigManager {
         }
     }
 
+    /**
+     * 【作用】整体替换全局配置并写盘。
+     * 【被谁使用】NetworkHandler（客户端配置界面提交保存时）。仅服务端。
+     */
     public void updateGlobalConfig(GlobalConfig config) {
         lock.writeLock().lock();
         try {
             this.globalConfig = config;
             saveGlobal();
+            configVersion++;
         } finally {
             lock.writeLock().unlock();
         }
     }
 
     /**
+     * 【作用】读取配置版本号（任何配置变更时递增），供 NetworkHandler 判断核心配置 JSON/哈希缓存是否失效。
+     * 【被谁使用】NetworkHandler（配置哈希握手缓存的失效判断）。仅服务端。
+     */
+    public long getConfigVersion() {
+        return configVersion;
+    }
+
+    /**
      * 重新加载配置（保留运行时状态）
+     * 【被谁使用】ModCommands（/cstmm reload 管理员命令，不重启服务器热更新配置）。仅服务端。
      */
     public void reload() {
         Cstmm.LOGGER.info("[CSTMM - ConfigManager] Reloading configurations...");
@@ -386,6 +445,7 @@ public class ConfigManager {
         try {
             loadMaps();
             loadGlobal();
+            configVersion++;
         } finally {
             lock.writeLock().unlock();
         }

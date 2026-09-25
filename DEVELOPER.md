@@ -57,10 +57,13 @@
 | `ClientNetworkHandler` | S2C 包解码与分发 |
 | `ClientHandshakeState` | 握手状态机，全部功能的门禁 |
 | `ConfigDataCache` | 配置同步结果的客户端缓存（供界面渲染） |
-| `MatchMenuScreen` | 匹配菜单（欢迎/匹配/队列/战队/履历/关于页，卡片背景 cover 裁剪渲染，关于页含仓库/问题反馈链接与"千万别点"彩蛋入口）；队列页/战队页由 QueueTabPanel / ClanTabPanel 渲染 |
-| `QueueTabPanel` / `ClanTabPanel` | 队列状态页（own/clan/每图状态 + 渐变地图图）与战队页（列表/搜索/创建/详情/成员管理） |
+| `ConfigDiskCache` | 配置磁盘持久缓存（按服务器标识隔离；重连哈希一致免收全量配置） |
+| `MatchMenuScreen` | 匹配菜单（欢迎/匹配/队列/战队/履历/个性化/关于页，卡片背景 cover 裁剪渲染，关于页含仓库/问题反馈链接与"千万别点"彩蛋入口）；队列页/战队页/个性化页由 QueueTabPanel / ClanTabPanel / PersonalizeTabPanel 渲染 |
+| `QueueTabPanel` / `ClanTabPanel` / `PersonalizeTabPanel` | 队列状态页（own/clan/每图状态 + 渐变地图图）、战队页（列表/搜索/创建/详情/成员管理）与个性化页（主题色 + QQ/B站头像绑定） |
 | `ClanCache` / `QueueStatusCache` | 战队与队列状态 JSON 缓存（clan_data / queue_status 包） |
-| `BadgeCache` | 战队徽标分片缓存（badge 包按 badgeId 重组；本地缺失时自动发 request_badge 请求补发；断线清空） |
+| `FaceCache` / `FaceImageCache` | 自己的头像绑定缓存（档案同步携带 avatarType/avatarId）与头像图片异步获取（QQ 拼接 qlogo 直链 / B站经 uapis 解析 face 直链，内存缓存 + 失败冷却；断线清空） |
+| `ClientConfig` | 客户端个性化配置 `config/cstmm/client/config.json`（当前仅界面主题色，懒加载 + 原子落盘） |
+| `BadgeCache` | 战队徽标两级缓存（badge 包按 badgeId 重组，落盘 `config/cstmm/client/cache/badges/<id>.b64`；进服上报磁盘已有 id 服务端免重发；内存+磁盘均缺失时自动发 request_badge 补发；断线仅清内存，磁盘保留跨重连复用） |
 | `Base64ImageDecoder` | base64 图片 → GPU 纹理的健壮解码工具（data URI 前缀剥离/空白清理/MIME 降级/非 PNG 经 ImageIO 转换；地图卡片背景与战队徽标共用，`CardTexture` record 在此类中） |
 | `LastWordsScreen` + `WhyYouClickThis` | "千万别点"的遗言流程（不可取消：发送/算了/回车/ESC 均发送遗言；崩溃挂起为静态状态，由 CstmmClient 每 tick 抛出；屏幕被其他模组顶号/断线顶掉时 `removed()` 兜底同样触发；被反崩溃模组吞掉异常则改用 `scheduleStop()` 强制退出） |
 | `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新） |
@@ -71,8 +74,9 @@
 
 - **握手门禁**：客户端未握手成功时禁用全部功能（快捷键点击仅提示，不发包）。
 - **匹配模式**：竞技/休闲由玩家入队时选择（`MatchActionPayload` 的 `target` 字段），不在 MapConfig 中配置。
-- **状态推送事件驱动**：队列/战队状态不轮询——客户端打开匹配主菜单时发 `request_queue_status{subscribe:true}` 订阅（关闭菜单在 `removed()` 发 false 退订），队列变化（加入/退出/开局/解散/补位）时服务端向订阅者推送 `queue_status` 快照（"匹配"页取消匹配按钮与"队列"页共用同一份快照）；战队任何变更（创建/加入/退出/解散/转让/踢人/编辑）时向全体在线成员推送 MINE 快照。
-- **战队成员字段**：clan_data 的成员含 `online`（在线状态）与 `matchState`（"空闲"/"地图显示名-模式名"），由服务端实时计算下发。
+- **队伍开局时才分配**：地图队列是单一无队伍名单（入队仅做容量检查 = maxRed + maxBlue 之和，超出发"该地图匹配人数已满"）；人数达到两队最低之和、准备开局时才由 `QuickMatchEngine.splitIntoTeams`（与快速匹配共用）一次性分队。`joinQueue` 的 `preferredTeam`/API `team` 参数已废弃。
+- **状态推送事件驱动**：队列/战队状态不轮询——客户端打开匹配主菜单时发 `request_queue_status{subscribe:true}` 订阅（关闭菜单在 `removed()` 发 false 退订），队列变化（加入/退出/开局/解散/补位）时服务端向订阅者推送 `queue_status` 快照（"匹配"页取消匹配按钮与"队列"页共用同一份快照）；战队任何变更（创建/加入/退出/解散/转让/踢人/编辑）时向全体在线成员推送 MINE 快照，**并重推队列快照**（队列快照的 clan 行依赖战队数据，否则"先匹配后入队"会显示旧状态）。
+- **战队成员字段**：clan_data 的成员含 `online`（在线状态）、`matchState`（"空闲"/"地图显示名-模式名"）与 `avatarType`/`avatarId`（头像绑定，服务端只存/发绑定，图片由各客户端自行获取），由服务端实时计算下发。
 - **原子写盘**：所有 JSON 保存均为临时文件 + `Files.move(ATOMIC_MOVE)`；加载失败（`JsonParseException`）绝不回写默认值覆盖用户文件。
 - **活跃对局保护**：活跃对局的地图禁止删除/修改（服务端 `handleConfigUpdate` 校验 + 客户端弹窗提示）。
 - **快照保护**：`InventoryManager.saveInventory` 绝不覆盖未恢复的旧快照；恢复流程为"清背包 → 恢复 → 成功才删快照"。
@@ -89,9 +93,10 @@
 |---|---|---|
 | `cstmm:handshake_s2c` | S2C | 握手请求（携带服务端版本） |
 | `cstmm:handshake_c2s` | C2S | 握手应答（携带客户端版本） |
-| `cstmm:config_sync` | S2C | 配置同步（JSON 分片） |
+| `cstmm:config_sync` | S2C | 配置同步（核心配置 JSON 分片，含哈希） |
+| `cstmm:config_meta` | S2C | 配置元数据（核心配置 SHA-256 + inUseMaps，哈希握手省带宽） |
 | `cstmm:config_update` | C2S | 配置保存（JSON 分片） |
-| `cstmm:request_config_sync` | C2S | 请求配置同步（空包，限频 2 次/秒/人） |
+| `cstmm:request_config_sync` | C2S | 请求配置同步（携带客户端缓存哈希，限频 2 次/秒/人） |
 | `cstmm:match_action` | C2S | 匹配/投票/购买等动作 |
 | `cstmm:match_status` | S2C | 对局状态消息广播 |
 | `cstmm:hud_data` | S2C | HUD 数据（每秒推送） |
@@ -101,12 +106,14 @@
 | `cstmm:clan_action` | C2S | 战队操作（创建/加入/退出/解散/转让/踢人/编辑/查询；大徽标自动分片上传） |
 | `cstmm:clan_data` | S2C | 战队数据（MINE/LIST/DETAIL JSON 快照；badge 字段 = 内容寻址 id） |
 | `cstmm:badge` | S2C | 战队徽标分片下发（badgeId 内容寻址，每片 ≤30000 字符） |
-| `cstmm:request_badge` | C2S | 徽标缓存缺失请求（客户端本地无该 badgeId 时请求补发） |
+| `cstmm:request_badge` | C2S | 徽标缓存缺失请求（客户端内存+磁盘均无该 badgeId 时请求补发） |
+| `cstmm:badge_known` | C2S | 客户端进服上报磁盘缓存已有的徽标 id（服务端跳过重发） |
 | `cstmm:queue_status` | S2C | 队列状态快照（订阅制，变化时推送） |
 | `cstmm:request_queue_status` | C2S | 队列状态订阅开关（打开匹配主菜单订阅、关闭菜单退订） |
-| `cstmm:popup` | S2C | 弹窗通知（当前界面内弹对话框，无界面回退聊天栏） |
+| `cstmm:popup` | S2C | 弹窗通知（匹配菜单/配置界面内嵌弹窗，其他情况用全局弹窗界面 PopupScreen 承载、确定后返回原界面） |
+| `cstmm:set_face` | C2S | 设置/清除自己的头像绑定（avatarType + avatarId；服务端校验后写入玩家档案并同步档案/战队/队列三处下发） |
 
-> 逐包字段定义与分片防护参数详见 NETWORK.md §5.2（单包上限：C2S 32768B / S2C JSON 65536B；徽标分片上传 totalParts ∈ [1,64]、累计 ≤1.92M 字符；下发 totalParts ∈ [1,128]）。
+> 逐包字段定义与分片防护参数详见 NETWORK.md §5.2（单包上限：C2S 32768B / S2C JSON 65536B；徽标分片上传 totalParts ∈ [1,64]、累计 ≤1.92M 字符；下发 totalParts ∈ [1,3]）。
 
 ### 3.2 握手流程
 
@@ -140,7 +147,9 @@
 
 **shop_data**（S2C）：`bool eligible` + `varInt itemCount` + 循环 `string itemId(256B)` + `varInt price` + `varInt maxPurchase`。数据流：客户端打开 ShopScreen 时在**构造器**发送 `REQUEST_SHOP`（放 init 会因界面刷新循环重复请求）→ 服务端校验（活跃对局 + isCompetitive）→ 回 `shop_data` → `ShopDataCache` 缓存并刷新界面。
 
-**open_config_screen**（S2C）/ **request_config_sync**（C2S）：空包。后者服务端限频 **2 次/秒/玩家**，超限拒绝并提示。
+**open_config_screen**（S2C）：空包。**request_config_sync**（C2S）：`string clientHash`（客户端本地缓存的核心配置哈希，空载荷防御解码兼容旧版客户端）。服务端限频 **2 次/秒/玩家**，超限拒绝并提示；哈希一致仅回 `config_meta` 小包，不一致下发全量。
+
+**config_meta**（S2C）：`string configHash` + `string inUseMapsJson`。详见第 4 节哈希握手。
 
 **config_sync / config_update**：分片机制详见第 4 节。
 
@@ -164,15 +173,16 @@
 配置 JSON（含 Base64 背景图）可能远超原版单包限制，两端均分片：
 
 - **分片单位**：按 **UTF-8 字节**切分，每片 ≤ 30000 字节，且不切断多字节字符（中文安全）。
-- **S2C `config_sync`**：`varInt partIndex` + `varInt totalParts` + `string data(≤32767B)`。触发时机：玩家加入、任意 OP 保存配置后全服广播、玩家主动请求。
+- **S2C `config_sync`**：`varInt partIndex` + `varInt totalParts` + `string data(≤32767B)`，data 拼接为核心配置 JSON `{"hash","maps","global"}`。触发时机：玩家 JOIN 哈希不匹配/超时兜底、任意 OP 保存配置后全服广播、玩家请求且哈希不匹配。
 - **C2S `config_update`**：字段同上，客户端同样按 30000 字节/片发送（绕过原版 C2S 32768 字节硬限制）。
-- **`buildConfigJson`** 包含 `inUseMaps`（当前活跃对局的地图列表），客户端据此在配置界面阻止删除活跃地图并弹窗。
+- **哈希握手省带宽**：JOIN 时服务端先发 `config_meta` 小包（核心配置 SHA-256 + inUseMaps）；客户端与本机磁盘缓存（`ConfigDiskCache`，按服务器标识隔离存 `config/cstmm_client_cache/<serverKey>.json`）比对哈希，一致则回报哈希、服务端跳过全量下发（重连/重复进服从数 MB 降至约 200 字节）。哈希不匹配/无缓存/3 秒未回应 → 兜底全量下发。`request_config_sync` 携带客户端缓存哈希（空载荷防御解码兼容旧版）。
+- **`config_meta` 的 inUseMaps**：当前活跃对局的地图列表（独立于哈希之外随小包同步——若计入哈希，对局开始/结束会令全员缓存频繁失效），客户端据此在配置界面阻止删除活跃地图并弹窗。
 - **服务端重组防护**（防 OOM/DoS）：
   - `totalParts` 必须 ∈ [1, 64]，否则丢弃并 WARN；
   - `partIndex` 必须在范围内，重复分片（位图去重）直接丢弃；
   - 单玩家累积数据 > **2 MB** 时清空其重组状态并 WARN（合法上限 64 片 × 30KB ≈ 1.92MB，不会误伤）；
   - 断线自动清理重组缓冲。
-- **重组完成后校验流程**：出生点非空、地图 ID 去重（新 ID 查重复）、活跃对局的地图禁删改 → 落盘（原子写）→ 全服广播新配置。
+- **重组完成后校验流程**：出生点非空、地图 ID 去重（新 ID 查重复）、活跃对局的地图禁删改 → 落盘（原子写）→ 全服广播新配置（客户端落盘新哈希，之后重连免全量）。
 - **开局时序**：`MatchManager.startMatch` 仅在初始化成功后才将玩家移出队列。
 
 ### 4.1 客户端同步保护
@@ -184,8 +194,10 @@
 ## 5. 对局生命周期
 
 ```
-入队（mapId@mode 复合键，红/蓝偏好）
-  ──► 开局条件：红队列 ≥ minRedPlayers 且蓝队列 ≥ minBluePlayers
+入队（mapId@mode 复合键；单一无队伍名单，仅做容量检查 = maxRed + maxBlue 之和）
+  ──► 开局条件：该模式队列总人数 ≥ minRedPlayers + minBluePlayers
+  ──► 开局时才分配队伍（QuickMatchEngine.splitIntoTeams，与快速匹配共用分队核心）：
+        随机打乱 → 战队聚组 → 战队优先 + 人数平衡分队（遵守 maxRed/maxBlue）→ fixMinPlayers 修正两队最低人数
   ──► 同图竞技/休闲队列先到先得；开局成功后 dissolveQueuesForMap 解散该图全部剩余队列并提示玩家
   ──► startMatch（session.setCompetitive(queueMode)）
         竞技：InventoryManager 存包清包 + 发 defaultGear + 商店可用 + 友伤启用
@@ -207,17 +219,18 @@
 
 **计时器**：对局结束（含超时）需等待投票结果再终局，禁止重复调用 `handleTimerEnd`；投票超时/对局已结束时静默清理。踢人发起者有 `kickCooldownSeconds` 冷却。
 
-**观战者**：无队伍玩家的击杀不记录、不播报。
-
 ## 6. 数据持久化与保护
 
 | 文件 | 内容 | 说明 |
 |---|---|---|
 | `config/cstmm/configs/maps.json` | 地图配置 | 原子写盘；单条坏数据仅跳过该条 |
 | `config/cstmm/configs/global.json` | 全局配置 | 原子写盘 |
-| `config/cstmm/data/profiles/` | 玩家战绩 | 原子写盘；**损坏档案不加载、不覆盖**，玩家进服收到聊天警告，管理员修复后重启生效 |
+| `config/cstmm/data/players/<player_uuid>.json` | 玩家档案（战绩 + 头像绑定 avatarType/avatarId，逐玩家一文件，**进服即创建**） | 原子写盘；**损坏档案不加载、不覆盖**，玩家进服收到聊天警告，管理员修复后重启生效 |
 | `config/cstmm/data/bags/<player_uuid>.json` | 对局背包快照（逐玩家一文件） | 原子写盘；已有未恢复快照绝不被覆盖；损坏文件不加载、不覆盖、不删除；恢复 = 清背包 → 恢复 → 成功才删快照（null 字段保护），失败保留可重试；旧版单文件 `bags.json` 启动时自动迁移并重命名为 `bags.json.migrated` |
 | `config/cstmm/data/clans.json` | 战队数据（名称/缩写/徽标 base64/队长/成员/上限） | 原子写盘；损坏时 `loadFailed` 拒绝一切战队变更（创建/加入/退出等全部返回错误提示）且绝不覆盖用户文件，管理员修复后重启生效 |
+| **客户端** `config/cstmm/client/config.json` | 客户端个性化配置（当前仅界面主题色 themeColor） | 懒加载 + 变更即原子落盘；损坏按默认值兜底 |
+| **客户端** `config/cstmm/client/cache/config_files/<host_port>.json` | 配置磁盘缓存（核心配置 JSON + 哈希，按服务器隔离；标识中冒号等非法字符替换为下划线） | 哈希一致时重连免收全量配置；损坏/缺失静默降级为全量重拉 |
+| **客户端** `config/cstmm/client/cache/badges/<host_port>/<badgeId>.b64` | 徽标磁盘缓存（内容寻址，按服务器隔离，逐徽标一文件） | 分片收齐即落盘；进服上报已知 id 服务端免重发；文件名经 hex16 白名单校验，损坏静默忽略 |
 
 战绩只在**对局结束时**记录一次（防双重计分）；停服时统一保存（单点注册，不重复）。`getGlobalConfig()` 返回共享只读实例以减少开销。
 
@@ -230,6 +243,13 @@
 | `/cstmm reload` | OP≥2 | 从磁盘重新加载配置 |
 | `/cstmm data restore bags <玩家>` | OP≥2 | 恢复玩家全部已保存背包 |
 | `/cstmm data restore bags <玩家> <槽位>` | OP≥2 | 恢复指定槽位（0-40） |
+| `/cstmm data get player <玩家名\|UUID> [字段]` | OP≥2 | 查看玩家战绩档案（支持离线玩家）；可选字段输出单值：kills / deaths / matches / wins / penaltydeaths / kd / name / uuid |
+| `/cstmm data get clan <战队名> [字段]` | OP≥2 | 查看战队信息；可选字段输出单值：name / abbr / limit / leader / members / badge（超长 base64 只回长度与文件位置）/ createdat |
+| `/cstmm data delete player <玩家名\|UUID> [profile\|bags\|all]` | OP≥2 | 删除玩家数据：省略类型默认 all（战绩档案 players/<uuid>.json + 背包快照 bags/<uuid>.json）；档案删除同时解除损坏标记，玩家重进服后从零建档 |
+| `/cstmm data delete clan <战队名>` | OP≥2 | 删除战队（等同队长解散：清除三索引并落盘，在线成员收到通知与最新 MINE） |
+| `/cstmm data get maps\|global\|clans` | OP≥2 | 读取对应 JSON 文件原文；≤1500 字符直接聊天输出，超出则回文件路径 + 开头预览 |
+| `/cstmm data edit player <玩家名\|UUID> <字段> <值>` | OP≥2 | 修改档案字段：kills / deaths / matches / wins / penaltyDeaths（支持离线玩家，改后写盘并同步在线客户端） |
+| `/cstmm data edit clan <战队名> <字段> <值>` | OP≥2 | 修改战队字段：name / abbr / limit（人数上限）/ leader（转让队长，支持离线成员）/ badge（URL、base64 ≤48KiB 或 clear 清空；游戏内命令 256 字符上限，超长 base64 经服务器控制台输入；改后写盘并推送成员客户端） |
 
 玩家可用命令见 [README.md](README.md)。
 

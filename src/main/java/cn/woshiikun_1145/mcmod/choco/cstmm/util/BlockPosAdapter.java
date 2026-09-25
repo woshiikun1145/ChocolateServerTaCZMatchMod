@@ -7,11 +7,14 @@ import net.minecraft.util.math.BlockPos;
 import java.lang.reflect.Type;
 
 /**
- * Gson 序列化适配器，用于将 BlockPos 序列化为 {x, y, z} JSON 对象。
+ * 【作用】Gson 序列化适配器，用于将 BlockPos 序列化为 {x, y, z} JSON 对象。
  * 在 ConfigManager 中注册，使 maps.json 可正确读写 BlockPos 列表。
+ * 【被谁使用】ConfigManager 与 NetworkHandler 各自注册到 GsonBuilder（服务端），
+ * 覆盖地图出生点等所有 BlockPos 字段的 JSON 读写。
  */
 public class BlockPosAdapter implements JsonSerializer<BlockPos>, JsonDeserializer<BlockPos> {
 
+    // 序列化：BlockPos → {"x":..,"y":..,"z":..} JSON 对象
     @Override
     public JsonElement serialize(BlockPos src, Type typeOfSrc, JsonSerializationContext context) {
         JsonObject obj = new JsonObject();
@@ -21,9 +24,11 @@ public class BlockPosAdapter implements JsonSerializer<BlockPos>, JsonDeserializ
         return obj;
     }
 
+    // 反序列化：{"x":..,"y":..,"z":..} JSON 对象 → BlockPos；空 JSON 返回 null 由上层跳过
     @Override
     public BlockPos deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context)
             throws JsonParseException {
+        // JSON null 直接返回 null，避免解析异常
         if (json == null || json.isJsonNull()) {
             return null;
         }

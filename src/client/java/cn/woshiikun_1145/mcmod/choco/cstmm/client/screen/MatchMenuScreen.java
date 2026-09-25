@@ -1,9 +1,12 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm.client.screen;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.CstmmClient;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.Base64ImageDecoder;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.Base64ImageDecoder.CardTexture;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ConfigDataCache;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.FaceCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.QueueStatusCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.ClientHandshakeState;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.network.ClientNetworkHandler;
@@ -33,6 +36,20 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
+/**
+ * 【作用】主匹配菜单界面（客户端）：欢迎 / 匹配 / 队列 / 战队 / 履历 / 关于 六个标签页。
+ * 【被谁使用】CstmmClient（keyOpenMenu 快捷键打开）；ClientNetworkHandler（配置同步回调 refreshMaps、服务端弹窗调 showPopup）。
+ * <p>
+ * 网络去向（C2S）：
+ * <ul>
+ *   <li>JOIN_QUEUE / JOIN_QUICK / LEAVE_QUEUE → 服务端 NetworkHandler.handleMatchAction → QueueManager（入队/退队）</li>
+ *   <li>REQUEST_PROFILE → 服务端 PlayerDataManager.syncProfileToPlayer 回发战绩 → drawProfile 展示</li>
+ *   <li>RequestQueueStatusPayload(subscribe) → 服务端队列状态推送订阅/退订（匹配页"取消匹配"按钮与队列页共用快照）</li>
+ * </ul>
+ * 入站数据来源（S2C，均由 ClientNetworkHandler 接收）：
+ * 地图卡片 ← ConfigDataCache（服务端配置同步，变更时回调 refreshMaps）；
+ * 服务端弹窗 ← showPopup；队列快照 ← QueueStatusCache；战绩 ← PlayerProfileCache。
+ */
 @Environment(EnvType.CLIENT)
 public class MatchMenuScreen extends Screen {
 
@@ -49,16 +66,19 @@ public class MatchMenuScreen extends Screen {
     private static final String QUICK_CARD_ID = "quick";
 
     private final List<SidebarButton> sidebarButtons = new ArrayList<>();
+    // 当前选中标签页 id（0欢迎 1匹配 2队列 3战队 4履历 5关于 6个性化）
     private int selectedTab = 0;
+    // 地图卡片数据（loadMaps 构建，首项固定为快速匹配）
     private List<MapCardData> mapCards = new ArrayList<>();
 
     /** 侧边栏橙色标记当前 Y（像素，浮点做滑动动画；目标为选中按钮实际索引位置） */
     private float markerY;
 
+    // 匹配页卡片网格纵向滚动偏移（像素）：mouseScrolled 更新，渲染与点击命中共用
     private int scrollOffset = 0;
 
-    /** 玩家加入队列时携带的匹配模式：COMPETITIVE（竞技）/ CASUAL（休闲），默认竞技 */
-    private String selectedMode = "COMPETITIVE";
+    /** 玩家加入队列时携带的匹配模式：COMPETITIVE（竞技）/ CASUAL（休闲），默认休闲 */
+    private String selectedMode = "CASUAL";
     private ButtonWidget casualModeBtn;
     private ButtonWidget competitiveModeBtn;
 
@@ -66,11 +86,12 @@ public class MatchMenuScreen extends Screen {
     private ButtonWidget repoBtn;
     private ButtonWidget issueBtn;
     private ButtonWidget secretBtn;
-    /** 匹配页左下角"取消匹配"按钮：玩家处于任一匹配队列时显示，效果与 /cstmm match leave 相同 */
+    /** 匹配页左下角"取消匹配"按钮：玩家处于任一匹配队列时显示，效果与 /cstmm queue leave 相同 */
     private ButtonWidget cancelMatchBtn;
 
     private final QueueTabPanel queuePanel = new QueueTabPanel(this);
     private final ClanTabPanel clanPanel = new ClanTabPanel(this);
+    private final PersonalizeTabPanel personalizePanel = new PersonalizeTabPanel(this);
 
     public MatchMenuScreen() {
         super(Text.literal("匹配菜单"));
@@ -80,16 +101,19 @@ public class MatchMenuScreen extends Screen {
         sidebarButtons.add(new SidebarButton("📋 队列", 2));
         sidebarButtons.add(new SidebarButton("🛡 战队", 3));
         sidebarButtons.add(new SidebarButton("📊 履历", 4));
+        sidebarButtons.add(new SidebarButton("🎨 个性化", 6));
         // 配置界面设计上只能通过 /cstmm config 打开，匹配菜单不提供配置入口
         sidebarButtons.add(new SidebarButton("ℹ 关于", 5));
 
         loadMaps();
     }
 
+    /** 由 ClientNetworkHandler 在配置同步完成时回调，重载地图卡片（纯本地更新，不发包） */
     public void refreshMaps() {
         loadMaps();
     }
 
+    /** 重建地图卡片列表：数据源为 ConfigDataCache（服务端配置同步而来），首项固定为快速匹配入口 */
     private void loadMaps() {
         mapCards.clear();
 
@@ -116,6 +140,8 @@ public class MatchMenuScreen extends Screen {
 
     @Override
     protected void init() {
+        // 构建全部可交互控件（侧边栏/模式切换/关于页按钮/取消匹配按钮）；
+        // 窗口尺寸变化时 Screen 会重新调用 init，控件全部重建但字段状态（selectedTab 等）保留
         super.init();
 
         int btnY = HEADER_HEIGHT + 10;
@@ -187,8 +213,11 @@ public class MatchMenuScreen extends Screen {
         // 战队页文本控件（加入 Screen children，由面板控制可见性与位置）
         clanPanel.initWidgets();
 
+        // 个性化页文本控件（ID 输入框 / HEX 输入框）
+        personalizePanel.initWidgets();
+
         // 匹配页左下角"取消匹配"按钮：仅当玩家在任一匹配队列时显示（每帧按推送快照刷新可见性），
-        // 点击发 LEAVE_QUEUE，与 /cstmm match leave 走同一服务端入口
+        // 点击发 LEAVE_QUEUE，与 /cstmm queue leave 走同一服务端入口
         cancelMatchBtn = this.addDrawableChild(ButtonWidget.builder(
                 Text.literal("§c取消匹配"),
                 button -> ClientPlayNetworking.send(new MatchActionPayload(
@@ -225,6 +254,7 @@ public class MatchMenuScreen extends Screen {
                 "COMPETITIVE".equals(selectedMode) ? "§a✔ 竞技模式" : "§7竞技模式"));
     }
 
+    /** 履历页进入时触发：发 REQUEST_PROFILE → 服务端 PlayerDataManager 回发战绩包 → PlayerProfileCache，由 drawProfile 读取展示 */
     private void requestProfile() {
         // 使用网络包请求，不再使用命令
         MatchActionPayload payload = new MatchActionPayload(
@@ -239,11 +269,16 @@ public class MatchMenuScreen extends Screen {
         // 留空，不绘制原版背景，避免模糊
     }
 
+    /** 主渲染入口：背景/标题栏/侧边栏/橙色滑动标记 → drawContent 按页分发 → super.render 绘制控件；弹窗打开时独占渲染 */
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         // 战队页文本控件只在战队页绘制（切页后残留会透到其他标签页）
         if (selectedTab != 3) {
             clanPanel.hideWidgets();
+        }
+        // 个性化页文本控件同理
+        if (selectedTab != 6) {
+            personalizePanel.hideWidgets();
         }
 
         // 匹配页"取消匹配"按钮：按最新推送快照每帧刷新可见性（处于匹配页且玩家在任一队列时显示）
@@ -262,21 +297,24 @@ public class MatchMenuScreen extends Screen {
         int screenWidth = this.width;
         int screenHeight = this.height;
 
+        // 主题色（个性化页设置，config/cstmm/client/config.json 持久化）应用于界面强调色
+        int accent = ClientConfig.getThemeColorArgb();
+
         // 标题栏
         context.fill(0, 0, screenWidth, HEADER_HEIGHT, 0xCC222222);
         Text title = Text.literal("🎯 Chocolate Server TaCZ Match Mod");
-        context.drawText(textRenderer, title, 20, 16, 0xFFAA00, true);
+        context.drawText(textRenderer, title, 20, 16, accent, true);
 
         // 侧边栏
         context.fill(0, HEADER_HEIGHT, SIDEBAR_WIDTH, screenHeight, 0xCC1A1A1A);
         context.fill(SIDEBAR_WIDTH, HEADER_HEIGHT, SIDEBAR_WIDTH + 1, screenHeight, 0x44FFFFFF);
 
-        // 侧边栏橙色标记：按按钮实际索引定位（修复"关于"页黄条错位：tab id 4 ≠ 按钮索引 3），
+        // 侧边栏主题色标记：按按钮实际索引定位（修复"关于"页黄条错位：tab id 4 ≠ 按钮索引 3），
         // 切换时向目标位置滑动而非直接跳变
         float markerTarget = markerTargetY();
         markerY += (markerTarget - markerY) * Math.min(1f, delta * 0.25f);
         int markerTop = Math.round(markerY);
-        context.fill(2, markerTop, 6, markerTop + 28, 0xFFFFAA00);
+        context.fill(2, markerTop, 6, markerTop + 28, accent);
 
         int contentX = SIDEBAR_WIDTH + 20;
         int contentY = HEADER_HEIGHT + 10;
@@ -302,8 +340,8 @@ public class MatchMenuScreen extends Screen {
         int by = (this.height - boxH) / 2;
         context.fill(0, 0, this.width, this.height, 0xA0000000);
         context.fill(bx, by, bx + boxW, by + boxH, 0xFF212121);
-        context.drawBorder(bx, by, boxW, boxH, 0xFFDAA520);
-        context.drawCenteredTextWithShadow(textRenderer, "§6提示", this.width / 2, by + 8, 0xFFFFFF);
+        context.drawBorder(bx, by, boxW, boxH, ClientConfig.getThemeColorArgb());
+        context.drawCenteredTextWithShadow(textRenderer, "提示", this.width / 2, by + 8, ClientConfig.getThemeColorArgb());
         int ly = by + 26;
         for (net.minecraft.text.OrderedText line : lines) {
             context.drawTextWithShadow(textRenderer, line, bx + 12, ly, 0xFFE0E0E0);
@@ -319,6 +357,7 @@ public class MatchMenuScreen extends Screen {
         popupButtonRect = new int[]{btnX, btnY, btnW, btnH};
     }
 
+    /** 内容区分发器：按 selectedTab 将绘制委托给本页 drawXxx 方法（队列/战队页委托给对应 Panel） */
     private void drawContent(DrawContext context, int x, int y, int width, int height,
                              int mouseX, int mouseY, float delta) {
         switch (selectedTab) {
@@ -328,14 +367,21 @@ public class MatchMenuScreen extends Screen {
             case 3 -> clanPanel.draw(context, x, y, width, height, mouseX, mouseY);
             case 4 -> drawProfile(context, x, y, width, height);
             case 5 -> drawAbout(context, x, y, width, height);
+            case 6 -> personalizePanel.draw(context, x, y, width, height, mouseX, mouseY);
             default -> drawWelcome(context, x, y, width, height);
         }
     }
 
+    /** 欢迎页：纯本地绘制，无网络交互；按键提示实时读键位绑定，地图数量来自 ConfigDataCache */
     private void drawWelcome(DrawContext context, int x, int y, int width, int height) {
-        context.drawText(textRenderer, "§6欢迎使用 Chocolate Server TaCZ Match Mod", x + 20, y + 30, 0xFFFFFF, true);
+        // 页面标题跟随主题色（个性化页设置）
+        context.drawText(textRenderer, "欢迎使用 Chocolate Server TaCZ Match Mod", x + 20, y + 30,
+                ClientConfig.getThemeColorArgb(), true);
         context.drawText(textRenderer, "§7这是一个为 Chocolate Server TaCZ Subserver设计的 PvP 对战系统", x + 20, y + 60, 0xAAAAAA, true);
-        context.drawText(textRenderer, "§7使用 §e; §7打开菜单，§e' §7打开商店", x + 20, y + 80, 0xAAAAAA, true);
+        // 按键提示实时读取当前键位绑定（玩家改键后提示随之变化，不再硬编码 ; 和 '）
+        String menuKey = CstmmClient.keyOpenMenu.getBoundKeyLocalizedText().getString();
+        String shopKey = CstmmClient.keyOpenShop.getBoundKeyLocalizedText().getString();
+        context.drawText(textRenderer, "§7使用 §e" + menuKey + " §7打开菜单，§e" + shopKey + " §7打开商店", x + 20, y + 80, 0xAAAAAA, true);
         // 快速匹配入口只是队列，不计入地图数量
         int enabledMaps = 0;
         for (MapConfig m : ConfigDataCache.getInstance().getMaps()) {
@@ -344,6 +390,7 @@ public class MatchMenuScreen extends Screen {
         context.drawText(textRenderer, "§a当前可用地图: §f" + enabledMaps + " 张", x + 20, y + 110, 0xFFFFFF, true);
     }
 
+    /** 匹配页：绘制地图卡片网格（数据源 loadMaps）；滚动偏移仅影响渲染起点，点击命中检测见 mouseClicked（与渲染共用布局常量） */
     private void drawMatchCards(DrawContext context, int x, int y, int width, int height,
                                 int mouseX, int mouseY, float delta) {
         if (mapCards.isEmpty()) {
@@ -396,12 +443,13 @@ public class MatchMenuScreen extends Screen {
             // 90% 不透明度灰色遮罩：压暗背景图，保证文字可读（层级：背景图 < 遮罩 < 文字）
             context.fill(cardX, cardY, cardX + CARD_WIDTH, cardY + CARD_HEIGHT, 0xE6808080);
 
-            Text nameText = Text.literal("§6" + card.displayName);
+            // 卡片名跟随主题色（个性化页设置）
+            Text nameText = Text.literal(card.displayName);
             int nameWidth = textRenderer.getWidth(nameText);
             context.drawText(textRenderer, nameText,
                     cardX + (CARD_WIDTH - nameWidth) / 2,
                     cardY + CARD_HEIGHT / 2 - 20,
-                    0xFFFFFF, true);
+                    ClientConfig.getThemeColorArgb(), true);
 
             Text typeText = Text.literal("§7" + card.mapType);
             int typeWidth = textRenderer.getWidth(typeText);
@@ -458,6 +506,8 @@ public class MatchMenuScreen extends Screen {
             if (clanPanel.handleRowClick(mouseX, mouseY, SIDEBAR_WIDTH + 20, HEADER_HEIGHT + 10,
                     this.width - SIDEBAR_WIDTH - 30, this.height - HEADER_HEIGHT - 20)) return true;
         }
+        // 个性化页按钮/色板
+        if (selectedTab == 6 && personalizePanel.mouseClicked(mouseX, mouseY, button)) return true;
         if (selectedTab == 1) {
             int x = CARDS_START_X;
             int y = CARDS_START_Y - scrollOffset;
@@ -489,6 +539,8 @@ public class MatchMenuScreen extends Screen {
         return super.mouseClicked(mouseX, mouseY, button);
     }
 
+    /** 卡片点击入口（去向：C2S MatchActionPayload）：普通地图发 JOIN_QUEUE，快速匹配发 JOIN_QUICK；
+     *  第 4 字段携带 selectedMode（COMPETITIVE/CASUAL）供服务端分队列；发包后立即关界面，入队结果以服务端回复为准 */
     private void joinQueue(String mapId) {
         if (MinecraftClient.getInstance().player == null) return;
         // #28 配置缓存未同步（握手未完成）时禁止发起匹配
@@ -512,8 +564,10 @@ public class MatchMenuScreen extends Screen {
         // 已在队列/对局中被拒也会发原因），避免客户端乐观提示与服务端拒绝消息自相矛盾
     }
 
+    /** 履历页渲染：数据源为 PlayerProfileCache（由 requestProfile 的服务端回包填充），缓存未就绪时显示加载中；头像来自档案同步携带的 face 字段 */
     private void drawProfile(DrawContext context, int x, int y, int width, int height) {
-        context.drawText(textRenderer, "§6📊 玩家履历", x + 20, y + 20, 0xFFFFFF, true);
+        // 页面标题跟随主题色（个性化页设置）
+        context.drawText(textRenderer, "📊 玩家履历", x + 20, y + 20, ClientConfig.getThemeColorArgb(), true);
 
         PlayerProfile profile = ClientNetworkHandler.PlayerProfileCache.getInstance().getProfile();
         if (profile == null) {
@@ -522,37 +576,46 @@ public class MatchMenuScreen extends Screen {
             return;
         }
 
+        // 头像（个性化绑定，客户端按绑定自行获取图片）：置于资料块左侧；未设置时文本保持原位
         int lineY = y + 50;
         int spacing = 22;
-        context.drawText(textRenderer, "§7玩家: §f" + profile.getPlayerName(), x + 20, lineY, 0xFFFFFF, true);
+        int textX = x + 20;
+        if (FaceCache.hasOwn()) {
+            QueueTabPanel.drawAvatar(context, x + 20, lineY - 2, 48, FaceCache.getOwnType(), FaceCache.getOwnId());
+            textX = x + 80;
+        }
+        context.drawText(textRenderer, "§7玩家: §f" + profile.getPlayerName(), textX, lineY, 0xFFFFFF, true);
         lineY += spacing;
-        context.drawText(textRenderer, "§7总击杀: §c" + profile.getTotalKills(), x + 20, lineY, 0xFFFFFF, true);
+        context.drawText(textRenderer, "§7总击杀: §c" + profile.getTotalKills(), textX, lineY, 0xFFFFFF, true);
         lineY += spacing;
-        context.drawText(textRenderer, "§7总被击杀: §9" + profile.getTotalDeaths(), x + 20, lineY, 0xFFFFFF, true);
+        context.drawText(textRenderer, "§7总被击杀: §9" + profile.getTotalDeaths(), textX, lineY, 0xFFFFFF, true);
         lineY += spacing;
-        context.drawText(textRenderer, "§7KD: §e" + profile.getKDString(), x + 20, lineY, 0xFFFFFF, true);
+        context.drawText(textRenderer, "§7KD: §e" + profile.getKDString(), textX, lineY, 0xFFFFFF, true);
         lineY += spacing;
-        context.drawText(textRenderer, "§7参赛场次: §a" + profile.getTotalMatches(), x + 20, lineY, 0xFFFFFF, true);
+        context.drawText(textRenderer, "§7参赛场次: §a" + profile.getTotalMatches(), textX, lineY, 0xFFFFFF, true);
         lineY += spacing;
-        context.drawText(textRenderer, "§7胜利场次: §6" + profile.getTotalWins(), x + 20, lineY, 0xFFFFFF, true);
+        context.drawText(textRenderer, "§7胜利场次: §6" + profile.getTotalWins(), textX, lineY, 0xFFFFFF, true);
         lineY += spacing;
         double winRate = profile.getTotalMatches() > 0 ?
                 (double) profile.getTotalWins() / profile.getTotalMatches() * 100 : 0;
-        context.drawText(textRenderer, "§7胜率: §b" + String.format("%.1f", winRate) + "%", x + 20, lineY, 0xFFFFFF, true);
+        context.drawText(textRenderer, "§7胜率: §b" + String.format("%.1f", winRate) + "%", textX, lineY, 0xFFFFFF, true);
     }
 
+    /** 关于页渲染：纯静态文字，交互按钮（仓库/报告问题/彩蛋）在 init 中创建 */
     private void drawAbout(DrawContext context, int x, int y, int width, int height) {
-        context.drawText(textRenderer, "§6ℹ 关于", x + 20, y + 20, 0xFFFFFF, true);
+        // 页面标题跟随主题色（个性化页设置）
+        context.drawText(textRenderer, "ℹ 关于", x + 20, y + 20, ClientConfig.getThemeColorArgb(), true);
         context.drawText(textRenderer, "§7Chocolate Server TaCZ Match Mod", x + 20, y + 50, 0xAAAAAA, true);
         context.drawText(textRenderer, "§7版本: " + ClientHandshakeState.getClientVersion(), x + 20, y + 70, 0xAAAAAA, true);
         context.drawText(textRenderer, "§7作者: woshiikun_1145", x + 20, y + 90, 0xAAAAAA, true);
-        context.drawText(textRenderer, "§7为 Chocolate Server TaCZ Subserver 设计", x + 20, y + 110, 0xAAAAAA, true);
+        context.drawText(textRenderer, "§f匹配 · 战队 · 商店 · 履历 · 个性化，一站式 TaCZ PvP 对战体验。", x + 20, y + 110, 0xAAAAAA, true);
 
         // 按钮位于文字下方（见 init 中 aboutBtnX/y 布局）
     }
 
     // ==================== 关于页面按钮行为 ====================
 
+    /** 调用系统浏览器打开外部链接（关于页"模组仓库"/"报告问题"按钮的去向，不经过服务端） */
     private void openUrl(String url) {
         Util.getOperatingSystem().open(url);
     }
@@ -600,10 +663,13 @@ public class MatchMenuScreen extends Screen {
         // 物理摘除战队页文本控件（防"框框"残留在已退出的界面上）+ 清理对话框状态
         clanPanel.disposeWidgets();
         clanPanel.resetDialogState();
+        // 物理摘除个性化页文本控件
+        personalizePanel.disposeWidgets();
         // 退出队列页订阅（幂等，未订阅时无效果）
         ClientPlayNetworking.send(new RequestQueueStatusPayload(false));
     }
 
+    /** 不暂停游戏：服务器界面惯例（单人打开时世界继续运行） */
     @Override
     public boolean shouldPause() {
         return false;
@@ -685,6 +751,7 @@ public class MatchMenuScreen extends Screen {
         return quickCardTexture;
     }
 
+    /** 侧边栏按钮数据：label 为显示文案；id 为 tab 标识（对应 selectedTab，可与按钮索引不一致，定位走 buttonIndexOf） */
     private static class SidebarButton {
         String label;
         int id;
@@ -694,6 +761,7 @@ public class MatchMenuScreen extends Screen {
         }
     }
 
+    /** 地图卡片数据：id 为服务端地图 ID（joinQueue 外发用）；快速匹配为本地伪 ID QUICK_CARD_ID，仅客户端识别不外发 */
     private static class MapCardData {
         String id;
         String displayName;

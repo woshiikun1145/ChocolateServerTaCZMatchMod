@@ -5,19 +5,39 @@ import net.minecraft.util.math.BlockPos;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 【作用】单张地图的完整配置（Gson 持久化到 config/cstmm/maps.json）：胜负条件、边界、
+ * 双方出生点、最低/最高人数、准备时间、补位规则、商店商品等。
+ * 【被谁使用】ConfigManager 加载/保存/生成默认配置（服务端）；MatchManager 开局与传送出生点、
+ * QueueManager/QuickMatchEngine 匹配开局、BoundaryChecker 越界检查、VoteManager 踢人冷却、
+ * EquipmentManager 商店购买、ModCommands/NetworkHandler 展示与同步均读取。
+ */
 public class MapConfig {
+    // 地图唯一 id（匹配/开局引用键）
     private String id;
+    // 展示名（UI/聊天显示）
     private String displayName;
+    // 是否启用（禁用地图不参与匹配）
     private boolean enabled;
+    // 投票界面背景图（Base64）
     private String backgroundBase64;
+    // 胜负条件：击杀达标或时间到
     private WinCondition winCondition;
+    // 目标击杀数（winCondition=KILLS 时达标获胜）
     private int targetKills;
+    // 对局最长时长（秒，winCondition=TIMER 或防拖局）
     private int maxDuration;
+    // 平局处理：加时或直接平局
     private TieRule tieRule;
+    // 对局区域边界（越界警告与处决）
     private Boundary boundary;
+    // 红队出生点列表
     private List<BlockPos> redSpawns;
+    // 蓝队出生点列表
     private List<BlockPos> blueSpawns;
+    // 旧版总最低人数（已由 minRedPlayers + minBluePlayers 取代，保留兼容旧配置）
     private int minPlayers;
+    // 地图冷却（秒）
     private int cooldownSeconds;
     /** 红队最低人数（开局与补位阈值），匹配队列达到 minRedPlayers + minBluePlayers 才能开局 */
     private int minRedPlayers;
@@ -44,8 +64,10 @@ public class MapConfig {
     /** 本地图商店商品（每个地图独立一份） */
     private List<GlobalConfig.ShopItem> shopItems;
 
+    // 出生点短期占用记录（坐标 → 上次选中时间戳），transient 不持久化，用于错开连续刷新
     private transient final java.util.Map<BlockPos, Long> spawnCooldowns;
 
+    // 默认构造：填充全部字段的默认值（Gson 缺字段时以 JSON 值覆盖）
     public MapConfig() {
         this.id = "";
         this.displayName = "";
@@ -136,14 +158,17 @@ public class MapConfig {
     public void setDimension(String dimension) { this.dimension = dimension; }
     public void setShopItems(List<GlobalConfig.ShopItem> shopItems) { this.shopItems = shopItems; }
 
+    /** 【作用】随机选取红队出生点（MatchManager 传送玩家时调用）。 */
     public BlockPos getRandomRedSpawn() {
         return getRandomSpawn(redSpawns);
     }
 
+    /** 【作用】随机选取蓝队出生点（MatchManager 传送玩家时调用）。 */
     public BlockPos getRandomBlueSpawn() {
         return getRandomSpawn(blueSpawns);
     }
 
+    // 随机选点：优先在 5 秒内未被占用的出生点中选取，避免玩家出生重叠；全部占用时退化为纯随机
     private BlockPos getRandomSpawn(List<BlockPos> spawns) {
         if (spawns.isEmpty()) {
             return BlockPos.ORIGIN;
@@ -165,16 +190,24 @@ public class MapConfig {
         return selected;
     }
 
+    // 胜负条件：KILLS=击杀达标获胜，TIMER=时间到按击杀数判定
     public enum WinCondition {
         KILLS,
         TIMER
     }
 
+    // 平局处理：OVERTIME=发起加时投票，DRAW=直接平局
     public enum TieRule {
         OVERTIME,
         DRAW
     }
 
+    /**
+     * 【作用】对局区域边界（长方体，方块坐标），越界警告与处决的判定依据，
+     * Gson 持久化为 maps.json 中地图的 boundary 对象。
+     * 【被谁使用】BoundaryChecker 每 tick 调用 contains/isConfigured 判定越界（服务端）；
+     * ModCommands 地图配置指令读写。
+     */
     public static class Boundary {
         private int minX, minY, minZ;
         private int maxX, maxY, maxZ;

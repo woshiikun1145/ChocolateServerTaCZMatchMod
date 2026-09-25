@@ -28,6 +28,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.IntConsumer;
 
+/**
+ * 【作用】服务端配置编辑界面（管理员用）：左侧地图列表（增删/切换），右侧地图编辑器
+ * （ID/名称/结算/人数/边界/出生点/商店物品等）与全局配置区（默认装备/快速超时），
+ * 保存时经 Gson 序列化并分包发 C2S；内置未保存修改确认对话框。
+ * 【被谁使用】ClientNetworkHandler（收到 S2C OpenConfigScreenPayload 时打开，/cstmm config 命令触发）；
+ * 辅助类 ConfigScreenSupport/ConfirmDialog/NumberTextField/LabelWidget 仅被本类使用。
+ */
 @Environment(EnvType.CLIENT)
 public class ConfigScreen extends Screen {
 
@@ -88,15 +95,20 @@ public class ConfigScreen extends Screen {
 
     /** 服务端弹窗通知（如"配置已保存！"）：复用确认对话框的提示模式 */
     public void showPopup(String message) {
-        confirmDialog.show(Text.literal("§6提示"), Text.literal(message), null);
+        confirmDialog.show(Text.literal("提示"), Text.literal(message), null);
     }
 
+    // 【作用】构造：先从本地缓存装载一份数据用于编辑，再向服务端请求最新配置同步
     public ConfigScreen() {
         super(Text.literal("配置"));
         loadData();
         ClientNetworkHandler.requestConfigSync();
     }
 
+    /**
+     * 【作用】从 ConfigDataCache 深拷贝全部地图与全局配置到本地编辑副本
+     * （编辑过程不污染缓存，保存时才回写），并选定当前编辑地图。
+     */
     private void loadData() {
         ConfigDataCache cache = ConfigDataCache.getInstance();
         this.maps = new ArrayList<>();
@@ -117,6 +129,10 @@ public class ConfigScreen extends Screen {
         hasUnsavedChanges = false;
     }
 
+    /**
+     * 【作用】构建全部控件：先清空重建滚动状态，依次计算布局、顶栏按钮、左侧地图列表、
+     * 右侧地图编辑器与全局配置区；窗口尺寸变化/切图/增删行时都会整体重走本方法。
+     */
     @Override
     protected void init() {
         super.init();
@@ -152,6 +168,7 @@ public class ConfigScreen extends Screen {
         contentHeight = height - headerHeight - footerHeight - 12;
     }
 
+    // 【作用】构建顶栏与底部的固定控件：保存配置 / 重新加载 / 返回按钮
     private void buildTopBar() {
         int screenWidth = this.width;
         int screenHeight = this.height;
@@ -178,6 +195,10 @@ public class ConfigScreen extends Screen {
         ).dimensions(screenWidth - 80, returnBtnY, 60, 20).build());
     }
 
+    /**
+     * 【作用】构建左侧地图列表按钮：每张地图一个"启用/禁用 + 名称"按钮
+     * （有未保存修改时切换先弹确认框），末尾追加"添加地图/删除选中"按钮，并回写 leftTotalHeight。
+     */
     private void buildMapList() {
         // ----- 左侧地图列表（可滚动） -----
         int listBtnX = 6;
@@ -877,6 +898,11 @@ public class ConfigScreen extends Screen {
     }
 
     // ---------- 操作方法 ----------
+
+    /**
+     * 【作用】新建一张默认地图：生成唯一 ID（map_N 递增避开已有 ID）、设默认参数，
+     * 选中并立即进入编辑态。
+     */
     private void addNewMap() {
         MapConfig newMap = new MapConfig();
         // #27 删除中间地图后 "map_N" 可能已存在，递增后缀直到唯一
@@ -904,6 +930,10 @@ public class ConfigScreen extends Screen {
         return maps.stream().anyMatch(m -> id.equals(m.getId()));
     }
 
+    /**
+     * 【作用】删除当前选中的地图：对局中使用的地图先拦截弹窗提示（服务端亦会拒绝），
+     * 删除后修正选中索引并重载编辑器。
+     */
     private void deleteSelectedMap() {
         if (maps.isEmpty() || selectedMapIndex < 0 || selectedMapIndex >= maps.size()) return;
         MapConfig target = maps.get(selectedMapIndex);
@@ -930,6 +960,10 @@ public class ConfigScreen extends Screen {
         init();
     }
 
+    /**
+     * 【作用】保存配置：先校验装备槽位与地图 ID（错误弹窗拦截），把编辑态回写到选中地图，
+     * 再 Gson 序列化为 JSON 分包发送到服务端，成功后清除未保存标记。
+     */
     private void saveConfig() {
         // 校验装备槽位ID，错误时弹窗提醒（不进聊天框）
         String slotError = ConfigScreenSupport.validateGearSlots(globalConfig.getDefaultGear());
@@ -983,6 +1017,9 @@ public class ConfigScreen extends Screen {
         return "container.0";
     }
 
+    /**
+     * 【作用】重新加载配置：放行一次被动同步刷新后向服务端请求同步，并立即重建界面。
+     */
     private void reloadConfig() {
         // 用户主动重载：放行随后的被动同步刷新，不受未保存修改保护影响
         allowNextSyncRefresh = true;
@@ -990,6 +1027,10 @@ public class ConfigScreen extends Screen {
         refresh();
     }
 
+    /**
+     * 【作用】被动刷新入口：有未保存修改时跳过（防覆盖用户编辑），否则重载数据并重建全部控件。
+     * 【被谁使用】ClientNetworkHandler（收到服务端配置同步包时回调）；本类 reloadConfig 也调用。
+     */
     public void refresh() {
         // #6 被动刷新保护：有未保存修改时跳过被动同步（applyConfigSync）触发的刷新，避免覆盖用户编辑
         if (hasUnsavedChanges && !allowNextSyncRefresh) {
@@ -1024,6 +1065,11 @@ public class ConfigScreen extends Screen {
     }
 
     // ---------- 渲染 ----------
+
+    /**
+     * 【作用】主渲染：固定控件直绘；左/右可滚动区各用裁剪区 + 平移实现滚动
+     * （控件渲染时传入滚动校正后的鼠标坐标保证 hover 一致）；确认框打开时独占渲染。
+     */
     @Override
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         this.renderBackground(context, mouseX, mouseY, delta);
@@ -1034,7 +1080,9 @@ public class ConfigScreen extends Screen {
             return;
         }
 
-        context.drawText(textRenderer, "§6⚙ 配置界面", 10, 6, 0xFFFFFF, true);
+        // 页面标题跟随主题色（个性化页设置）
+        context.drawText(textRenderer, "⚙ 配置界面", 10, 6,
+                cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig.getThemeColorArgb(), true);
         context.drawText(textRenderer, "§7地图列表", sidebarWidth / 2 - 25, headerHeight - 4, 0xAAAAAA, true);
 
         if (editingMap != null) {
@@ -1092,14 +1140,21 @@ public class ConfigScreen extends Screen {
     }
 
     // ---------- 鼠标事件 ----------
+
+    // 【作用】鼠标 X 是否落在右侧可滚动编辑区内（决定点击/滚轮事件的分区处理）
     private boolean isInRightPanel(double mouseX) {
         return mouseX > contentLeft && mouseX < contentLeft + contentWidth;
     }
 
+    // 【作用】鼠标 X 是否落在左侧地图列表面板内
     private boolean isInLeftPanel(double mouseX) {
         return mouseX < sidebarWidth;
     }
 
+    /**
+     * 【作用】鼠标点击分发：确认框打开时独占；其余按固定控件/左面板/右面板顺序
+     * 命中处理，滚动区坐标先加回 scrollOffset 再做控件命中。
+     */
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (confirmDialog.isOpen()) {
@@ -1220,6 +1275,7 @@ public class ConfigScreen extends Screen {
         return false;
     }
 
+    // 有未保存修改时退出先弹确认框，确认后才真正关闭
     @Override
     public void close() {
         if (hasUnsavedChanges) {
@@ -1233,6 +1289,7 @@ public class ConfigScreen extends Screen {
         }
     }
 
+    // 窗口尺寸变化：更新宽高并整体重建控件（init 重建，编辑数据保留在字段中）
     @Override
     public void resize(MinecraftClient client, int width, int height) {
         this.width = width;
