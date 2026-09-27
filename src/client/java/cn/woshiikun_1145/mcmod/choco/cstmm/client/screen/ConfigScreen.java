@@ -649,19 +649,12 @@ public class ConfigScreen extends Screen {
             rightScrollables.add(addShopFromHandBtn);
             editY += ROW_GAP;
 
-            // ---- 边界坐标 ----
+            // ---- 边界坐标（公共 + 红队 + 蓝队，队伍边界全 0 = 使用公共边界） ----
             // 位置调整：BOUNDARY_COL_SPACING（组间距）/ BOUNDARY_FIELD_OFFSET（输入框偏移）
-            int bY = editY;
-            var boundary = editingMap.getBoundary();
-            addBoundaryField(editX, bY, "Min X:", boundary::setMinX, boundary.getMinX());
-            addBoundaryField(editX + BOUNDARY_COL_SPACING, bY, "Min Y:", boundary::setMinY, boundary.getMinY());
-            addBoundaryField(editX + 2 * BOUNDARY_COL_SPACING, bY, "Min Z:", boundary::setMinZ, boundary.getMinZ());
-
-            bY += ROW_GAP;
-            addBoundaryField(editX, bY, "Max X:", boundary::setMaxX, boundary.getMaxX());
-            addBoundaryField(editX + BOUNDARY_COL_SPACING, bY, "Max Y:", boundary::setMaxY, boundary.getMaxY());
-            addBoundaryField(editX + 2 * BOUNDARY_COL_SPACING, bY, "Max Z:", boundary::setMaxZ, boundary.getMaxZ());
-            editY = bY + ROW_GAP;
+            int bY = addBoundaryGroup("公共边界（红蓝队专属边界未配置时生效）", editingMap.getBoundary(), editX, editY);
+            bY = addBoundaryGroup("红队边界（全 0 = 使用公共边界）", editingMap.getRedBoundary(), editX, bY);
+            bY = addBoundaryGroup("蓝队边界（全 0 = 使用公共边界）", editingMap.getBlueBoundary(), editX, bY);
+            editY = bY;
             addHint(editX, editY, "按所站方块判定，站在边界方块上不算出界；某维 Min 大于 Max 时自动交换，六个值须全部正确填写（含 Y）");
             editY += 11;
 
@@ -856,6 +849,24 @@ public class ConfigScreen extends Screen {
     }
 
     /**
+     * 【作用】渲染一组边界编辑区（标题 + Min 行 + Max 行，共 2 行 × 3 个输入框），
+     * 公共/红队/蓝队三组边界共用。返回下一区块的起始 Y。
+     */
+    private int addBoundaryGroup(String title, MapConfig.Boundary boundary, int editX, int startY) {
+        int bY = startY;
+        rightScrollables.add(new LabelWidget(editX, bY, Text.literal(title), 9));
+        bY += ROW_GAP;
+        addBoundaryField(editX, bY, "Min X:", boundary::setMinX, boundary.getMinX());
+        addBoundaryField(editX + BOUNDARY_COL_SPACING, bY, "Min Y:", boundary::setMinY, boundary.getMinY());
+        addBoundaryField(editX + 2 * BOUNDARY_COL_SPACING, bY, "Min Z:", boundary::setMinZ, boundary.getMinZ());
+        bY += ROW_GAP;
+        addBoundaryField(editX, bY, "Max X:", boundary::setMaxX, boundary.getMaxX());
+        addBoundaryField(editX + BOUNDARY_COL_SPACING, bY, "Max Y:", boundary::setMaxY, boundary.getMaxY());
+        addBoundaryField(editX + 2 * BOUNDARY_COL_SPACING, bY, "Max Z:", boundary::setMaxZ, boundary.getMaxZ());
+        return bY + ROW_GAP;
+    }
+
+    /**
      * 为单个出生点添加 X/Y/Z 三个数字输入框和删除按钮。
      * 任一输入框变化时，按三个框的当前文本重建 BlockPos 写回列表。
      */
@@ -981,6 +992,19 @@ public class ConfigScreen extends Screen {
         if (idError != null) {
             confirmDialog.show(Text.literal("§c地图ID重复"), Text.literal(idError), null);
             return;
+        }
+
+        // 地图 ID 留空时提交会导致该地图静默丢失：原 ID 不在提交列表中被服务端按"已删除"移除，
+        // 而空 ID 条目又被服务端保存校验拒绝。此处阻止保存并提示补全
+        for (MapConfig m : maps) {
+            if (m.getId() == null || m.getId().isBlank()) {
+                confirmDialog.show(
+                        Text.literal("§c地图ID为空"),
+                        Text.literal("存在未填写地图ID的地图（保存会使原地图被服务端删除），请补全 ID 后再保存！"),
+                        null
+                );
+                return;
+            }
         }
 
         try {

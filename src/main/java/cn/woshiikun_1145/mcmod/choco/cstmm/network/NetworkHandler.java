@@ -7,7 +7,10 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.MatchSession;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.PlayerProfile;
 import cn.woshiikun_1145.mcmod.choco.cstmm.manager.*;
+import cn.woshiikun_1145.mcmod.choco.cstmm.mixin.ClientConnectionAccessor;
+import cn.woshiikun_1145.mcmod.choco.cstmm.mixin.ServerCommonNetworkHandlerAccessor;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.*;
+import cn.woshiikun_1145.mcmod.choco.cstmm.util.BandwidthTracker;
 import cn.woshiikun_1145.mcmod.choco.cstmm.util.BlockPosAdapter;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -106,6 +109,7 @@ public class NetworkHandler {
         PayloadTypeRegistry.playS2C().register(QueueStatusPayload.ID, QueueStatusPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(PopupPayload.ID, PopupPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(BadgePayload.ID, BadgePayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(ClanHintsPayload.ID, ClanHintsPayload.CODEC);
 
         PayloadTypeRegistry.playC2S().register(MatchActionPayload.ID, MatchActionPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(ConfigUpdatePayload.ID, ConfigUpdatePayload.CODEC);
@@ -120,23 +124,24 @@ public class NetworkHandler {
         // ===== C2S 接收器（服务端处理客户端请求） =====
         // 【作用】注册客户端→服务端（C2S）各数据包的编解码器与全局接收器，回调统一转服务端主线程执行
         // 【作用】C2S 对局操作（入队/退队/投票/购买/商店请求等）：转主线程执行 handleMatchAction
+        //         所有回调体经 ModGuardian.run 包装：异常进入保护模式而非击穿崩溃；保护模式下整体跳过
         ServerPlayNetworking.registerGlobalReceiver(MatchActionPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
-            context.server().execute(() -> handleMatchAction(payload, player));
+            context.server().execute(() -> ModGuardian.run("处理对局操作(C2S)", () -> handleMatchAction(payload, player)));
         });
 
         // 【作用】C2S 配置更新分片：转主线程重组，集齐后应用配置（handleConfigUpdatePart）
         ServerPlayNetworking.registerGlobalReceiver(ConfigUpdatePayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
-            context.server().execute(() -> handleConfigUpdatePart(payload, player));
+            context.server().execute(() -> ModGuardian.run("处理配置更新(C2S)", () -> handleConfigUpdatePart(payload, player)));
         });
 
         ServerPlayNetworking.registerGlobalReceiver(RequestConfigSyncPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
-            context.server().execute(() -> {
+            context.server().execute(() -> ModGuardian.run("处理配置同步请求(C2S)", () -> {
                 // 限频：每玩家每秒最多 2 次，防止恶意客户端打满 CPU/带宽
                 if (!tryAcquireSyncRequest(player.getUuid())) {
                     player.sendMessage(Text.literal("§c配置同步请求过于频繁，每秒最多 "
@@ -152,39 +157,39 @@ public class NetworkHandler {
                 } else {
                     sendConfigSync(player);
                 }
-            });
+            }));
         });
 
         // 握手：客户端对服务端主动请求的应答，收到即视为已响应（版本校验由客户端本地完成）
         ServerPlayNetworking.registerGlobalReceiver(HandshakeC2SPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
-            context.server().execute(() -> {
+            context.server().execute(() -> ModGuardian.run("处理握手应答(C2S)", () -> {
                 pendingHandshakes.remove(player.getUuid());
                 if (!getModVersion().equals(payload.clientVersion())) {
                     Cstmm.LOGGER.warn("[CSTMM - Network] Handshake version mismatch: client {}, server {}",
                             payload.clientVersion(), getModVersion());
                 }
-            });
+            }));
         });
 
         // ===== 战队操作 / 队列状态请求 / 徽标缺失请求 =====
         ServerPlayNetworking.registerGlobalReceiver(ClanActionPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
-            context.server().execute(() -> handleClanActionMaybeChunked(payload, player));
+            context.server().execute(() -> ModGuardian.run("处理战队操作(C2S)", () -> handleClanActionMaybeChunked(payload, player)));
         });
 
         ServerPlayNetworking.registerGlobalReceiver(RequestBadgePayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
-            context.server().execute(() -> {
+            context.server().execute(() -> ModGuardian.run("处理徽标补发请求(C2S)", () -> {
                 Clan clan = ClanManager.getInstance().getClanByBadgeId(payload.badgeId());
                 // URL 徽标不走势片下发通道（客户端直接拿 URL 自行下载）
                 if (clan != null && !ClanManager.isBadgeUrl(clan.getBadgeBase64())) {
                     sendBadgeParts(player, clan.getBadgeId(), clan.getBadgeBase64());
                 }
-            });
+            }));
         });
 
         // 【作用】客户端徽标缓存上报：把客户端磁盘已有的徽标 id 加入其"已下发"集合，
@@ -192,7 +197,7 @@ public class NetworkHandler {
         ServerPlayNetworking.registerGlobalReceiver(BadgeKnownPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
-            context.server().execute(() -> {
+            context.server().execute(() -> ModGuardian.run("处理徽标缓存上报(C2S)", () -> {
                 Set<String> sent = sentBadges.computeIfAbsent(player.getUuid(), k -> ConcurrentHashMap.newKeySet());
                 int accepted = 0;
                 for (String id : payload.badgeIds().split(",")) {
@@ -201,20 +206,20 @@ public class NetworkHandler {
                     sent.add(id);
                     accepted++;
                 }
-            });
+            }));
         });
 
         // 【作用】客户端设置/清除自己的头像：校验后落盘，并同步档案、战队成员列表与队列快照
         ServerPlayNetworking.registerGlobalReceiver(SetFacePayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
-            context.server().execute(() -> handleSetFace(payload, player));
+            context.server().execute(() -> ModGuardian.run("处理头像设置(C2S)", () -> handleSetFace(payload, player)));
         });
 
         ServerPlayNetworking.registerGlobalReceiver(RequestQueueStatusPayload.ID, (payload, context) -> {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
-            context.server().execute(() -> {
+            context.server().execute(() -> ModGuardian.run("处理队列状态订阅(C2S)", () -> {
                 UUID uuid = player.getUuid();
                 if (payload.subscribe()) {
                     // 加入订阅集并立即回发一次快照；之后队列变化时服务端主动推送
@@ -224,7 +229,7 @@ public class NetworkHandler {
                 } else {
                     queueStatusSubscribers.remove(uuid);
                 }
-            });
+            }));
         });
 
         // 注意：OpenConfigScreenPayload 是 S2C，服务端不注册接收器，客户端注册。
@@ -233,19 +238,33 @@ public class NetworkHandler {
         // （履历同步/背包恢复统一由 EventListener 的 JOIN 处理；配置同步在此做哈希握手：
         //   先发小包元数据（哈希 + inUseMaps），客户端磁盘缓存哈希一致则回报哈希、
         //   服务端跳过全量下发，省掉重连玩家的大 JSON 重复传输）
-        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
+                ModGuardian.run("玩家加入握手(网络)", () -> {
             ServerPlayerEntity player = handler.getPlayer();
             sendHandshakeRequest(player);
             pendingHandshakes.put(player.getUuid(), 0);
             // 配置哈希握手：登记待回应并发出首包元数据；超时未回应由 tickHandshake 兜底全量下发
             pendingConfigSyncs.put(player.getUuid(), System.currentTimeMillis());
             sendConfigMeta(player);
+            // 战队名提示：推送全服战队名+成员名快照（客户端 Tab 补全数据源，见 CommandHintCache）
+            sendClanHints(player);
             // 刷新战队成员显示名（支持离线后按名踢出/展示）
             ClanManager.getInstance().updateMemberName(player.getUuid(), player.getName().getString());
-        });
+            // 带宽统计：向连接管线最外侧注入出/入站字节计数器（统计线路字节，含原版与模组全部流量）
+            //（connection/channel 字段在 yarn 映射下为 protected/private，经 Mixin 访问器读取）
+            var connection = ((ServerCommonNetworkHandlerAccessor) handler).cstmm$getConnection();
+            var pipeline = ((ClientConnectionAccessor) connection).cstmm$getChannel().pipeline();
+            if (pipeline.get("cstmm_bw_out") == null) {
+                pipeline.addFirst("cstmm_bw_out", new BandwidthTracker.OutboundCounter());
+            }
+            if (pipeline.get("cstmm_bw_in") == null) {
+                pipeline.addFirst("cstmm_bw_in", new BandwidthTracker.InboundCounter());
+            }
+        }));
 
         // 断线清理：分包重组缓冲与限频状态、队列状态订阅、徽标上传缓冲/已发集合、配置哈希握手状态
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
+                ModGuardian.run("玩家断线清理(网络)", () -> {
             UUID uuid = handler.getPlayer().getUuid();
             clearPendingConfigUpdate(uuid);
             syncRequestWindows.remove(uuid);
@@ -254,12 +273,46 @@ public class NetworkHandler {
             sentBadges.remove(uuid);
             lastHudSent.remove(uuid); // 重连后客户端 HUD 状态已重置，首包必须重发
             pendingConfigSyncs.remove(uuid);
-        });
+        }));
 
         Cstmm.LOGGER.info("[CSTMM - Network] Registered network handlers");
     }
 
     // ==================== 战队 ====================
+
+    /**
+     * 【作用】构建战队名提示 JSON（{"战队名":["成员1",...], ...}）：全服全部战队名与成员名，
+     *         供客户端 Tab 补全（/cstmm data get|edit|delete clan）。
+     * 【被谁使用】sendClanHints / broadcastClanHints。
+     */
+    private static String buildClanHintsJson() {
+        JsonObject root = new JsonObject();
+        for (Clan clan : ClanManager.getInstance().getAllClans()) {
+            JsonArray members = new JsonArray();
+            for (Clan.Member m : clan.getMembers()) members.add(m.getName());
+            root.add(clan.getName(), members);
+        }
+        return GSON.toJson(root);
+    }
+
+    /** 【作用】向单个玩家发送战队名提示快照（玩家 JOIN 时调用）。 */
+    public static void sendClanHints(ServerPlayerEntity player) {
+        ServerPlayNetworking.send(player, new ClanHintsPayload(buildClanHintsJson()));
+    }
+
+    /**
+     * 【作用】向全服在线玩家广播战队名提示快照（战队任何变更落盘时由 ClanManager.save 触发），
+     *         保证客户端 CommandHintCache 与服务端数据一致。
+     * 【被谁使用】ClanManager#save（各战队变更点）、NetworkHandler JOIN（对新玩家单独 send）。
+     */
+    public static void broadcastClanHints() {
+        var server = Cstmm.getServer();
+        if (server == null) return;
+        ClanHintsPayload payload = new ClanHintsPayload(buildClanHintsJson());
+        for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+            ServerPlayNetworking.send(p, payload);
+        }
+    }
 
     // 徽标分片上传缓冲（C2S）：玩家 → 未集齐的徽标分片
     private static final Map<UUID, BadgeUploadBuf> pendingBadgeUploads = new ConcurrentHashMap<>();
@@ -623,10 +676,27 @@ public class NetworkHandler {
             return;
         }
         sendPopup(player, type.isEmpty() ? "§e头像已清除" : "§a头像已更新！");
+        // 同步三处展示点（档案/战队成员列表/队列页），与管理员命令编辑头像共用同一同步逻辑
+        syncAvatarBinding(player.getUuid());
+    }
+
+    /**
+     * 【作用】玩家头像绑定变更后，向目标玩家（在线时）同步三处展示点：
+     *         自己的档案（履历页头像，绑定随档案序列化下发）、所在战队全部成员的 MINE
+     *         （成员列表展示全成员头像）、自己的队列快照（队列页徽标右侧头像）；
+     *         目标不在线则跳过（绑定已随档案落盘，进服自动读取最新值）。
+     * 【被谁使用】handleSetFace（客户端 SET_FACE 请求成功后）、
+     *           ModCommands（/cstmm data edit player ... avatar 管理员修改头像后调用）。
+     */
+    public static void syncAvatarBinding(UUID uuid) {
+        var server = Cstmm.getServer();
+        if (server == null) return;
+        ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
+        if (player == null) return;
         // 同步自己的档案（履历页头像，绑定随档案序列化下发）
         sendPlayerProfile(player);
         // 战队成员列表展示全成员头像：推 MINE 给本战队所有在线成员（含自己），刷新成员绑定字段
-        Clan clan = ClanManager.getInstance().getClanByPlayer(player.getUuid());
+        Clan clan = ClanManager.getInstance().getClanByPlayer(uuid);
         if (clan != null) {
             for (Clan.Member m : clan.getMembers()) {
                 UUID memberUuid = parseUuidOrNull(m.getUuid());
@@ -856,6 +926,22 @@ public class NetworkHandler {
         }
     }
 
+    /**
+     * 【作用】向全服在线玩家广播最新核心配置（分片全量 + 元数据包）：
+     *         命令侧修改地图/全局配置后调用，保证在线客户端立即拿到新配置（无需重连）。
+     * 【被谁使用】ModCommands（/cstmm data edit map|global、delete map 成功后调用）。
+     */
+    public static void broadcastConfigUpdate() {
+        var server = Cstmm.getServer();
+        if (server == null) return;
+        String syncJson = buildCoreConfigJson();
+        if (syncJson == null) return;
+        for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+            sendConfigSync(p, syncJson);
+            sendConfigMeta(p);
+        }
+    }
+
     /** 每玩家每秒最多 2 次配置同步请求，返回是否放行 */
     private static boolean tryAcquireSyncRequest(UUID uuid) {
         long now = System.currentTimeMillis();
@@ -964,7 +1050,8 @@ public class NetworkHandler {
      */
     public static void sendHudData(ServerPlayerEntity player, HudDataPayload payload) {
         HudSnapshot snapshot = new HudSnapshot(payload.mapName(), payload.redKills(),
-                payload.blueKills(), payload.remainingSeconds(), payload.inGame());
+                payload.blueKills(), payload.remainingSeconds(), payload.inGame(),
+                payload.phase(), payload.rosterJson());
         if (!Objects.equals(lastHudSent.put(player.getUuid(), snapshot), snapshot)) {
             ServerPlayNetworking.send(player, payload);
         }
@@ -973,7 +1060,18 @@ public class NetworkHandler {
     /** HUD 已发送快照（订阅式推送去重）：key: 玩家 UUID */
     private static final Map<UUID, HudSnapshot> lastHudSent = new ConcurrentHashMap<>();
 
-    private record HudSnapshot(String mapName, int redKills, int blueKills, int remainingSeconds, boolean inGame) {}
+    private record HudSnapshot(String mapName, int redKills, int blueKills, int remainingSeconds,
+                               boolean inGame, int phase, String rosterJson) {}
+
+    /**
+     * 【作用】确保 HUD 花名册引用的战队徽标已向该玩家下发过分片（内容寻址，同一徽标只发一次）。
+     * URL 徽标不处理（客户端按 URL 自行下载）；按 badgeId 反查战队后复用 sendBadgeIfMissing。
+     * 【被谁使用】MatchManager#broadcastHudData（构建花名册时对引用的徽标逐个调用）。仅服务端。
+     */
+    public static void ensureHudBadge(ServerPlayerEntity player, String badgeId) {
+        if (badgeId == null || badgeId.isEmpty() || ClanManager.isBadgeUrl(badgeId)) return;
+        sendBadgeIfMissing(player, ClanManager.getInstance().getClanByBadgeId(badgeId));
+    }
 
     /**
      * 【作用】发送对局状态消息包（S2C MatchStatusPayload），发送前统一将 message 截断到 128 UTF-8 字节以内，保证 writeString 永不抛异常。

@@ -7,6 +7,9 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.texture.NativeImage;
 
 import java.io.InputStream;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -21,8 +24,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>B站：先经 uapis.cn 接口解析 face 字段得到直链（uid → 直链内存缓存，
  *       每会话每 UID 只请求一次，失败 60s 冷却），再下载图片。</li>
  * </ul>
- * 下载上限 512KiB（QQ 640px 头像可能超过徽标 48KiB 限制）、像素上限 1024，
- * 下载失败 60s 冷却。纹理注册（GL 调用）经 MinecraftClient.execute 切回渲染线程。
+ * 下载上限 2MiB；解码后超过 1024×1024 的头像等比压缩到该范围内（不再因过大拒绝加载），
+ * 下载/解析失败 60s 冷却。纹理注册（GL 调用）经 MinecraftClient.execute 切回渲染线程。
  * 【被谁使用】PersonalizeTabPanel（头像预览）、ClanTabPanel（成员列表头像）、
  *             QueueTabPanel（队列页自己的头像）、MatchMenuScreen（履历页头像）经 getTexture 调用；
  *             ClientNetworkHandler 的 DISCONNECT 回调调用 clear()。
@@ -37,9 +40,9 @@ public final class FaceImageCache {
     /** B站头像解析接口（返回 JSON 的 face 字段为头像直链） */
     private static final String BILI_API_URL = "https://uapis.cn/api/v1/social/bilibili/userinfo?uid=%s";
 
-    /** 下载字节上限（QQ s=640 头像实测可达数百 KiB，取 512KiB） */
-    private static final int MAX_BYTES = 512 * 1024;
-    /** 解码像素尺寸上限（宽或高任一超过即拒绝，防解压炸弹占满显存） */
+    /** 下载字节上限（放宽到 2MiB——超大头像先完整下载，再等比压缩到像素上限内） */
+    private static final int MAX_BYTES = 2 * 1024 * 1024;
+    /** 解码像素尺寸上限（宽或高任一超过即等比压缩到该范围内，不再拒绝加载） */
     private static final int MAX_PIXELS = 1024;
     /** 下载/解析失败后的重试冷却 */
     private static final long RETRY_COOLDOWN_MS = 60_000;
@@ -156,7 +159,7 @@ public final class FaceImageCache {
     }
 
     /**
-     * 【作用】后台线程：限长下载 → 解码 → 校验像素上限 → 切回渲染线程注册纹理；
+     * 【作用】后台线程：限长下载 → 解码 → 超大图等比压缩到 1024×1024 内 → 切回渲染线程注册纹理；
      *         失败则记录冷却时间戳。
      * 【被谁使用】仅被本类 get 启动的守护线程调用。
      */
@@ -174,17 +177,16 @@ public final class FaceImageCache {
                 throw new IllegalArgumentException("image exceeds " + MAX_BYTES + " bytes");
             }
             NativeImage image = Base64ImageDecoder.decodeImageBytes(bytes);
-            if (image.getWidth() > MAX_PIXELS || image.getHeight() > MAX_PIXELS) {
-                int w = image.getWidth(), h = image.getHeight();
-                image.close();
-                throw new IllegalArgumentException("image too large (" + w + "x" + h + "px, max " + MAX_PIXELS + ")");
-            }
+            // 【作用】超过 1024×1024 的头像等比压缩到上限内（不再拒绝加载——部分 QQ/B站原图过大）
+            image = downscaleToFit(image, MAX_PIXELS);
+            // lambda 要求实际最终变量（image 已被重新赋值），经 final 中转
+            NativeImage finalImage = image;
             // GL 调用必须回到渲染线程；已完成任务跳过注册（并发竞态下可能重复下载，但不会重复建纹理）
             MinecraftClient.getInstance().execute(() -> {
                 if (loaded.containsKey(url)) {
-                    image.close();
+                    finalImage.close();
                 } else {
-                    loaded.put(url, Base64ImageDecoder.registerTexture(image));
+                    loaded.put(url, Base64ImageDecoder.registerTexture(finalImage));
                 }
             });
         } catch (Exception e) {
@@ -193,5 +195,45 @@ public final class FaceImageCache {
         } finally {
             inFlight.remove(url);
         }
+    }
+
+    /**
+     * 【作用】把超过 maxPixels 的图片等比压缩到该范围内（保持长宽比，双线性插值）；
+     * 未超限的原样返回。压缩经 BufferedImage/Graphics2D 完成后逐像素转回 NativeImage（ARGB → ABGR）。
+     * 【被谁使用】仅被本类 download 调用（超大头像不再拒绝加载，压缩后正常注册纹理）。
+     */
+    private static NativeImage downscaleToFit(NativeImage image, int maxPixels) {
+        int w = image.getWidth(), h = image.getHeight();
+        if (w <= maxPixels && h <= maxPixels) return image;
+        double scale = (double) maxPixels / Math.max(w, h);
+        int nw = Math.max(1, (int) Math.round(w * scale));
+        int nh = Math.max(1, (int) Math.round(h * scale));
+        // NativeImage → BufferedImage（getColor 为 ABGR，转 ARGB）
+        BufferedImage src = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        for (int py = 0; py < h; py++) {
+            for (int px = 0; px < w; px++) {
+                int abgr = image.getColor(px, py);
+                int a = (abgr >> 24) & 0xFF, b = (abgr >> 16) & 0xFF, g = (abgr >> 8) & 0xFF, r = abgr & 0xFF;
+                src.setRGB(px, py, (a << 24) | (r << 16) | (g << 8) | b);
+            }
+        }
+        BufferedImage dst = new BufferedImage(nw, nh, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g2d = dst.createGraphics();
+        g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        g2d.drawImage(src, 0, 0, nw, nh, null);
+        g2d.dispose();
+        // BufferedImage → NativeImage（ARGB → ABGR），并关闭原图释放显存外内存
+        NativeImage out = new NativeImage(nw, nh, false);
+        for (int py = 0; py < nh; py++) {
+            for (int px = 0; px < nw; px++) {
+                int argb = dst.getRGB(px, py);
+                int a = (argb >> 24) & 0xFF, r = (argb >> 16) & 0xFF, g = (argb >> 8) & 0xFF, b = argb & 0xFF;
+                out.setColor(px, py, (a << 24) | (b << 16) | (g << 8) | r);
+            }
+        }
+        image.close();
+        Cstmm.LOGGER.info("[CSTMM - FaceImageCache] Avatar downscaled {}x{} -> {}x{}", w, h, nw, nh);
+        return out;
     }
 }

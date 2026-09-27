@@ -123,6 +123,12 @@ public class ClanManager {
         return names;
     }
 
+    /** 全部战队对象（NetworkHandler 构建战队名提示快照 clan_hints 用）
+     * 【被谁使用】NetworkHandler#buildClanHintsJson。仅服务端。 */
+    public List<Clan> getAllClans() {
+        return new ArrayList<>(clansByName.values());
+    }
+
     /** 随机取 N 个战队（列表页“只随机展示10条”）
      * 【被谁使用】NetworkHandler（客户端战队列表页请求且无搜索词时随机展示）。仅服务端。 */
     public List<Clan> getRandomClans() {
@@ -591,6 +597,9 @@ public class ClanManager {
                 if (clan == null || clan.name == null || clan.abbreviation == null || clan.members == null) continue;
                 if (clan.leader == null) continue;
                 if (clansByName.containsKey(clan.name.toLowerCase())) continue;
+                // 剔除 null 成员与缺失 uuid 的坏条目（UUID.fromString(null) 抛 NPE 而非 IllegalArgumentException，
+                // 且残留列表会令 removeMember 等 removeIf 操作 NPE）
+                clan.members.removeIf(m -> m == null || m.getUuid() == null);
                 clansByName.put(clan.name.toLowerCase(), clan);
                 clansByAbbr.put(clan.abbreviation.toLowerCase(), clan);
                 for (Clan.Member m : clan.members) {
@@ -623,6 +632,8 @@ public class ClanManager {
             } catch (IOException atomicUnsupported) {
                 Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
             }
+            // 战队数据已变更：广播最新"战队名→成员名"提示快照，刷新客户端 Tab 补全缓存
+            NetworkHandler.broadcastClanHints();
         } catch (IOException e) {
             Cstmm.LOGGER.error("[CSTMM - ClanManager] Failed to save clans.json", e);
         }

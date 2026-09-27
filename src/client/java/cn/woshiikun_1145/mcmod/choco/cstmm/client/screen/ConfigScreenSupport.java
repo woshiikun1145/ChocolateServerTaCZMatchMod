@@ -48,17 +48,24 @@ final class ConfigScreenSupport {
             }
         }
         dst.setShopItems(dstShopItems);
-        dst.getBoundary().setMinX(src.getBoundary().getMinX());
-        dst.getBoundary().setMinY(src.getBoundary().getMinY());
-        dst.getBoundary().setMinZ(src.getBoundary().getMinZ());
-        dst.getBoundary().setMaxX(src.getBoundary().getMaxX());
-        dst.getBoundary().setMaxY(src.getBoundary().getMaxY());
-        dst.getBoundary().setMaxZ(src.getBoundary().getMaxZ());
+        copyBoundary(src.getBoundary(), dst.getBoundary());
+        copyBoundary(src.getRedBoundary(), dst.getRedBoundary());
+        copyBoundary(src.getBlueBoundary(), dst.getBlueBoundary());
         dst.getRedSpawns().clear();
         dst.getRedSpawns().addAll(src.getRedSpawns());
         dst.getBlueSpawns().clear();
         dst.getBlueSpawns().addAll(src.getBlueSpawns());
         return dst;
+    }
+
+    // 【作用】深拷贝单个边界对象（公共/红队/蓝队边界共用，六个坐标逐字段复制）
+    private static void copyBoundary(MapConfig.Boundary src, MapConfig.Boundary dst) {
+        dst.setMinX(src.getMinX());
+        dst.setMinY(src.getMinY());
+        dst.setMinZ(src.getMinZ());
+        dst.setMaxX(src.getMaxX());
+        dst.setMaxY(src.getMaxY());
+        dst.setMaxZ(src.getMaxZ());
     }
 
     // 【作用】深拷贝全局配置（含默认装备槽位列表）
@@ -90,24 +97,57 @@ final class ConfigScreenSupport {
         return null;
     }
 
+    // 装备槽位合法归一键（与服务端 ModCommands.GEAR_SLOTS 同口径）
+    private static final List<String> VALID_GEAR_KEYS = List.of(
+            "head", "chest", "legs", "feet", "mainhand", "offhand");
+
     /**
-     * 校验装备槽位ID是否合法。
-     * 允许: armor.body / armor.chest / armor.feet / armor.head / armor.legs / container.0 ~ container.35
+     * 校验装备槽位ID是否合法（与服务端 ModCommands.isValidGearSlot 同口径，命令侧无超集差异）：
+     * 简写 head/chest/legs/feet/mainhand/offhand 及 /item 语法别名 armor.head/chest/legs/feet、
+     * weapon.mainhand/offhand，无别名的 armor.body，container.0 ~ container.35。
+     * 此前仅认 armor.* 与 container.* 两类：命令侧配置的合法简写槽位会令配置界面任何保存被整体拒绝。
      * @param gear 待校验的默认装备列表
      * @return 错误信息，合法返回 null
      */
     static String validateGearSlots(List<GlobalConfig.EquipSlot> gear) {
-        List<String> valid = new ArrayList<>(List.of(
-                "armor.body", "armor.chest", "armor.feet", "armor.head", "armor.legs"));
-        for (int i = 0; i <= 35; i++) valid.add("container." + i);
-
         for (int i = 0; i < gear.size(); i++) {
             String slot = gear.get(i).getSlot();
-            if (!valid.contains(slot)) {
+            if (!isValidGearSlot(slot)) {
                 return "第 " + (i + 1) + " 行装备槽位 \"" + slot + "\" 无效！"
-                        + "可用: armor.head/chest/legs/feet/body 或 container.0~container.35";
+                        + "可用: head/chest/legs/feet/mainhand/offhand（或 armor.head/chest/legs/feet、"
+                        + "weapon.mainhand/offhand）、armor.body、container.0~35";
             }
         }
         return null;
+    }
+
+    /** 槽位等价归一键（与服务端 gearSlotKey 同映射）：null/异常返回空串 */
+    private static String gearSlotKey(String slot) {
+        if (slot == null) return "";
+        return switch (slot.toLowerCase()) {
+            case "head", "armor.head" -> "head";
+            case "chest", "armor.chest" -> "chest";
+            case "legs", "armor.legs" -> "legs";
+            case "feet", "armor.feet" -> "feet";
+            case "mainhand", "weapon.mainhand" -> "mainhand";
+            case "offhand", "weapon.offhand" -> "offhand";
+            default -> slot.toLowerCase();
+        };
+    }
+
+    /** 槽位合法性（与服务端 isValidGearSlot 同口径）：归一键 ∈ 简写集，或 armor.body，或 container.0~35 */
+    private static boolean isValidGearSlot(String slot) {
+        String key = gearSlotKey(slot);
+        if (VALID_GEAR_KEYS.contains(key)) return true;
+        if (key.equals("armor.body")) return true;
+        if (key.startsWith("container.")) {
+            try {
+                int idx = Integer.parseInt(key.substring("container.".length()));
+                return idx >= 0 && idx <= 35;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        return false;
     }
 }

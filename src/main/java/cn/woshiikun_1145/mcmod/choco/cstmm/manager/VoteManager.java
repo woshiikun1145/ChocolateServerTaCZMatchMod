@@ -259,8 +259,9 @@ public class VoteManager implements VoteApi {
             return;
         }
 
-        int totalVoted = vote.voters.size();
-        int remainingVoters = countOnlinePlayers(session.getAllPlayers()) - totalVoted;
+        // 剩余票源 = 在线且尚未投票的玩家：已投票后离线的玩家不再占名额，
+        // 否则 remaining 被低估，会在仍有在线玩家可投票时被提前判负
+        int remainingVoters = countOnlinePlayersNotVoted(session.getAllPlayers(), vote.voters);
         if (vote.yesVotes + remainingVoters < vote.requiredYes) {
             executeVoteResult(vote, session, false);
             activeVotes.remove(sessionId);
@@ -372,6 +373,21 @@ public class VoteManager implements VoteApi {
         for (UUID uuid : uuids) {
             ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
             if (player != null) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // 【作用】统计集合中在线且尚未投票的玩家数（投票提前判负的剩余票源计算）：
+    //        已投票后离线的玩家不再占用剩余名额
+    private int countOnlinePlayersNotVoted(Set<UUID> uuids, Set<UUID> voters) {
+        MinecraftServer server = Cstmm.getServer();
+        if (server == null) return 0;
+        int count = 0;
+        for (UUID uuid : uuids) {
+            if (voters.contains(uuid)) continue;
+            if (server.getPlayerManager().getPlayer(uuid) != null) {
                 count++;
             }
         }

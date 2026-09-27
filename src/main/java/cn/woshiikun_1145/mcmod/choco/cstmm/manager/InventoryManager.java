@@ -227,6 +227,14 @@ public class InventoryManager {
     }
 
     /**
+     * 【作用】查询玩家已保存的背包快照（无快照返回 null），供管理员命令查看快照概要。
+     * 【被谁使用】ModCommands（/cstmm data get player <玩家> bags）。仅服务端。
+     */
+    public InventorySnapshot getSnapshot(UUID uuid) {
+        return uuid == null ? null : savedInventories.get(uuid);
+    }
+
+    /**
      * 【作用】删除玩家保存的背包快照（内存移除 + 删除磁盘 bags/<uuid>.json），管理员命令用。
      *         内存移除后下次 saveBags 的残留清理也会兜底删文件，此处立即删除语义更明确。
      * 【被谁使用】ModCommands（/cstmm data delete player ... bags|all）。仅服务端。

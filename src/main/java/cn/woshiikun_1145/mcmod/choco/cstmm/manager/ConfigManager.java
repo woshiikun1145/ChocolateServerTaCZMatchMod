@@ -146,6 +146,8 @@ public class ConfigManager {
                         Cstmm.LOGGER.info("[CSTMM - ConfigManager] Migrated map '{}': minPlayers={} -> minRed/minBlue={}/{}",
                                 map.getId(), map.getMinPlayers(), legacy, legacy);
                     }
+                    // 规范化显式 null 字段与残缺出生点，防止下游选点 NPE / 无终局对局
+                    normalizeMap(map);
                     valid.add(map);
                 }
                 this.maps = valid;
@@ -162,24 +164,58 @@ public class ConfigManager {
     }
 
     /**
-     * 校验地图是否可写盘：redSpawns/blueSpawns 为 null 或空会导致开局取出生点异常，
-     * 无 id 的地图无法被后续更新/删除定位。无效时 warn 并返回 false。
+     * 校验地图是否可写盘：id 非空（无 id 无法被更新/删除/查询定位，且会使 getMap 的 id 过滤 NPE）、
+     * redSpawns/blueSpawns 非 null/空且不含 null 元素（残缺坐标反序列化产物，会导致选点 NPE）。
+     * 无效时 warn 并返回 false。
      */
     private boolean isValidMapForSave(MapConfig map) {
         if (map == null) {
             Cstmm.LOGGER.warn("[CSTMM - ConfigManager] Rejected saving null map entry");
             return false;
         }
-        String label = map.getId() == null || map.getId().isBlank() ? "<no-id>" : map.getId();
-        if (map.getRedSpawns() == null || map.getRedSpawns().isEmpty()) {
-            Cstmm.LOGGER.warn("[CSTMM - ConfigManager] Rejected saving map '{}': redSpawns is null or empty", label);
+        if (map.getId() == null || map.getId().isBlank()) {
+            Cstmm.LOGGER.warn("[CSTMM - ConfigManager] Rejected saving map without a valid id");
             return false;
         }
-        if (map.getBlueSpawns() == null || map.getBlueSpawns().isEmpty()) {
-            Cstmm.LOGGER.warn("[CSTMM - ConfigManager] Rejected saving map '{}': blueSpawns is null or empty", label);
+        String label = map.getId();
+        if (map.getRedSpawns() == null || map.getRedSpawns().isEmpty() || map.getRedSpawns().contains(null)) {
+            Cstmm.LOGGER.warn("[CSTMM - ConfigManager] Rejected saving map '{}': redSpawns is null, empty or contains malformed (null) entries", label);
+            return false;
+        }
+        if (map.getBlueSpawns() == null || map.getBlueSpawns().isEmpty() || map.getBlueSpawns().contains(null)) {
+            Cstmm.LOGGER.warn("[CSTMM - ConfigManager] Rejected saving map '{}': blueSpawns is null, empty or contains malformed (null) entries", label);
             return false;
         }
         return true;
+    }
+
+    /**
+     * 【作用】规范化地图配置中可为 null 的对象字段（JSON 显式 null 不经构造器默认值，
+     *         手改 maps.json 或外部提交可引入）：枚举兜底默认值（KILLS/OVERTIME，否则对局无终局条件）、
+     *         文本兜底空串、边界/出生点列表兜底空对象，并剔除出生点列表内的 null 元素
+     *         （BlockPosAdapter 对残缺坐标返回 null、Gson 会收集进列表，防止选点返回 null 令 setupPlayer NPE）。
+     *         有修正时输出 warn 便于定位坏数据。
+     * 【被谁使用】loadMaps（磁盘加载后）、updateMap（客户端提交落盘前）。
+     */
+    private static void normalizeMap(MapConfig map) {
+        if (map == null) return;
+        boolean fixed = false;
+        if (map.getWinCondition() == null) { map.setWinCondition(MapConfig.WinCondition.KILLS); fixed = true; }
+        if (map.getTieRule() == null) { map.setTieRule(MapConfig.TieRule.OVERTIME); fixed = true; }
+        if (map.getDisplayName() == null) { map.setDisplayName(""); fixed = true; }
+        if (map.getBackgroundBase64() == null) { map.setBackgroundBase64(""); fixed = true; }
+        if (map.getBoundary() == null) { map.setBoundary(new MapConfig.Boundary()); fixed = true; }
+        if (map.getRedBoundary() == null) { map.setRedBoundary(new MapConfig.Boundary()); fixed = true; }
+        if (map.getBlueBoundary() == null) { map.setBlueBoundary(new MapConfig.Boundary()); fixed = true; }
+        if (map.getRedSpawns() == null) { map.setRedSpawns(new ArrayList<>()); fixed = true; }
+        if (map.getBlueSpawns() == null) { map.setBlueSpawns(new ArrayList<>()); fixed = true; }
+        int before = map.getRedSpawns().size() + map.getBlueSpawns().size();
+        map.getRedSpawns().removeIf(java.util.Objects::isNull);
+        map.getBlueSpawns().removeIf(java.util.Objects::isNull);
+        int removed = before - map.getRedSpawns().size() - map.getBlueSpawns().size();
+        if (fixed || removed > 0) {
+            Cstmm.LOGGER.warn("[CSTMM - ConfigManager] Map '{}' had explicit-null fields and/or {} malformed (null) spawn entries, normalized", map.getId(), removed);
+        }
     }
 
     // 【作用】把有效地图列表写盘到 maps.json（写前逐条校验，无效地图不落盘）
@@ -349,7 +385,7 @@ public class ConfigManager {
         lock.readLock().lock();
         try {
             return maps.stream()
-                    .filter(m -> m.getId().equals(id))
+                    .filter(m -> m.getId() != null && m.getId().equals(id))
                     .findFirst()
                     .orElse(null);
         } finally {
@@ -362,7 +398,9 @@ public class ConfigManager {
      * 【被谁使用】NetworkHandler（客户端配置界面提交保存时逐张调用）。仅服务端。
      */
     public void updateMap(MapConfig map) {
-        // 校验放在写盘之前：无效地图直接拒绝（不更新内存、不落盘），保存入口拿不到玩家，仅 warn + 拒绝
+        // 先规范化显式 null 字段与残缺出生点（客户端提交的 JSON 不经构造器默认值），再校验：
+        // 无效地图直接拒绝（不更新内存、不落盘），保存入口拿不到玩家，仅 warn + 拒绝
+        normalizeMap(map);
         if (!isValidMapForSave(map)) {
             return;
         }

@@ -262,6 +262,9 @@ public class QueueManager implements QueueApi {
      */
     public void joinQuickQueue(ServerPlayerEntity player, String mode) {
         UUID uuid = player.getUuid();
+        // 规范化后入队与存条目，保证 QueueEntry.mode 与实际所在快速队列一致
+        // （否则状态快照/战队页按原始字符串展示的模式可能与实际队列不符）
+        String queueMode = normalizeMode(mode);
 
         // 玩家同时只能加入一个匹配队列：已在任意队列（地图队列或快速队列）时拒绝。
         // 缺少此拦截会导致：playerQueueMap 条目被覆盖为快速匹配，而地图队列名单仍残留该玩家，
@@ -276,17 +279,17 @@ public class QueueManager implements QueueApi {
             return;
         }
 
-        if (engine.quickQueueContains(mode, uuid)) {
+        if (engine.quickQueueContains(queueMode, uuid)) {
             player.sendMessage(Text.literal("§c你已在快速匹配队列中！"), false);
             return;
         }
 
-        engine.addQuickQueueMember(mode, uuid);
+        engine.addQuickQueueMember(queueMode, uuid);
         // 修复：快速匹配不需要存储team，用特殊标识即可
-        playerQueueMap.put(uuid, new QueueEntry(QUICK_MAP_ID, mode, -1));  // -1 表示快速匹配
+        playerQueueMap.put(uuid, new QueueEntry(QUICK_MAP_ID, queueMode, -1));  // -1 表示快速匹配
 
         player.sendMessage(Text.literal("§a✅ 你已加入快速匹配队列，系统将自动分配地图。"), false);
-        Cstmm.LOGGER.debug("[CSTMM - QueueManager] {} joined quick queue ({})", player.getName(), mode);
+        Cstmm.LOGGER.debug("[CSTMM - QueueManager] {} joined quick queue ({})", player.getName(), queueMode);
         onQueueChanged();
     }
 

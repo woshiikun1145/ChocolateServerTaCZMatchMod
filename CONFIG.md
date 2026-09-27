@@ -105,6 +105,7 @@
   - **按玩家所站方块判定**（坐标向下取整），站在边界方块上不算出界；
   - **某维 Min 大于 Max 时自动交换**（填反不会恒判出界）；
   - 六个值全部为 0 表示完全未配置，不做越界检测。
+  - **红蓝两队分别判定**：除公共边界外，还可为红队 / 蓝队各配置一组专属边界（`redBoundary` / `blueBoundary`），该队玩家按自己的边界判定（如两队分区域作战的地图）；专属边界全 0（未配置）时该队回退使用公共边界。
 - **对局维度**：对局所在的维度 ID（如 `minecraft:overworld` / `minecraft:the_nether`），非法值回退主世界。出生点与边界均在同一维度内生效。
 
 ### 3.7 卡片背景图
@@ -134,16 +135,25 @@
 | 字段 | 说明 |
 |---|---|
 | **快速超时(秒)** | 快速匹配队列等待超过该秒数后进入补位流程 |
-| **默认装备** | 竞技模式开局发放的装备（清空背包后发放）。槽位 ID 参考 `/item replace entity` 的 `<slot>` 参数，当前允许：`armor.head`/`armor.chest`/`armor.legs`/`armor.feet`/`armor.body`、`container.0`~`container.35`；其余槽位（如 `weapon.mainhand`）保存时会弹窗报错 |
+| **默认装备** | 竞技模式开局发放的装备（清空背包后发放）。槽位 ID 参考 `/item replace entity` 的 `<slot>` 参数，当前允许：`armor.head`/`armor.chest`/`armor.legs`/`armor.feet`/`armor.body`、`container.0`~`container.35`；其余槽位（如 `weapon.mainhand`）保存时会弹窗报错（命令侧 `/cstmm data edit global gear` 额外接受 `weapon.mainhand`/`weapon.offhand` 与简写 `head`/`chest`/`legs`/`feet`/`mainhand`/`offhand`）。`armor.body` 玩家无该槽位，发放时进背包/掉落；`container.N` 替换主背包 N 号槽；同一装备栏的不同写法视为同一槽（命令 gear set 互相覆盖，gear remove 跨写法删除） |
 
 ---
 
 ## 6. 配置文件直接编辑
 
-配置位于服务端 `config/cstmm/configs/`，也可手动编辑 JSON 后执行 `/cstmm reload` 生效（OP≥2）。
+配置位于服务端 `config/cstmm/configs/`：
 
 - `maps.json`：地图配置数组
 - `global.json`：全局配置
+
+除配置界面外有两种修改方式：
+
+1. **手动编辑 JSON** 后执行 `/cstmm reload` 生效（OP≥2）；
+2. **命令直接修改单个字段**（OP≥2，改后自动写盘并同步全服在线客户端，详见 DEVELOPER.md §7）：
+   - `/cstmm data edit map <地图ID> <字段> <值>` —— 支持地图全部字段（人数/规则/边界/出生点/商店等）
+   - `/cstmm data edit global <字段> <值>` —— `quicktimeout` 与 `gear`（默认装备）
+   - `/cstmm data delete map <地图ID>` —— 删除地图（对局占用时拒绝）
+   - `/cstmm data get map <地图ID> [字段]` / `/cstmm data get global [字段]` —— 查看当前值
 
 > 手动编辑前**先停服或小心操作**：配置界面保存会整体覆盖服务端文件。文件损坏时管理器不会覆盖用户文件，但会跳过坏数据并记录 WARN 日志。
 
@@ -168,7 +178,8 @@
 | `reinforceable` | 允许补位 | false |
 | `reinforcementMode` | 补位模式 | CONDITIONAL |
 | `dimension` | 对局维度 | minecraft:overworld |
-| `boundary` | 边界 | 全 0（不检测） |
+| `boundary` | 公共边界 | 全 0（不检测） |
+| `redBoundary` / `blueBoundary` | 红/蓝队专属边界，全 0 回退公共边界 | 全 0（用公共边界） |
 | `redSpawns` / `blueSpawns` | 出生点 `{"x":..,"y":..,"z":..}` | [] |
 | `shopItems` | 商店 `{"itemId","price","maxPurchase"}` | [] |
 | `backgroundBase64` | 背景图 Base64 | "" |

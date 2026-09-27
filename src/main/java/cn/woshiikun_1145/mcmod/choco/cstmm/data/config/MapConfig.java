@@ -29,8 +29,12 @@ public class MapConfig {
     private int maxDuration;
     // 平局处理：加时或直接平局
     private TieRule tieRule;
-    // 对局区域边界（越界警告与处决）
+    // 对局区域公共边界（越界警告与处决；队伍专属边界未配置时回退到该边界）
     private Boundary boundary;
+    /** 红队专属边界（team=1），未配置（全 0）时红队回退使用公共边界 */
+    private Boundary redBoundary;
+    /** 蓝队专属边界（team=2），未配置（全 0）时蓝队回退使用公共边界 */
+    private Boundary blueBoundary;
     // 红队出生点列表
     private List<BlockPos> redSpawns;
     // 蓝队出生点列表
@@ -78,6 +82,8 @@ public class MapConfig {
         this.maxDuration = 1800;
         this.tieRule = TieRule.OVERTIME;
         this.boundary = new Boundary();
+        this.redBoundary = new Boundary();
+        this.blueBoundary = new Boundary();
         this.redSpawns = new ArrayList<>();
         this.blueSpawns = new ArrayList<>();
         this.minPlayers = 2;
@@ -105,8 +111,25 @@ public class MapConfig {
     public int getMaxDuration() { return maxDuration; }
     public TieRule getTieRule() { return tieRule; }
     public Boundary getBoundary() { return boundary; }
+    public Boundary getRedBoundary() { return redBoundary; }
+    public Boundary getBlueBoundary() { return blueBoundary; }
+
+    /**
+     * 【作用】取指定队伍生效的边界（BoundaryChecker 越界判定时调用）：
+     * 红队（team=1）优先用 redBoundary，蓝队（team=2）优先用 blueBoundary，
+     * 队伍专属边界未配置（全 0）或队伍未知（team 非 1/2，如观战/未分组）时回退公共边界。
+     */
+    public Boundary getBoundaryForTeam(int team) {
+        if (team == 1 && redBoundary != null && redBoundary.isConfigured()) return redBoundary;
+        if (team == 2 && blueBoundary != null && blueBoundary.isConfigured()) return blueBoundary;
+        return boundary;
+    }
     public List<BlockPos> getRedSpawns() { return redSpawns; }
     public List<BlockPos> getBlueSpawns() { return blueSpawns; }
+    /** 红队出生点整体替换（JSON 显式 null 时由 ModCommands 命令侧编辑兜底重建） */
+    public void setRedSpawns(List<BlockPos> redSpawns) { this.redSpawns = redSpawns; }
+    /** 蓝队出生点整体替换（同上） */
+    public void setBlueSpawns(List<BlockPos> blueSpawns) { this.blueSpawns = blueSpawns; }
     public int getMinPlayers() { return minPlayers; }
     public int getMinRedPlayers() { return Math.max(1, minRedPlayers); }
     public int getMinBluePlayers() { return Math.max(1, minBluePlayers); }
@@ -143,6 +166,8 @@ public class MapConfig {
     public void setMaxDuration(int maxDuration) { this.maxDuration = maxDuration; }
     public void setTieRule(TieRule tieRule) { this.tieRule = tieRule; }
     public void setBoundary(Boundary boundary) { this.boundary = boundary; }
+    public void setRedBoundary(Boundary redBoundary) { this.redBoundary = redBoundary; }
+    public void setBlueBoundary(Boundary blueBoundary) { this.blueBoundary = blueBoundary; }
     public void setMinPlayers(int minPlayers) { this.minPlayers = minPlayers; }
     public void setMinRedPlayers(int minRedPlayers) { this.minRedPlayers = Math.max(1, minRedPlayers); }
     public void setMinBluePlayers(int minBluePlayers) { this.minBluePlayers = Math.max(1, minBluePlayers); }
@@ -181,11 +206,12 @@ public class MapConfig {
                 })
                 .toList();
 
+        // 用 ThreadLocalRandom 复用线程级随机源，避免每次选点都新建 Random 实例
         if (available.isEmpty()) {
-            return spawns.get(new java.util.Random().nextInt(spawns.size()));
+            return spawns.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(spawns.size()));
         }
 
-        BlockPos selected = available.get(new java.util.Random().nextInt(available.size()));
+        BlockPos selected = available.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(available.size()));
         spawnCooldowns.put(selected, now);
         return selected;
     }
@@ -204,8 +230,8 @@ public class MapConfig {
 
     /**
      * 【作用】对局区域边界（长方体，方块坐标），越界警告与处决的判定依据，
-     * Gson 持久化为 maps.json 中地图的 boundary 对象。
-     * 【被谁使用】BoundaryChecker 每 tick 调用 contains/isConfigured 判定越界（服务端）；
+     * Gson 持久化为 maps.json 中地图的 boundary / redBoundary / blueBoundary 对象。
+     * 【被谁使用】BoundaryChecker 按队伍取 getBoundaryForTeam 后调用 contains/isConfigured 判定越界（服务端）；
      * ModCommands 地图配置指令读写。
      */
     public static class Boundary {

@@ -2,11 +2,15 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.manager;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
 import cn.woshiikun_1145.mcmod.choco.cstmm.api.MatchApi;
+import cn.woshiikun_1145.mcmod.choco.cstmm.data.Clan;
+import cn.woshiikun_1145.mcmod.choco.cstmm.data.PlayerProfile;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.MatchSession;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.HudDataPayload;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.MatchStatusPayload;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.RegistryKeys;
 import net.minecraft.server.MinecraftServer;
@@ -27,6 +31,18 @@ public class MatchManager implements MatchApi {
 
     /** 已警告过非法/缺失的维度 ID，避免重复刷 warn 日志 */
     private static final Set<String> warnedDimensions = ConcurrentHashMap.newKeySet();
+
+    // ==================== 调试：比赛信息栏强制显示 ====================
+    /** 调试开关（/cstmm debug match_info_hud <t|f>）：开启后仅目标玩家（执行命令的管理员）
+     *  收到首个活跃对局的 HUD，不影响其他玩家的客户端显示 */
+    private volatile boolean matchHudForced = false;
+    /** 强制显示的目标玩家 UUID：开启时为执行命令的玩家，关闭时置 null */
+    private volatile UUID matchHudForcedPlayer = null;
+    /** 清空 HUD 包（inGame=false，mapName 空、花名册空）：强制显示关闭时复位客户端 HUD */
+    private static final HudDataPayload IDLE_HUD_PAYLOAD = new HudDataPayload("", 0, 0, 0, false, 0, "[]");
+    /** 无活跃对局时的调试预览 HUD（inGame=true 仅中央计分板：地图名"HUD 调试预览"+ 0:0 + 90 秒倒计时，
+     *  保证强制显示在任何时刻都有可见反馈；花名册为空 → 不渲染两侧队伍卡片） */
+    private static final HudDataPayload DEMO_HUD_PAYLOAD = new HudDataPayload("HUD 调试预览", 0, 0, 90, true, 2, "[]");
 
     // 会话 ID -> 对局会话（含已结束、等待清理的会话）
     private final Map<String, MatchSession> activeSessions;
@@ -141,6 +157,14 @@ public class MatchManager implements MatchApi {
             return false;
         }
 
+        // 【作用】校验双方出生点非空：手改 maps.json 可绕过保存校验产生空/缺失出生点的地图，
+        // 否则 setupPlayer 会把玩家传送到世界原点（getRandomSpawn 对空列表返回 BlockPos.ORIGIN）
+        if (config.getRedSpawns() == null || config.getRedSpawns().isEmpty()
+                || config.getBlueSpawns() == null || config.getBlueSpawns().isEmpty()) {
+            Cstmm.LOGGER.warn("[CSTMM - MatchManager] Map {} has empty red/blue spawns, refusing to start match", mapId);
+            return false;
+        }
+
         // 【作用】检查地图冷却期：上一局结束未满配置冷却秒数时拒绝开局
         Long endTime = mapEndTime.get(mapId);
         if (endTime != null) {
@@ -182,7 +206,7 @@ public class MatchManager implements MatchApi {
             session.getRedPlayers().add(player.getUuid());
             playerSessionMap.put(player.getUuid(), session.getSessionId());
             OriginManager.saveOrigin(player);
-            playerOriginalGameMode.put(player.getUuid(), player.interactionManager.getGameMode());
+            playerOriginalGameMode.putIfAbsent(player.getUuid(), player.interactionManager.getGameMode());
             // 仅竞技模式保存背包（休闲模式不动玩家背包）
             if (competitive) {
                 InventoryManager.getInstance().setCompetitive(player.getUuid(), true);
@@ -193,7 +217,7 @@ public class MatchManager implements MatchApi {
             session.getBluePlayers().add(player.getUuid());
             playerSessionMap.put(player.getUuid(), session.getSessionId());
             OriginManager.saveOrigin(player);
-            playerOriginalGameMode.put(player.getUuid(), player.interactionManager.getGameMode());
+            playerOriginalGameMode.putIfAbsent(player.getUuid(), player.interactionManager.getGameMode());
             if (competitive) {
                 InventoryManager.getInstance().setCompetitive(player.getUuid(), true);
                 InventoryManager.getInstance().saveInventory(player);
@@ -265,6 +289,9 @@ public class MatchManager implements MatchApi {
         MapConfig config = ConfigManager.getInstance().getMap(session.getMapName());
         if (config == null) return;
 
+        // 【作用】缓存玩家名（HUD 花名册在玩家离线后仍能显示其卡片名）
+        session.recordPlayerName(player.getUuid(), player.getName().getString());
+
         int team = session.getPlayerTeam(player.getUuid());
         BlockPos spawnPos;
         if (team == 1) {
@@ -303,7 +330,7 @@ public class MatchManager implements MatchApi {
         UUID uuid = player.getUuid();
         playerSessionMap.put(uuid, session.getSessionId());
         OriginManager.saveOrigin(player);
-        playerOriginalGameMode.put(uuid, player.interactionManager.getGameMode());
+        playerOriginalGameMode.putIfAbsent(uuid, player.interactionManager.getGameMode());
         // 仅竞技模式保存背包（休闲模式不动玩家背包）
         if (session.isCompetitive()) {
             InventoryManager.getInstance().setCompetitive(uuid, true);
@@ -315,14 +342,28 @@ public class MatchManager implements MatchApi {
     /**
      * 玩家在对局中死亡重生后调用：对局未结束时传送回其队伍的配置出生点（含维度），
      * 并重置冒险模式与竞技装备，直到对局结束为止。
+     * 对局已结束/已不在对局时：补做结算瞬间因死亡被跳过的恢复（原点/背包/原游戏模式，
+     * 见 restoreAllPlayers）；无任何待恢复状态（无快照且无原模式映射）时为无操作，不影响普通重生。
      * 【被谁使用】EventListener 玩家重生事件（服务端）。
      */
     public void handleRespawn(ServerPlayerEntity player) {
-        MatchSession session = getPlayerSession(player.getUuid());
-        if (session == null || session.getPhase() == MatchSession.GamePhase.ENDED) {
+        UUID uuid = player.getUuid();
+        MatchSession session = getPlayerSession(uuid);
+        if (session != null && session.getPhase() != MatchSession.GamePhase.ENDED) {
+            setupPlayer(session, player);
             return;
         }
-        setupPlayer(session, player);
+
+        // 结算时因死亡跳过恢复的玩家在此补做（休闲对局无快照，仅恢复原点与原游戏模式）
+        if (InventoryManager.getInstance().hasSavedInventory(uuid)
+                || playerOriginalGameMode.containsKey(uuid)) {
+            OriginManager.restoreOrigin(player);
+            InventoryManager.getInstance().restoreInventory(player); // 无快照时内部直接返回 false
+            GameMode originalMode = playerOriginalGameMode.remove(uuid);
+            if (originalMode != null) {
+                player.changeGameMode(originalMode);
+            }
+        }
     }
 
     /**
@@ -374,6 +415,12 @@ public class MatchManager implements MatchApi {
             }
 
             broadcastHudData(session);
+        }
+
+        // 【作用】调试强制显示比赛信息栏：向未在对局中的在线玩家广播首个活跃对局的 HUD；
+        //        全部对局结束时发一次清空包复位其 HUD
+        if (matchHudForced) {
+            broadcastForcedHudData();
         }
     }
 
@@ -487,21 +534,26 @@ public class MatchManager implements MatchApi {
         broadcastMatchStatus(session, MatchStatusPayload.StatusType.MATCH_ENDED, message);
 
         updatePlayerProfiles(session, winnerTeam);
-        restoreAllPlayers(session);
+        // 结算时因死亡被跳过恢复的玩家：快照/原点/原游戏模式保留，待 AFTER_RESPAWN 补恢复
+        Set<UUID> pendingRespawnRestore = restoreAllPlayers(session);
 
         session.setPhase(MatchSession.GamePhase.ENDED);
         session.setStartTime(System.currentTimeMillis());
 
         for (UUID uuid : session.getAllPlayers()) {
             playerSessionMap.remove(uuid);
-            playerOriginalGameMode.remove(uuid);
+            // 死亡未重生的玩家保留原游戏模式映射（重生补恢复时才移除），
+            // 防止其在重生前重新排队进新对局时被当前（冒险）模式覆盖真实原模式
+            if (!pendingRespawnRestore.contains(uuid)) {
+                playerOriginalGameMode.remove(uuid);
+            }
             InventoryManager.getInstance().setCompetitive(uuid, false);
         }
 
         // 发送 HUD 清除数据包（空快照与对局内快照必然不同，经 sendHudData 去重后必然实际发出）
         MinecraftServer server = Cstmm.getServer();
         if (server != null) {
-            HudDataPayload clearPayload = new HudDataPayload("", 0, 0, 0, false);
+            HudDataPayload clearPayload = new HudDataPayload("", 0, 0, 0, false, 0, "[]");
             for (UUID uuid : session.getAllPlayers()) {
                 ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
                 if (player != null) {
@@ -515,15 +567,28 @@ public class MatchManager implements MatchApi {
 
     /**
      * 【作用】对局结束时恢复全体在线玩家：回原点、还原背包（竞技模式）、恢复原游戏模式并清空计分板队伍。
+     *         处于死亡状态（死亡界面未重生）的玩家跳过恢复：向重生后即被丢弃的旧实体恢复快照
+     *         会导致快照被消费而新实体为空背包（原物品永久丢失），故保留全部待恢复状态，
+     *         由 handleRespawn 在其重生时补做。
+     * @return 因死亡跳过、待重生补恢复的玩家 UUID 集合
      * 【被谁使用】endMatch（服务端内部）。
      */
-    private void restoreAllPlayers(MatchSession session) {
+    private Set<UUID> restoreAllPlayers(MatchSession session) {
+        Set<UUID> pendingRespawn = new HashSet<>();
         MinecraftServer server = Cstmm.getServer();
-        if (server == null) return;
+        if (server == null) return pendingRespawn;
 
         for (UUID uuid : session.getAllPlayers()) {
             ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
             if (player == null) {
+                continue;
+            }
+
+            // 死亡界面未重生的玩家：跳过原点/背包/游戏模式恢复（旧实体重生后即被丢弃），
+            // 仅清除计分板队伍（队伍按玩家名记录、跨重生保留，必须清）；其余由重生补恢复
+            if (player.isDead()) {
+                Objects.requireNonNull(player.getServer()).getScoreboard().clearTeam(player.getName().getString());
+                pendingRespawn.add(uuid);
                 continue;
             }
 
@@ -538,6 +603,7 @@ public class MatchManager implements MatchApi {
 
             Objects.requireNonNull(player.getServer()).getScoreboard().clearTeam(player.getName().getString());
         }
+        return pendingRespawn;
     }
 
     /**
@@ -560,19 +626,29 @@ public class MatchManager implements MatchApi {
     /**
      * 被投票踢出的玩家：在断开连接前恢复原点/背包/游戏模式。
      * 否则玩家以冒险模式+竞技装备状态被踢出，重连后永久滞留冒险模式且错位。
+     * 目标处于死亡界面（重生会丢弃当前实体）时：不能向其恢复背包/原点——快照会被
+     * 消费进即将丢弃的实体导致原物品永久丢失。仅恢复游戏模式（随实体存档持久化，
+     * 重生后即生效）；快照与原点保留，重连重生时由 {@link #handleRespawn} 补恢复。
      * 【被谁使用】VoteManager 踢人投票通过后（服务端）。
      */
     public void restoreKickedPlayer(UUID targetUuid) {
         MinecraftServer server = Cstmm.getServer();
         ServerPlayerEntity player = server != null ? server.getPlayerManager().getPlayer(targetUuid) : null;
-        if (player != null) {
-            OriginManager.restoreOrigin(player);
-            InventoryManager.getInstance().restoreInventory(player);
-            GameMode mode = playerOriginalGameMode.remove(targetUuid);
-            player.changeGameMode(mode != null ? mode : GameMode.SURVIVAL);
-        } else {
+        if (player == null) {
             playerOriginalGameMode.remove(targetUuid);
+            return;
         }
+        if (player.isDead()) {
+            GameMode mode = playerOriginalGameMode.remove(targetUuid);
+            if (mode != null) {
+                player.changeGameMode(mode);
+            }
+            return;
+        }
+        OriginManager.restoreOrigin(player);
+        InventoryManager.getInstance().restoreInventory(player);
+        GameMode mode = playerOriginalGameMode.remove(targetUuid);
+        player.changeGameMode(mode != null ? mode : GameMode.SURVIVAL);
     }
 
     /**
@@ -663,26 +739,231 @@ public class MatchManager implements MatchApi {
     /**
      * 每秒对对局内全体玩家广播 HUD 快照（订阅式推送：NetworkHandler.sendHudData 按玩家
      * 去重，内容与上次一致时跳过发包）。TIMER 图每秒 remainingSeconds 变化必然发包，
-     * KILLS 图仅在击杀后发包——对局内多数秒为 0 流量。
+     * KILLS 图仅在击杀/死亡/花名册变化后发包——对局内多数秒为 0 流量。
+     * 快照含 CS2 风格花名册 JSON（玩家名/队伍/个人击杀/死亡/上一条命击杀/战队缩写/徽标/头像绑定），
+     * 引用的战队徽标经 ensureHudBadge 保证分片先行下发。
      */
     private void broadcastHudData(MatchSession session) {
         MinecraftServer server = Cstmm.getServer();
         if (server == null) return;
 
+        // 【作用】构建本局花名册 JSON（全快照统一一份，内容不变时经 sendHudData 去重零流量）
+        String rosterJson = buildRosterJson(session);
+        Set<String> rosterBadgeIds = collectRosterBadgeIds(rosterJson);
+
         HudDataPayload payload = new HudDataPayload(
                 session.getMapName(),
                 session.getRedKills(),
                 session.getBlueKills(),
-                session.getRemainingSeconds(),
-                session.getPhase() != MatchSession.GamePhase.ENDED
+                // 准备阶段下发准备倒计时（remainingSeconds 此时是对局总时长/0，不是准备秒数）
+                session.getPhase() == MatchSession.GamePhase.PREPARING
+                        ? session.getPrepCounter() : session.getRemainingSeconds(),
+                session.getPhase() != MatchSession.GamePhase.ENDED,
+                session.getPhase().ordinal(),
+                rosterJson
         );
 
         for (UUID uuid : session.getAllPlayers()) {
             ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
             if (player != null) {
+                // 【作用】花名册引用的战队徽标分片先行下发（内容寻址去重，仅首次实际发包）
+                for (String badgeId : rosterBadgeIds) {
+                    NetworkHandler.ensureHudBadge(player, badgeId);
+                }
                 NetworkHandler.sendHudData(player, payload);
             }
         }
+    }
+
+    /**
+     * 【作用】设置比赛信息栏强制显示开关（/cstmm debug match_info_hud <t|f> 调试用）：
+     *         开启后仅执行命令的玩家（目标玩家）每秒收到首个活跃对局的 HUD
+     *         （无活跃对局时收到调试预览计分板），并立即推送一次（不等下一秒 tick）；
+     *         关闭或更换目标时向原目标发清空包复位其客户端 HUD。
+     * 【被谁使用】ModCommands（debug match_info_hud 子命令）。仅服务端。
+     */
+    public void setMatchHudForced(boolean forced, UUID playerUuid) {
+        UUID previousTarget = this.matchHudForced ? this.matchHudForcedPlayer : null;
+        if (forced == this.matchHudForced && Objects.equals(previousTarget, playerUuid)) return;
+        this.matchHudForced = forced;
+        this.matchHudForcedPlayer = forced ? playerUuid : null;
+        Cstmm.LOGGER.info("[CSTMM - MatchManager] Match HUD force display {} (target {})",
+                forced ? "ENABLED" : "DISABLED", forced ? playerUuid : "-");
+        // 原目标失去强制显示（被更换或关闭）：立即发清空包复位，避免其客户端 HUD 滞留旧数据
+        if (previousTarget != null && (!forced || !previousTarget.equals(playerUuid))) {
+            sendIdleHudTo(previousTarget);
+        }
+        if (forced) {
+            // 立即向执行者推送一次，给管理员即时反馈（不必等下一秒 tick）
+            broadcastForcedHudData();
+        }
+    }
+
+    /** 【作用】查询比赛信息栏是否处于强制显示（调试开关状态）。 */
+    public boolean isMatchHudForced() {
+        return matchHudForced;
+    }
+
+    /**
+     * 【作用】调试强制显示的每秒推送：仅发给目标玩家（执行命令的管理员）。
+     *         取首个活跃（非 ENDED）对局作为展示源；无活跃对局时发调试预览计分板
+     *         （DEMO_HUD_PAYLOAD，保证可见反馈）；目标离线时跳过，回线后下一秒恢复。
+     * 【被谁使用】tick（matchHudForced 开启时每秒调用）、setMatchHudForced（开启时立即推送一次）。仅服务端。
+     */
+    private void broadcastForcedHudData() {
+        if (!matchHudForced) return;
+        UUID target = matchHudForcedPlayer;
+        if (target == null) return;
+        MinecraftServer server = Cstmm.getServer();
+        if (server == null) return;
+        ServerPlayerEntity player = server.getPlayerManager().getPlayer(target);
+        if (player == null) return;
+        // 目标已进入活跃对局：其 HUD 由常规每秒广播负责，跳过镜像推送
+        // （否则自己对局数据与镜像数据每秒交替发包，客户端信息栏会闪烁）
+        if (isInActiveSession(target)) return;
+
+        // 【作用】取首个活跃对局作为强制展示源（ENDED 会话不计入，其玩家 HUD 已复位）
+        MatchSession forced = null;
+        for (MatchSession s : activeSessions.values()) {
+            if (s.getPhase() != MatchSession.GamePhase.ENDED) {
+                forced = s;
+                break;
+            }
+        }
+        if (forced == null) {
+            // 无活跃对局：发调试预览计分板（inGame=true，验证强制显示链路是否生效）
+            NetworkHandler.sendHudData(player, DEMO_HUD_PAYLOAD);
+            return;
+        }
+
+        // 【作用】构建展示源的 HUD 数据包与徽标分片（与常规 broadcastHudData 同源同构）
+        String rosterJson = buildRosterJson(forced);
+        Set<String> rosterBadgeIds = collectRosterBadgeIds(rosterJson);
+        HudDataPayload payload = new HudDataPayload(
+                forced.getMapName(),
+                forced.getRedKills(),
+                forced.getBlueKills(),
+                // 准备阶段下发准备倒计时（与常规广播一致）
+                forced.getPhase() == MatchSession.GamePhase.PREPARING
+                        ? forced.getPrepCounter() : forced.getRemainingSeconds(),
+                forced.getPhase() != MatchSession.GamePhase.ENDED,
+                forced.getPhase().ordinal(),
+                rosterJson
+        );
+
+        // 【作用】花名册引用的战队徽标分片先行下发（内容寻址去重，仅首次实际发包）
+        for (String badgeId : rosterBadgeIds) {
+            NetworkHandler.ensureHudBadge(player, badgeId);
+        }
+        NetworkHandler.sendHudData(player, payload);
+    }
+
+    /** 【作用】向指定玩家发清空 HUD 包（inGame=false，客户端淡出复位）；
+     *  目标在活跃对局中时跳过——其 HUD 由常规广播负责，发清空包会误抹掉对局内信息栏一秒。 */
+    private void sendIdleHudTo(UUID playerUuid) {
+        MinecraftServer server = Cstmm.getServer();
+        if (server == null) return;
+        if (isInActiveSession(playerUuid)) return;
+        ServerPlayerEntity player = server.getPlayerManager().getPlayer(playerUuid);
+        if (player != null) {
+            NetworkHandler.sendHudData(player, IDLE_HUD_PAYLOAD);
+        }
+    }
+
+    /** 【作用】判断玩家是否处于任一活跃（非 ENDED）对局中。 */
+    private boolean isInActiveSession(UUID uuid) {
+        for (MatchSession s : activeSessions.values()) {
+            if (s.getPhase() != MatchSession.GamePhase.ENDED && s.isPlayerInGame(uuid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 【作用】构建本局花名册紧凑 JSON 数组（CS2 风格 HUD 数据源）。
+     * 每个元素字段：u=uuid、n=名字、t=队伍(1红/2蓝)、k=本局个人击杀、d=本局死亡数、
+     * lk=上一条命击杀、c=战队缩写（无战队省略）、b=徽标引用（base64 徽标为内容寻址 id，
+     * URL 徽标为完整 URL，客户端自行下载；无徽标省略）、at/ai=头像绑定平台/账号（未设置省略）。
+     * 离线玩家用名字缓存兜底；血量/存活状态由客户端本地读取，不入包。
+     * 【被谁使用】broadcastHudData（每秒构建）。仅服务端。
+     */
+    private String buildRosterJson(MatchSession session) {
+        JsonArray array = new JsonArray();
+        ClanManager clanManager = ClanManager.getInstance();
+        // 红队在前蓝队在后，队内按开局名单顺序（集合迭代序稳定，内容不变时 JSON 逐字节一致，供去重）
+        appendTeamToRoster(session, session.getRedPlayers(), 1, clanManager, array);
+        appendTeamToRoster(session, session.getBluePlayers(), 2, clanManager, array);
+        return array.toString();
+    }
+
+    /** 【作用】把一支队伍的玩家追加进花名册 JSON（buildRosterJson 辅助）。仅服务端。 */
+    private void appendTeamToRoster(MatchSession session, Set<UUID> players, int team,
+                                    ClanManager clanManager, JsonArray array) {
+        for (UUID uuid : players) {
+            ServerPlayerEntity online = null;
+            MinecraftServer server = Cstmm.getServer();
+            if (server != null) {
+                online = server.getPlayerManager().getPlayer(uuid);
+            }
+            // 在线优先用实时名，离线回退名字缓存，再兜底占位
+            String name = online != null ? online.getName().getString() : session.getPlayerName(uuid);
+            if (name == null) name = "未知玩家";
+            if (online != null) {
+                // 【作用】在线时刻持续刷新名字缓存（改名/首帧补位均覆盖）
+                session.recordPlayerName(uuid, name);
+            }
+
+            JsonObject o = new JsonObject();
+            o.addProperty("u", uuid.toString());
+            o.addProperty("n", name);
+            o.addProperty("t", team);
+            o.addProperty("k", session.getPlayerKills(uuid));
+            o.addProperty("d", session.getPlayerDeaths(uuid));
+            o.addProperty("lk", session.getLastLifeKills(uuid));
+
+            // 【作用】战队信息：缩写 + 徽标引用（URL 徽标下发完整 URL，base64 徽标下发内容寻址 id）
+            Clan clan = clanManager.getClanByPlayer(uuid);
+            if (clan != null) {
+                o.addProperty("c", clan.getAbbreviation());
+                String badge = clan.getBadgeBase64();
+                if (badge != null && !badge.isEmpty()) {
+                    o.addProperty("b", ClanManager.isBadgeUrl(badge) ? badge : clan.getBadgeId());
+                }
+            }
+
+            // 【作用】头像绑定（档案字段，未设置省略；图片由各客户端按绑定自行获取）
+            PlayerProfile profile = PlayerDataManager.getInstance().getProfile(uuid);
+            if (profile != null) {
+                String avatarType = profile.getAvatarType();
+                String avatarId = profile.getAvatarId();
+                if (!avatarType.isEmpty() && !avatarId.isEmpty()) {
+                    o.addProperty("at", avatarType);
+                    o.addProperty("ai", avatarId);
+                }
+            }
+            array.add(o);
+        }
+    }
+
+    /**
+     * 【作用】从花名册 JSON 中收集全部徽标引用（去重），供逐玩家补发徽标分片。
+     * 简易解析：按 "b":" 值定位（JSON 由本类构建，字段值不含转义引号）。
+     * 【被谁使用】broadcastHudData（每秒调用）。仅服务端。
+     */
+    private Set<String> collectRosterBadgeIds(String rosterJson) {
+        Set<String> ids = new LinkedHashSet<>();
+        if (rosterJson == null) return ids;
+        String marker = "\"b\":\"";
+        int idx = 0;
+        while ((idx = rosterJson.indexOf(marker, idx)) >= 0) {
+            int start = idx + marker.length();
+            int end = rosterJson.indexOf('"', start);
+            if (end < 0) break;
+            ids.add(rosterJson.substring(start, end));
+            idx = end;
+        }
+        return ids;
     }
 
     /**

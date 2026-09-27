@@ -48,6 +48,9 @@
 | `PlayerDataManager` | 战绩记录（仅对局结束时记录一次）与档案持久化 |
 | `MatchScheduler` | 全局调度 tick，各 manager tick 用独立 try-catch 隔离异常 |
 | `EventListener` | 玩家加入（握手触发）、死亡重生（回出生点）、伤害（友伤判定）、断线清理 |
+| `BandwidthTracker`（util） | `/cstmm debug bandwidth` 服务器带宽统计：玩家 JOIN 时向连接 Netty 管线最外侧注入出/入站字节计数器（`mixin` 包两个 Accessor 打通 protected/private 字段），1Hz 守护线程采样速率与逐秒记录 |
+| `mixin` 包 | Mixin 访问器（`ClientConnectionAccessor`/`ServerCommonNetworkHandlerAccessor`），仅供带宽统计读取连接管线；无注入型 Mixin |
+| `QuotedNameArgumentType`（command） | 战队名引号参数类型（`cstmm:quoted_name`，经 ArgumentTypeRegistry 注册）：literal `"` + 名字 + 闭引号，强制 `/cstmm data get\|edit\|delete clan` 的战队名带引号；自带 Tab 建议（候选 = 名字+闭引号），名字内空白自动 trim、支持 `\"`/`\\` 转义 |
 
 ### 2.2 客户端模块
 
@@ -68,7 +71,7 @@
 | `LastWordsScreen` + `WhyYouClickThis` | "千万别点"的遗言流程（不可取消：发送/算了/回车/ESC 均发送遗言；崩溃挂起为静态状态，由 CstmmClient 每 tick 抛出；屏幕被其他模组顶号/断线顶掉时 `removed()` 兜底同样触发；被反崩溃模组吞掉异常则改用 `scheduleStop()` 强制退出） |
 | `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新） |
 | `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存 |
-| `HudOverlay` | 对局 HUD 渲染（淡入淡出动画，断线重置） |
+| `HudOverlay` | CS2 风格对局 HUD 渲染（顶部队伍栏：己方/敌方玩家卡片 + 中央计分板；淡入淡出动画，断线重置） |
 
 ### 2.3 关键设计约束
 
@@ -78,7 +81,7 @@
 - **状态推送事件驱动**：队列/战队状态不轮询——客户端打开匹配主菜单时发 `request_queue_status{subscribe:true}` 订阅（关闭菜单在 `removed()` 发 false 退订），队列变化（加入/退出/开局/解散/补位）时服务端向订阅者推送 `queue_status` 快照（"匹配"页取消匹配按钮与"队列"页共用同一份快照）；战队任何变更（创建/加入/退出/解散/转让/踢人/编辑）时向全体在线成员推送 MINE 快照，**并重推队列快照**（队列快照的 clan 行依赖战队数据，否则"先匹配后入队"会显示旧状态）。
 - **战队成员字段**：clan_data 的成员含 `online`（在线状态）、`matchState`（"空闲"/"地图显示名-模式名"）与 `avatarType`/`avatarId`（头像绑定，服务端只存/发绑定，图片由各客户端自行获取），由服务端实时计算下发。
 - **原子写盘**：所有 JSON 保存均为临时文件 + `Files.move(ATOMIC_MOVE)`；加载失败（`JsonParseException`）绝不回写默认值覆盖用户文件。
-- **活跃对局保护**：活跃对局的地图禁止删除/修改（服务端 `handleConfigUpdate` 校验 + 客户端弹窗提示）。
+- **活跃对局保护**：活跃对局的地图禁止删除/修改（服务端 `handleConfigUpdate` 与 `/cstmm data delete map` 校验 + 客户端弹窗提示）。
 - **快照保护**：`InventoryManager.saveInventory` 绝不覆盖未恢复的旧快照；恢复流程为"清背包 → 恢复 → 成功才删快照"。
 
 ## 3. 网络协议（详细）
@@ -112,6 +115,7 @@
 | `cstmm:request_queue_status` | C2S | 队列状态订阅开关（打开匹配主菜单订阅、关闭菜单退订） |
 | `cstmm:popup` | S2C | 弹窗通知（匹配菜单/配置界面内嵌弹窗，其他情况用全局弹窗界面 PopupScreen 承载、确定后返回原界面） |
 | `cstmm:set_face` | C2S | 设置/清除自己的头像绑定（avatarType + avatarId；服务端校验后写入玩家档案并同步档案/战队/队列三处下发） |
+| `cstmm:clan_hints` | S2C | 战队名+成员名提示快照（`cstmm data get\|edit\|delete clan` 的 Tab 补全数据源；JOIN 与战队变更时推送） |
 
 > 逐包字段定义与分片防护参数详见 NETWORK.md §5.2（单包上限：C2S 32768B / S2C JSON 65536B；徽标分片上传 totalParts ∈ [1,64]、累计 ≤1.92M 字符；下发 totalParts ∈ [1,3]）。
 
@@ -139,7 +143,7 @@
 - `BUY_ITEM`：mapName 空闲，team=商品下标
 - `REQUEST_SHOP`：请求当前可购买的商品数据
 
-**hud_data**（S2C）：`string mapName(64B)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame`。对局期间每秒广播，结束时发 `inGame=false` 清除包。
+**hud_data**（S2C）：`string mapName(64B)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame` + `varInt phase`（GamePhase ordinal）+ `string rosterJson(65536B)`。对局期间每秒广播（订阅式去重：内容不变跳过），结束时发 `inGame=false` 清除包。`remainingSeconds` 准备阶段=准备倒计时、战斗阶段=对局剩余秒数。`rosterJson` 为花名册 JSON（字段 u/n/t/k/d/lk/c/b/at/ai，详见 NETWORK.md），血量/存活由客户端本地读取。相关服务端新增：MatchSession 个人击杀/死亡/本条命击杀/上一条命击杀统计（EventListener 击杀与死亡事件写入）与玩家名缓存（setupPlayer 写入）。
 
 **match_status**（S2C）：`enum type（MATCH_STARTING / MATCH_ENDED / VOTE_STARTED / VOTE_RESULT / COUNTDOWN）` + `string message(128B)` + `int redKills` + `int blueKills`。
 
@@ -166,6 +170,7 @@
 - 枚举字段使用 **ordinal 序列化**：`ActionType`、`MatchStatusPayload.StatusType` 只能在枚举**末尾**追加新值，中间插入/删除会导致两端语义错位。
 - 服务端与客户端模组版本必须一致；Fabric API 使用锁定的 0.115.6+1.21.1（`fabric.mod.json` 声明 `"fabric-api": "*"`，可按需收紧为 `>=0.115.6+1.21.1`）。
 - 新增 S2C/C2S 包时两端必须同步注册，否则解码不一致会被原版断开连接。
+- **自定义命令参数类型**（`cstmm:quoted_name`，战队名引号参数）经 `ArgumentTypeRegistry` 注册且两端一致——命令树同步按 id 序列化参数类型，客户端缺注册会断连。
 - 原版限制：S2C 单包 64KB、C2S 单包 32768 字节——配置同步因此引入分片（下节）。
 
 ## 4. 配置同步与分片机制
@@ -183,6 +188,7 @@
   - 单玩家累积数据 > **2 MB** 时清空其重组状态并 WARN（合法上限 64 片 × 30KB ≈ 1.92MB，不会误伤）；
   - 断线自动清理重组缓冲。
 - **重组完成后校验流程**：出生点非空、地图 ID 去重（新 ID 查重复）、活跃对局的地图禁删改 → 落盘（原子写）→ 全服广播新配置（客户端落盘新哈希，之后重连免全量）。
+- **命令侧配置编辑**：`/cstmm data edit map|global`、`delete map` 走同一 ConfigManager 写盘入口（`updateMap`/`updateGlobalConfig`/`removeMap`，含出生点非空与 ID 查重校验），成功后经 `NetworkHandler.broadcastConfigUpdate()` 全服广播（在线客户端免重连拿到新配置）。
 - **开局时序**：`MatchManager.startMatch` 仅在初始化成功后才将玩家移出队列。
 
 ### 4.1 客户端同步保护
@@ -213,7 +219,7 @@
 
 **补位**：加入同模式进行中对局（需 `reinforceable: true`），遵守队伍平衡，统一走 `MatchManager.registerAndSetupPlayer()`；CONDITIONAL 补到该队最低人数，ALWAYS 补到该队满员（`maxRedPlayers`/`maxBluePlayers`；为 0 = 无上限的队把所有等待玩家全部补入）。冷却中的地图被快速匹配过滤。
 
-**边界系统**：对局内玩家离开 `boundary` 矩形开始警告计时 → 超过 `boundaryWarningTime` 秒处决，对方队 + `boundaryPenaltyKills`，本人记惩罚死亡，计时重置。判定细节：坐标 floor 到方块后判定（站在边界方块上算界内）；某维 Min > Max 时自动交换；全 0 边界整体跳过。
+**边界系统**：对局内玩家离开其队伍生效的边界矩形开始警告计时 → 超过 `boundaryWarningTime` 秒处决，对方队 + `boundaryPenaltyKills`，本人记惩罚死亡，计时重置。**红蓝两队分别判定**：红队（team=1）优先用 `redBoundary`，蓝队（team=2）优先用 `blueBoundary`，队伍专属边界全 0（未配置）时回退公共 `boundary`（`MapConfig.getBoundaryForTeam`）；三边界全 0 时整体跳过检测。判定细节：坐标 floor 到方块后判定（站在边界方块上算界内）；某维 Min > Max 时自动交换。
 
 **重生**：对局未结束自动传回本队出生点（`dimension` 维度正确传送）。
 
@@ -243,13 +249,23 @@
 | `/cstmm reload` | OP≥2 | 从磁盘重新加载配置 |
 | `/cstmm data restore bags <玩家>` | OP≥2 | 恢复玩家全部已保存背包 |
 | `/cstmm data restore bags <玩家> <槽位>` | OP≥2 | 恢复指定槽位（0-40） |
-| `/cstmm data get player <玩家名\|UUID> [字段]` | OP≥2 | 查看玩家战绩档案（支持离线玩家）；可选字段输出单值：kills / deaths / matches / wins / penaltydeaths / kd / name / uuid |
-| `/cstmm data get clan <战队名> [字段]` | OP≥2 | 查看战队信息；可选字段输出单值：name / abbr / limit / leader / members / badge（超长 base64 只回长度与文件位置）/ createdat |
-| `/cstmm data delete player <玩家名\|UUID> [profile\|bags\|all]` | OP≥2 | 删除玩家数据：省略类型默认 all（战绩档案 players/<uuid>.json + 背包快照 bags/<uuid>.json）；档案删除同时解除损坏标记，玩家重进服后从零建档 |
-| `/cstmm data delete clan <战队名>` | OP≥2 | 删除战队（等同队长解散：清除三索引并落盘，在线成员收到通知与最新 MINE） |
-| `/cstmm data get maps\|global\|clans` | OP≥2 | 读取对应 JSON 文件原文；≤1500 字符直接聊天输出，超出则回文件路径 + 开头预览 |
+| `/cstmm data get player <玩家名\|UUID> [字段]` | OP≥2 | 查看玩家战绩档案（支持离线玩家，全量输出含头像绑定行）；可选字段输出单值：kills / deaths / matches / wins / penaltydeaths / kd / name / uuid / avatar（未绑定时显示"未绑定"）/ bags（背包快照概要：保存时间+非空物品数） |
+| `/cstmm data get clan "<战队名>" [字段]` | OP≥2 | 查看战队信息；可选字段输出单值：name / abbr / limit / leader / members / badge（超长 base64 只回长度与文件位置）/ createdat。**战队名必须带引号**（自定义 `cstmm:quoted_name` 参数类型：literal `"` + 名字 + 闭引号，由 Brigadier 强制，无引号输入解析失败）；Tab 补全链：`clan ` → `"`（引号字面量自动建议）→ `"` 后 Tab 给出 `名字+"` 候选（选中即完整引号名）→ 字段（裸词）。名字建议数据源为 `clan_hints` 同步缓存（服务端执行时用 ClanManager） |
+| `/cstmm data get map <地图ID> [字段]` | OP≥2 | 查看单张地图配置：省略字段输出全字段摘要；指定字段输出单值（id / displayname / enabled / wincondition / targetkills / maxduration / tierule / boundary / redboundary / blueboundary / redspawns / bluespawns / minplayers / cooldownseconds / minredplayers / minblueplayers / preparetime / boundarywarningtime / boundarypenaltykills / kickcooldownseconds / reinforcementmode / maxredplayers / maxblueplayers / reinforceable / dimension / background / shopitems） |
+| `/cstmm data get global [字段]` | OP≥2 | 不带字段输出 global.json 原文；指定字段输出单值：quicktimeout / gear（默认装备列表） |
+| `/cstmm data delete player <玩家名\|UUID> [profile\|bags\|avatar\|all]` | OP≥2 | 删除玩家数据：省略类型默认 all（战绩档案 players/<uuid>.json + 背包快照 bags/<uuid>.json）；avatar=清除头像绑定（写盘并同步在线客户端三处展示点，原本无绑定时提示无可删数据）；档案删除同时解除损坏标记，玩家重进服后从零建档 |
+| `/cstmm data delete clan "<战队名>"` | OP≥2 | 删除战队（等同队长解散：清除三索引并落盘，在线成员收到通知与最新 MINE）。**战队名必须带引号**（同 get 的 `cstmm:quoted_name` 参数类型），Tab 补全同上 |
+| `/cstmm data delete map <地图ID>` | OP≥2 | 删除地图配置（写盘并广播全服；正在对局中使用的地图拒绝删除，防对局僵死） |
+| `/cstmm data get maps\|clans` | OP≥2 | 读取对应 JSON 文件原文；≤1500 字符直接聊天输出，超出则回文件路径 + 开头预览 |
 | `/cstmm data edit player <玩家名\|UUID> <字段> <值>` | OP≥2 | 修改档案字段：kills / deaths / matches / wins / penaltyDeaths（支持离线玩家，改后写盘并同步在线客户端） |
-| `/cstmm data edit clan <战队名> <字段> <值>` | OP≥2 | 修改战队字段：name / abbr / limit（人数上限）/ leader（转让队长，支持离线成员）/ badge（URL、base64 ≤48KiB 或 clear 清空；游戏内命令 256 字符上限，超长 base64 经服务器控制台输入；改后写盘并推送成员客户端） |
+| `/cstmm data edit player <玩家名\|UUID> avatar <qq\|bili> <账号ID>` / `avatar clear` | OP≥2 | 设置/清除玩家头像绑定（支持离线玩家；账号 ID 纯数字，校验规则与客户端个性化页一致；改后写盘，在线玩家同步履历页/战队成员列表/队列页三处头像展示） |
+| `/cstmm data edit player <玩家名\|UUID> name <新名字>` | OP≥2 | 修改玩家档案显示名（仅影响履历/查询展示，不改 UUID；改后写盘并同步在线客户端） |
+| `/cstmm data edit map <地图ID> <字段> <值>` | OP≥2 | 命令侧修改地图配置任意字段（改后经 ConfigManager 写盘并广播全服在线客户端）：标量与整数字段直接赋值（targetkills/maxduration/boundarywarningtime/minredplayers/minblueplayers ≥1，其余整数 ≥0）；enabled/reinforceable 接受 true/false/1/0；wincondition=KILLS\|TIMER、tierule=OVERTIME\|DRAW、reinforcementmode=CONDITIONAL\|ALWAYS；boundary/redboundary/blueboundary 用 6 整数 `<minX> <minY> <minZ> <maxX> <maxY> <maxZ>` 或 clear 清空（全 0=未配置回退公共）；redspawns/bluespawns 用 `add <x> <y> <z>` / `remove <序号>`（至少保留 1 个）/ 不可 clear；shopitems 用 `add <物品ID> [价格] [限购]`（末尾两个纯数字解析为价格与限购，支持 "xxx 64" 数量后缀但此时需同时给价格限购）/ `remove <序号>` / `clear`；id 改名（非 ENDED 对局占用时拒绝，与删除同一保护）查重；displayname/background 接受任意文本（background 支持 clear） |
+| `/cstmm data edit global <字段> <值>` | OP≥2 | 命令侧修改全局配置（改后写盘并广播全服）：quicktimeout <秒≥1>；gear set <槽位> <物品ID>（槽位与配置界面同口径：armor.head/chest/legs/feet/body、weapon.mainhand/offhand、container.0~35，兼容简写 head/chest/legs/feet/mainhand/offhand；物品ID 可含数量后缀或 SNBT）；gear remove <槽位>（跨写法等价匹配，`head` 可删 `armor.head` 条目）/ gear clear。gear set 按槽位等价键覆盖同槽旧配置（head 与 armor.head 视为同一槽，不产生重复条目） |
+| `/cstmm data edit clan "<战队名>" <字段> <值>` | OP≥2 | 修改战队字段：name / abbr / limit（人数上限）/ leader（转让队长，支持离线成员）/ badge（URL、base64 ≤48KiB 或 clear 清空；游戏内命令 256 字符上限，超长 base64 经服务器控制台输入；改后写盘并推送成员客户端）。**战队名必须带引号**（同 get 的 `cstmm:quoted_name` 参数类型）。Tab 补全：`"` → `名字+"` → 字段 → 值（leader=成员名、badge=clear、limit=常用数字） |
+| `/cstmm debug match_info_hud <t\|f>` | OP≥2 | 调试：强制显示/关闭比赛信息栏（屏幕顶部中央，淡入约 1 秒）。**仅作用于执行者自己的客户端**（信息栏为客户端显示，仅限游戏内玩家执行，不影响其他玩家）。开启后立即向执行者推送一次，此后每秒向其推送首个活跃对局的 HUD；无活跃对局时向执行者发调试预览计分板（地图名"HUD 调试预览"+ 0:0 + 90 秒倒计时，仅中央计分板无队伍卡片，验证显示链路）；关闭时立即向执行者发清空包（inGame=false）复位其 HUD |
+| `/cstmm debug bandwidth start\|stop\|get\|view` | OP≥2 | 调试：服务器带宽记录（Netty 管线最外侧字节计数器，统计每个连接加密压缩后的线路字节，含原版与模组全部流量；玩家 JOIN 时注入）。start=清零并开始逐秒采样；stop=停止并返回时长/总量/峰值汇总；get=当前最近 1 秒出/入站速率；view=总量/均值/峰值摘要 + 最近 15 条逐秒样本。采样线程为常驻 1Hz 守护线程 |
+| `/cstmm debug exception_protect_test [confirm]` | OP≥2 | 调试：全局异常保护链路测试（**危险操作，两步确认**）。不带参数=发起（发出警告并开启 30 秒确认窗口）；`confirm`=窗口内确认后从执行器抛出人为测试异常，经本命令的 guard 包装走与生产完全相同的保护链路（ModGuardian.engage → 控制台完整堆栈 → 全服警告广播 → 活跃对局强制结算 → 模组停用，服务器不崩）。保护已启用时被 guard 拦截并提示；重启服务器恢复 |
 
 玩家可用命令见 [README.md](README.md)。
 
@@ -276,12 +292,13 @@
 | `boundaryPenaltyKills` | int | 5 | 越界处决惩罚击杀 |
 | `kickCooldownSeconds` | int | 60 | 踢人投票发起冷却 |
 | `dimension` | string | minecraft:overworld | 对局维度 ID（非法值回退主世界） |
-| `boundary` | object | 全 0 | 边界 `minX..maxZ` 六个 int |
+| `boundary` | object | 全 0 | 公共边界 `minX..maxZ` 六个 int |
+| `redBoundary` / `blueBoundary` | object | 全 0 | 红/蓝队专属边界，全 0 时该队回退 `boundary` |
 | `redSpawns` / `blueSpawns` | 数组 | [] | 出生点 `{"x","y","z"}`（保存校验非空） |
 | `shopItems` | 数组 | [] | 本图商品 `{"itemId","price","maxPurchase"}`（ShopItem 类保留在 GlobalConfig） |
 | `backgroundBase64` | string | "" | 卡片背景图（PNG 的 Base64） |
 
-`global.json`：`quickTimeout`（快速匹配超时秒数，唯一全局对局参数）、`defaultGear`（竞技默认装备 `{"slot","itemId"}`，slot ∈ `armor.head/chest/legs/feet/body` 或 `container.0~container.35`，与配置界面校验器一致）。
+`global.json`：`quickTimeout`（快速匹配超时秒数，唯一全局对局参数）、`defaultGear`（竞技默认装备 `{"slot","itemId"}`）。slot 与配置界面校验器同口径：`armor.head/chest/legs/feet/body` 或 `container.0~container.35`（`/item replace entity` 语法）；同时兼容简写 `head/chest/legs/feet/mainhand/offhand` 与 `weapon.mainhand/offhand`（`EquipmentManager.applyToSlot` 全部识别：armor.* 映射对应盔甲槽、weapon.* 映射主手/副手、container.N 替换主背包 N 号槽、armor.body 玩家无该槽位进背包/掉落、未知槽位塞背包或掉落；slot 为 null/空串的条目跳过）。
 
 ## 9. 日志规范
 
@@ -308,3 +325,11 @@
 | 对局中玩家卡在边界外被反复处决 | 检查 `boundary` 是否配置正确；死亡重生会自动送回出生点 |
 | HUD 一直显示旧对局数据 | 客户端未收到 `inGame=false` 清除包或断线未重置；查看 `[CSTMM - ClientNetwork]` 日志 |
 | 客户端商店数据不刷新 | `shop_data` 缓存问题；ShopScreen 构造器会发 REQUEST_SHOP，检查服务端限频与 isCompetitive 校验 |
+
+## 全局异常保护（保护模式）
+
+模组全部服务端入口（每秒调度、五个事件监听器、全部 C2S 网络接收器与 JOIN/DISCONNECT 回调、全部 43 个命令执行器、初始化注册与生命周期回调）均经 manager/ModGuardian 包装：
+
+- 任一入口抛出未捕获 Throwable（含 Error）→ **进入保护模式**：完整异常堆栈打印到服务器控制台、向全体在线玩家广播警告、尽力强制结算所有活跃对局（恢复玩家原点/背包/游戏模式），此后模组全部功能停用（各入口直接跳过，命令提示"模组已进入保护模式"），服务器本体继续运行，保护持续到重启；
+- 秒级调度不再逐任务吞异常——任一子系统异常即进入保护模式，避免带病运行；
+- 停服保存（SERVER_STOPPING）为独立 try/catch：单项保存失败不跳过另一项（停服阶段保护模式无意义）。

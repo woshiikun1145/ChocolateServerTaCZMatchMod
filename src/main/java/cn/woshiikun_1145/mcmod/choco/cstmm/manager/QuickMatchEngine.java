@@ -29,8 +29,8 @@ final class QuickMatchEngine {
     private final QueueManager qm;
     /** 快速匹配队列，按模式独立：key: 匹配模式 */
     private final Map<String, List<UUID>> quickQueues;
-    /** 快速匹配等待计数（tryQuickMatch 每秒调用一次，实为秒数；与 quickTimeout 秒口径一致） */
-    private int quickWaitSeconds;
+    /** 快速匹配等待计数（按模式独立，tryQuickMatch 每秒对该模式 +1；与 quickTimeout 秒口径一致） */
+    private final Map<String, Integer> quickWaitSeconds;
 
     // 构造：仅由 QueueManager 创建，初始化两条按模式独立的快速队列
     QuickMatchEngine(QueueManager qm) {
@@ -38,7 +38,7 @@ final class QuickMatchEngine {
         this.quickQueues = new HashMap<>();
         this.quickQueues.put(QueueManager.MODE_COMPETITIVE, new ArrayList<>());
         this.quickQueues.put(QueueManager.MODE_CASUAL, new ArrayList<>());
-        this.quickWaitSeconds = 0;
+        this.quickWaitSeconds = new HashMap<>();
     }
 
     // 取指定模式的快速队列（不存在时创建，模式规范化兜底）
@@ -87,57 +87,63 @@ final class QuickMatchEngine {
 
     /**
      * 【作用】快速匹配主流程（每秒一次）：按模式独立执行"直接开局 → 跨队列合并 → 超时强制开局/补位"三级管线。
+     *         等待计时按模式独立累计，两种模式互不干扰超时节奏。
      * 【被谁使用】QueueManager#tryMatch（服务端每秒驱动）。
      */
     void tryQuickMatch() {
         if (getQuickQueueSize() == 0) {
-            quickWaitSeconds = 0;
+            quickWaitSeconds.clear();
             return;
         }
 
-        quickWaitSeconds++;
-
         GlobalConfig globalConfig = ConfigManager.getInstance().getGlobalConfig();
         int quickTimeout = globalConfig != null ? globalConfig.getQuickTimeout() : 30;
-        boolean timeout = quickWaitSeconds >= quickTimeout;
 
         // 流程（每秒一次，与文档一致）：
         // 1) 优先搜索未占用且不在冷却的地图直接开局（逐张尝试，人数达到该图两队最低之和即可）；
         // 2) 人数不足时与同模式的地图队列合并开局；
         // 3) 超过 quickTimeout 秒仍无法开局才进入补位流程。
-        // 两种模式的快速队列各自独立处理，绝不混合
+        // 两种模式的快速队列各自独立处理（等待计时也按模式独立），绝不混合
         List<String> availableMaps = getAvailableMaps();
 
         for (String mode : QueueManager.MODES) {
             List<UUID> queue = quickQueueOf(mode);
-            if (queue.isEmpty()) continue;
+            if (queue.isEmpty()) {
+                quickWaitSeconds.remove(mode);
+                continue;
+            }
+            // 按模式独立累计等待秒数（修复：此前两种模式共享同一计时器，互相干扰超时节奏）
+            int waited = quickWaitSeconds.merge(mode, 1, Integer::sum);
+            boolean timeout = waited >= quickTimeout;
             List<UUID> players = new ArrayList<>(queue);
 
             // 1) 直接开局：随机顺序逐张候选地图尝试，避开单张地图人数要求过高导致的漏配
+            boolean leftQueue = false;
             if (!timeout) {
                 List<String> candidates = new ArrayList<>(availableMaps);
                 Collections.shuffle(candidates);
-                boolean started = false;
                 for (String mapId : candidates) {
                     if (startQuickMatch(mapId, mode, players, false)) {
-                        started = true;
+                        leftQueue = true;
                         break;
                     }
                 }
-                if (started) continue;
             }
 
             // 2) 跨队列合并开局（仅与同模式地图队列合并）
-            if (tryStartWithOtherQueue(players, mode)) continue;
+            if (!leftQueue && tryStartWithOtherQueue(players, mode)) {
+                leftQueue = true;
+            }
 
             // 3) 超时：强制开局（直接开局 → 补位）
-            if (timeout) {
+            if (!leftQueue && timeout) {
                 forceStartQuickMatch(players, mode);
             }
-        }
 
-        if (timeout || getQuickQueueSize() == 0) {
-            quickWaitSeconds = 0;
+            // 该模式队列已清空（全部开局/补位成功）或超时轮已执行：重置该模式等待计时
+            if (leftQueue || timeout || quickQueueOf(mode).isEmpty()) {
+                quickWaitSeconds.remove(mode);
+            }
         }
     }
 

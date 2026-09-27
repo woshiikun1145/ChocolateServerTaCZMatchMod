@@ -17,12 +17,15 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.ShopScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.GlobalConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.PlayerProfile;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.CommandHintCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.*;
 import cn.woshiikun_1145.mcmod.choco.cstmm.util.BlockPosAdapter;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.google.gson.reflect.TypeToken;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -35,7 +38,9 @@ import net.minecraft.util.math.BlockPos;
 
 import java.lang.reflect.Type;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 【作用】客户端网络中枢：注册全部 S2C 包接收器（HUD 数据、匹配状态、配置同步分包重组、配置元数据
@@ -84,7 +89,9 @@ public class ClientNetworkHandler {
                 payload.redKills(),
                 payload.blueKills(),
                 payload.remainingSeconds(),
-                payload.inGame()
+                payload.inGame(),
+                payload.phase(),
+                payload.rosterJson()
         )));
 
         // ========== 匹配状态接收 ==========
@@ -260,6 +267,28 @@ public class ClientNetworkHandler {
         ClientPlayNetworking.registerGlobalReceiver(QueueStatusPayload.ID, (payload, context) -> context.client().execute(() ->
                 QueueStatusCache.getInstance().update(payload.json())));
 
+        // ========== 战队名提示（Tab 补全数据源） ==========
+        // /cstmm data get|edit|delete clan 的建议 provider 在客户端执行，战队数据只在服务端，
+        // 服务端经此包把"战队名→成员名"快照同步给客户端缓存
+        ClientPlayNetworking.registerGlobalReceiver(ClanHintsPayload.ID, (payload, context) -> context.client().execute(() -> {
+            try {
+                Map<String, List<String>> hints = new java.util.LinkedHashMap<>();
+                JsonElement root = JsonParser.parseString(payload.json());
+                if (root.isJsonObject()) {
+                    for (Map.Entry<String, JsonElement> e : root.getAsJsonObject().entrySet()) {
+                        List<String> members = new ArrayList<>();
+                        if (e.getValue().isJsonArray()) {
+                            for (JsonElement m : e.getValue().getAsJsonArray()) members.add(m.getAsString());
+                        }
+                        hints.put(e.getKey(), members);
+                    }
+                }
+                CommandHintCache.set(hints);
+            } catch (Exception ex) {
+                // 损坏 JSON：保留旧缓存（静默降级，不影响命令本身）
+            }
+        }));
+
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             ClientHandshakeState.onDisconnect();
             // 重置配置哈希握手状态（下次进服重新比对；磁盘缓存保留，重连可免收全量配置）
@@ -272,6 +301,7 @@ public class ClientNetworkHandler {
             QueueStatusCache.getInstance().clear();
             BadgeCache.clear();
             FaceCache.clear();
+            CommandHintCache.clear();
             cn.woshiikun_1145.mcmod.choco.cstmm.client.util.UrlImageCache.clear();
             cn.woshiikun_1145.mcmod.choco.cstmm.client.util.FaceImageCache.clear();
         });

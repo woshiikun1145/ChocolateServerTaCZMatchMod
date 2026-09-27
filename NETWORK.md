@@ -71,7 +71,7 @@ CSTMM 网络层基于 **Fabric Networking API v1**（`fabric-networking-api-v1`�
 
 | 侧 | 注册 |
 |---|---|
-| `playS2C()` ×12 | `hud_data` `match_status` `config_sync` `config_meta` `open_config_screen` `player_profile` `handshake_s2c` `shop_data` `clan_data` `queue_status` `popup` `badge` |
+| `playS2C()` ×13 | `hud_data` `match_status` `config_sync` `config_meta` `open_config_screen` `player_profile` `handshake_s2c` `shop_data` `clan_data` `queue_status` `popup` `badge` `clan_hints` |
 | `playC2S()` ×9 | `match_action` `config_update` `request_config_sync` `handshake_c2s` `clan_action` `request_queue_status` `request_badge` `badge_known` `set_face` |
 
 **接收器注册**（只需数据流向的接收侧）：
@@ -102,7 +102,7 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 | 事件 | 服务端动作 | 客户端动作 |
 |---|---|---|
 | JOIN | 发首个握手请求，登记 `pendingHandshakes[uuid]=0` | `ClientHandshakeState.onJoin()` 重置握手状态；配置/履历同步由 EventListener 的 JOIN 逻辑触发 |
-| DISCONNECT | 清空该玩家的配置重组缓冲 + 限频窗口 + 队列状态订阅 + 徽标上传缓冲/已发集合（`clearPendingConfigUpdate` / `syncRequestWindows.remove` / `queueStatusSubscribers.remove` / `pendingBadgeUploads.remove` / `sentBadges.remove`） | 重置握手状态、`HudOverlay.reset()`、清空 `ConfigDataCache`/`ShopDataCache`/`ClanCache`/`QueueStatusCache`/`BadgeCache`/`FaceCache`/`UrlImageCache`/`FaceImageCache`（防跨服残留） |
+| DISCONNECT | 清空该玩家的配置重组缓冲 + 限频窗口 + 队列状态订阅 + 徽标上传缓冲/已发集合（`clearPendingConfigUpdate` / `syncRequestWindows.remove` / `queueStatusSubscribers.remove` / `pendingBadgeUploads.remove` / `sentBadges.remove`） | 重置握手状态、`HudOverlay.reset()`、清空 `ConfigDataCache`/`ShopDataCache`/`ClanCache`/`QueueStatusCache`/`BadgeCache`/`FaceCache`/`UrlImageCache`/`FaceImageCache`/`CommandHintCache`（防跨服残留） |
 
 ## 4. 线路格式基础（wire format）
 
@@ -133,7 +133,8 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 | `cstmm:request_config_sync` | C2S | JOIN 哈希握手回应 / 打开配置界面 / 点"重新加载"（携带客户端缓存哈希，服务端一致时免全量） | 限频 2 次/秒/人 |
 | `cstmm:match_action` | C2S | 入队/快速匹配/退队/投票/购买/请求履历/请求商店 | 玩家操作驱动 |
 | `cstmm:match_status` | S2C | 对局状态消息广播 | 事件驱动 |
-| `cstmm:hud_data` | S2C | 对局期间每秒推送（含结束清除包） | 1 次/秒/人 |
+| `cstmm:hud_data` | S2C | 对局期间每秒推送（含结束清除包）；调试 `/cstmm debug match_info_hud t` 开启时也向非对局玩家推送（镜像首个活跃对局或发调试预览计分板） | 1 次/秒/人 |
+| `cstmm:clan_hints` | S2C | 战队名+成员名提示快照（`{"战队名":["成员",...]}`），供客户端 `/cstmm data get\|edit\|delete clan` 的 Tab 补全（provider 在客户端执行，战队数据只在服务端） | 玩家 JOIN + 战队变更（ClanManager.save 落盘点）全服广播 |
 | `cstmm:player_profile` | S2C | 加入时自动 + 玩家请求履历 | 低频 |
 | `cstmm:open_config_screen` | S2C | 服务端要求打开 OP 配置界面 | 空包 |
 | `cstmm:shop_data` | S2C | 响应 REQUEST_SHOP | 低频 |
@@ -162,7 +163,7 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 
 > 快速匹配走专用 `JOIN_QUICK` 动作，不再以 `"quick"` 伪地图 ID 复用 `JOIN_QUEUE`（否则真实地图 ID 恰为 `quick` 时会被劫持进快速队列）。
 
-**`cstmm:hud_data`（S2C）**：`string mapName(64B，发送前 truncate)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame`。结束时发 `inGame=false` 清除包。
+**`cstmm:hud_data`（S2C）**：`string mapName(64B，发送前 truncate)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame` + `varInt phase`（MatchSession.GamePhase ordinal，1=准备 2=战斗）+ `string rosterJson(65536B，发送前 truncate)`。`remainingSeconds` 在准备阶段携带准备倒计时、战斗阶段携带对局剩余秒数。`rosterJson` 为本局花名册紧凑 JSON 数组（元素字段：`u`=uuid、`n`=名字、`t`=队伍 1红/2蓝、`k`=本局个人击杀、`d`=本局死亡、`lk`=上一条命击杀、`c`=战队缩写（无战队省略）、`b`=徽标引用（base64 徽标为内容寻址 id，URL 徽标为完整 URL，客户端自行下载；无徽标省略）、`at`/`ai`=头像绑定平台/账号（未设置省略）），供客户端渲染 CS2 风格顶部队伍栏；徽标分片经 `ensureHudBadge` 保证先行下发。血量/存活/阵亡状态由客户端本地读取玩家实体，不入包。结束时发 `inGame=false` 清除包。
 
 **`cstmm:match_status`（S2C）**：`enum StatusType（MATCH_STARTING/MATCH_ENDED/VOTE_STARTED/VOTE_RESULT/COUNTDOWN，ordinal）` + `string message(128B，发送链路统一截断)` + `int redKills` + `int blueKills`。
 
@@ -192,6 +193,8 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 **`cstmm:set_face`（C2S）**：`string avatarType(16B)` + `string avatarId(32B)`——头像绑定（"qq"/"bili" + 纯数字账号 ID），空 avatarType = 清除。服务端校验（`PlayerProfile.validateAvatarBinding`）后写入玩家档案（`config/cstmm/data/players/<uuid>.json` 的 avatarType/avatarId 字段），成功后弹窗确认并向三处同步：重发自己的档案（履历页）、向战队全体在线成员重推 MINE（成员列表头像广播）、向本人重发队列快照（徽标右侧头像）。**服务端只存/发绑定，不解析图片直链**——头像图片由各客户端按绑定自行获取（QQ 拼接 qlogo 直链 / B站经 uapis 解析 face 字段）。
 
 **`cstmm:popup`（S2C）**：`string message(256B)`——客户端在匹配菜单/配置界面内弹对话框；其他界面或无界面时用全局弹窗界面（PopupScreen）承载，确定后返回原界面。
+
+**`cstmm:clan_hints`（S2C）**：`string json(32767B)`——`{"战队名":["成员1",...]}` 全服战队名+成员名快照，客户端写入 `CommandHintCache` 供 `/cstmm data get|edit|delete clan` 的 Tab 补全（建议 provider 在客户端执行，战队数据只在服务端）。触发时机：玩家 JOIN（单发）+ 战队任何变更（`ClanManager.save` 落盘点，全服广播）。损坏 JSON 客户端静默保留旧缓存；断线清空。
 
 **`cstmm:shop_data`（S2C）**：`bool eligible` + `varInt itemCount` + 循环 `{string itemId(256B) + varInt price + varInt maxPurchase}`。解码端 `count = max(0, readVarInt)` 防负数，`create` 静态工厂保证 itemCount 与列表长度一致。
 
@@ -318,8 +321,9 @@ applyConfigSync(json, persist=true)：解析 hash → ConfigDataCache.update* �
 1. **两端模组版本必须一致**（握手比对字符串相等）。不一致 → 客户端全部功能禁用（门禁在客户端，服务端仅 WARN）。
 2. **枚举 ordinal 追加原则**：`ActionType`、`StatusType` 只能在**末尾**追加新值；中间插入/删除/重排会使两端语义错位（wire 上只是整数）。
 3. **新增包**：必须两端同步注册 codec（S2C 还需客户端接收器，C2S 需服务端接收器），并同步部署 jar。
-4. **字段演进**：在既有包**末尾追加字段**是安全的做法；修改既有字段顺序/类型 = 破坏性变更，必须两端同版本。
-5. Fabric API 版本锁定 0.115.6+1.21.1；`fabric.mod.json` 中 `"fabric-api": "*"` 可按需收紧。
+4. **自定义命令参数类型**：`cstmm:quoted_name`（战队名引号参数，`QuotedNameArgumentType`）经 `ArgumentTypeRegistry` 注册——服务端命令树同步（CommandTreeS2CPacket）按 id 序列化参数类型，两端缺注册会断连；新增自定义类型同样处理。
+5. **字段演进**：在既有包**末尾追加字段**是安全的做法；修改既有字段顺序/类型 = 破坏性变更，必须两端同版本。
+6. Fabric API 版本锁定 0.115.6+1.21.1；`fabric.mod.json` 中 `"fabric-api": "*"` 可按需收紧。
 
 ## 11. 错误处理与日志
 

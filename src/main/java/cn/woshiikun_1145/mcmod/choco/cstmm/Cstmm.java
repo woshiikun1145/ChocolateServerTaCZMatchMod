@@ -1,13 +1,17 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.command.ModCommands;
+import cn.woshiikun_1145.mcmod.choco.cstmm.command.QuotedNameArgumentType;
 import cn.woshiikun_1145.mcmod.choco.cstmm.listener.EventListener;
 import cn.woshiikun_1145.mcmod.choco.cstmm.manager.*;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.command.v2.ArgumentTypeRegistry;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.command.argument.serialize.ConstantArgumentSerializer;
+import net.minecraft.util.Identifier;
 import net.minecraft.server.MinecraftServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,11 +47,19 @@ public class Cstmm implements ModInitializer {
         LOGGER.info("[CSTMM - Main] Initializing mod...");
 
         // 按序注册各子系统：网络通道 → 指令 → 事件监听 → 生命周期/每 tick 回调
-        NetworkHandler.register();
-        registerCommands();
-        EventListener.register();
-        registerServerEvents();
-        registerTickListener();
+        // 每步经 ModGuardian.run 包装：注册阶段发生异常即进入保护模式（后续步骤跳过、
+        // 已注册的入口全部停用），服务器可正常启动
+        ModGuardian.run("注册网络通道", NetworkHandler::register);
+        // 自定义参数类型注册：服务端命令树同步（CommandTreeS2CPacket）时按 id 序列化，
+        // 两端 mod 必须都含本类型，否则客户端收到未知参数类型会断连
+        ModGuardian.run("注册战队名参数类型", () -> ArgumentTypeRegistry.registerArgumentType(
+                Identifier.of("cstmm", "quoted_name"),
+                QuotedNameArgumentType.class,
+                ConstantArgumentSerializer.of(QuotedNameArgumentType::quotedName)));
+        ModGuardian.run("注册指令", this::registerCommands);
+        ModGuardian.run("注册事件监听", EventListener::register);
+        ModGuardian.run("注册生命周期回调", this::registerServerEvents);
+        ModGuardian.run("注册每tick回调", this::registerTickListener);
 
         LOGGER.info("[CSTMM - Main] Mod initialized successfully!");
     }
@@ -60,34 +72,43 @@ public class Cstmm implements ModInitializer {
     // 注册服务器生命周期回调：启动时加载配置与数据，停服时持久化保存
     private void registerServerEvents() {
         // 服务器启动完成：缓存实例并加载全局配置、玩家数据、背包存储
-        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+        // （加载失败进入保护模式：模组停用但服务器可正常运行）
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> ModGuardian.run("启动加载配置与数据", () -> {
             serverInstance = server;
             LOGGER.info("[CSTMM - Main] Server started, loading configurations...");
             ConfigManager.getInstance().load();
             PlayerDataManager.getInstance().loadAll();
             // initialize 内部会设置 RegistryLookup 并调用 loadBags，无需单独调用
             InventoryManager.initialize(server.getRegistryManager());
-        });
+        }));
 
-        // 服务器即将关闭：持久化玩家数据与背包存储，防止数据丢失
+        // 服务器即将关闭：持久化玩家数据与背包存储，防止数据丢失。
+        // 停服阶段保护模式已无意义，这里用独立 try/catch 记录但不中断——
+        // 确保第一项保存失败不会跳过第二项保存
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
             LOGGER.info("[CSTMM - Main] Server stopping, saving all data...");
-            PlayerDataManager.getInstance().saveAll();
-            InventoryManager.getInstance().saveAll();
+            try {
+                PlayerDataManager.getInstance().saveAll();
+            } catch (Throwable t) {
+                LOGGER.error("[CSTMM - Main] Failed to save player profiles", t);
+            }
+            try {
+                InventoryManager.getInstance().saveAll();
+            } catch (Throwable t) {
+                LOGGER.error("[CSTMM - Main] Failed to save bags", t);
+            }
         });
 
         // 服务器已完全停止：清除缓存实例，避免悬挂引用
-        ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
+        ServerLifecycleEvents.SERVER_STOPPED.register(server -> ModGuardian.run("清理服务器实例", () -> {
             serverInstance = null;
-        });
+        }));
     }
 
     // 注册每服务器 tick 回调：驱动对局调度器（计时/开局/结算）
+    // 调度体内部的异常由 MatchScheduler.onTick 的 ModGuardian 包装统一处理
     private void registerTickListener() {
-        ServerTickEvents.END_SERVER_TICK.register(server -> {
-            MatchScheduler.getInstance().onTick(server);
-            // 修复P0-2：VoteManager.tick() 已移至 MatchScheduler.onSecondTick()
-        });
+        ServerTickEvents.END_SERVER_TICK.register(MatchScheduler.getInstance()::onTick);
     }
 
     /** 【作用】获取当前服务器实例，供各管理器访问玩家/世界/注册表（服务端）。 */

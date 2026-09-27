@@ -59,6 +59,8 @@ public class EquipmentManager {
             String slot = equipSlot.getSlot();
             String itemNbt = equipSlot.getItemId();
 
+            // 槽位为 null/空串（JSON 显式 null 等异常数据）直接跳过，避免 NPE 干扰后续条目
+            if (slot == null || slot.isBlank()) continue;
             if (itemNbt == null || itemNbt.isEmpty()) continue;
 
             try {
@@ -83,18 +85,38 @@ public class EquipmentManager {
         Cstmm.LOGGER.debug("[CSTMM - EquipmentManager] Gave fallback gear to {}", player.getName());
     }
 
-    // 【作用】按槽位名（head/chest/legs/feet/mainhand/offhand）把物品放到对应装备栏，未知槽位塞背包或掉落
+    // 【作用】按槽位名把物品放到对应装备栏。兼容两种写法：
+    //         ① 简写：head/chest/legs/feet/mainhand/offhand（兜底装备与旧配置使用）；
+    //         ② 配置界面 /item replace entity 的 <slot> 语法：armor.head/chest/legs/feet/body、
+    //            weapon.mainhand/offhand、container.0~35（玩家主背包对应槽位）——此前仅识别
+    //            简写，配置界面保存的 armor.* 槽位会落入 default 分支被塞进背包，此处一并修正；
+    //         armor.body（玩家无身体盔甲槽）与其余未知槽位塞背包或掉落
     private void applyToSlot(ServerPlayerEntity player, String slot, ItemStack stack) {
         if (stack.isEmpty()) return;
 
         switch (slot.toLowerCase()) {
-            case "head" -> player.getInventory().armor.set(3, stack);
-            case "chest" -> player.getInventory().armor.set(2, stack);
-            case "legs" -> player.getInventory().armor.set(1, stack);
-            case "feet" -> player.getInventory().armor.set(0, stack);
-            case "mainhand" -> player.getInventory().setStack(player.getInventory().selectedSlot, stack);
-            case "offhand" -> player.getInventory().offHand.set(0, stack);
-            default -> player.getInventory().offerOrDrop(stack);
+            case "head", "armor.head" -> player.getInventory().armor.set(3, stack);
+            case "chest", "armor.chest" -> player.getInventory().armor.set(2, stack);
+            case "legs", "armor.legs" -> player.getInventory().armor.set(1, stack);
+            case "feet", "armor.feet" -> player.getInventory().armor.set(0, stack);
+            case "mainhand", "weapon.mainhand" -> player.getInventory().setStack(player.getInventory().selectedSlot, stack);
+            case "offhand", "weapon.offhand" -> player.getInventory().offHand.set(0, stack);
+            default -> {
+                // container.N：替换主背包 N 号槽位（/item replace 语义）；越界/非法退化为塞背包或掉落
+                String s = slot.toLowerCase();
+                if (s.startsWith("container.")) {
+                    try {
+                        int idx = Integer.parseInt(s.substring("container.".length()));
+                        if (idx >= 0 && idx < player.getInventory().main.size()) {
+                            player.getInventory().main.set(idx, stack);
+                            return;
+                        }
+                    } catch (NumberFormatException ignored) {
+                        // 非数字后缀，走下方 offerOrDrop
+                    }
+                }
+                player.getInventory().offerOrDrop(stack);
+            }
         }
     }
 

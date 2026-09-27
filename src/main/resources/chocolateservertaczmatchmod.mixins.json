@@ -4,6 +4,8 @@
   "package": "cn.woshiikun_1145.mcmod.choco.cstmm.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
+    "ClientConnectionAccessor",
+    "ServerCommonNetworkHandlerAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

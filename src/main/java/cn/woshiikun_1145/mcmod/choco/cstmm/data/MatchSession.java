@@ -38,6 +38,16 @@ public class MatchSession {
     private int overtimeCount;
     // 各玩家持续越界的已警告秒数（BoundaryChecker 读写）
     private final java.util.Map<UUID, Integer> boundaryWarningTime;
+    // 各玩家本局累计个人击杀数（EventListener 异队击杀时累加；HUD 花名册读取）
+    private final java.util.Map<UUID, Integer> playerKills;
+    // 各玩家本局累计死亡数（EventListener 死亡事件累加；用于本局 K/D）
+    private final java.util.Map<UUID, Integer> playerDeaths;
+    // 各玩家当前这条命的击杀数（死亡时清零并转存到 lastLifeKills）
+    private final java.util.Map<UUID, Integer> lifeKills;
+    // 各玩家上一条命的击杀数（死亡时冻结，重生不清除；HUD 击杀徽章读取）
+    private final java.util.Map<UUID, Integer> lastLifeKills;
+    // 玩家名缓存（uuid → 最近一次在线时的名字；离线玩家仍可显示卡片名）
+    private final java.util.Map<UUID, String> playerNames;
 
     // 构造：初始化空局，阶段为 IDLE，待 MatchManager 填充队伍并进入准备阶段
     public MatchSession(String mapName) {
@@ -53,6 +63,11 @@ public class MatchSession {
         this.isCompetitive = false;
         this.startTime = System.currentTimeMillis();
         this.boundaryWarningTime = new java.util.HashMap<>();
+        this.playerKills = new java.util.HashMap<>();
+        this.playerDeaths = new java.util.HashMap<>();
+        this.lifeKills = new java.util.HashMap<>();
+        this.lastLifeKills = new java.util.HashMap<>();
+        this.playerNames = new java.util.HashMap<>();
         this.overtimeCount = 0;
     }
 
@@ -119,6 +134,61 @@ public class MatchSession {
     /** 【作用】清除玩家的越界警告记录（回场或处决后调用）。 */
     public void resetBoundaryWarningTime(UUID playerUuid) {
         boundaryWarningTime.remove(playerUuid);
+    }
+
+    // ==================== 个人击杀/死亡统计（HUD 花名册用） ====================
+
+    /**
+     * 【作用】记录一次有效击杀（EventListener 异队玩家击杀时调用）：
+     * 本局个人击杀 +1、当前生命击杀 +1。
+     * 【被谁使用】EventListener 的 AFTER_DEATH 有效击杀路径。仅服务端。
+     */
+    public void recordKill(UUID killerUuid) {
+        playerKills.merge(killerUuid, 1, Integer::sum);
+        lifeKills.merge(killerUuid, 1, Integer::sum);
+    }
+
+    /**
+     * 【作用】记录一次死亡（EventListener 死亡事件调用，含环境死/越界处决）：
+     * 本局死亡数 +1；当前生命击杀冻结为上一条命战绩后清零。
+     * 冻结无条件执行（含 0 杀死亡）：上一条命确实没拿到击杀时徽章应归零，
+     * 而不是保留更早生命的旧值。
+     * 【被谁使用】EventListener 的 AFTER_DEATH（对局内玩家死亡即调用，无论死因）。仅服务端。
+     */
+    public void recordDeath(UUID killedUuid) {
+        playerDeaths.merge(killedUuid, 1, Integer::sum);
+        lastLifeKills.put(killedUuid, lifeKills.getOrDefault(killedUuid, 0));
+        lifeKills.put(killedUuid, 0);
+    }
+
+    /** 【作用】本局个人击杀数（无记录返回 0）。HUD 花名册构建读取。 */
+    public int getPlayerKills(UUID playerUuid) {
+        return playerKills.getOrDefault(playerUuid, 0);
+    }
+
+    /** 【作用】本局个人死亡数（无记录返回 0）。HUD 花名册构建读取。 */
+    public int getPlayerDeaths(UUID playerUuid) {
+        return playerDeaths.getOrDefault(playerUuid, 0);
+    }
+
+    /** 【作用】上一条命击杀数（无记录或从未死亡返回 0）。HUD 击杀徽章读取。 */
+    public int getLastLifeKills(UUID playerUuid) {
+        return lastLifeKills.getOrDefault(playerUuid, 0);
+    }
+
+    /**
+     * 【作用】缓存玩家名（对局内任何在线时刻调用；离线后花名册仍能显示其名字）。
+     * 【被谁使用】MatchManager（prepareMatch/registerAndSetupPlayer/handleRespawn/broadcastHudData）。仅服务端。
+     */
+    public void recordPlayerName(UUID playerUuid, String name) {
+        if (name != null && !name.isEmpty()) {
+            playerNames.put(playerUuid, name);
+        }
+    }
+
+    /** 【作用】读取缓存的玩家名（未缓存返回 null，调用方自行回退）。HUD 花名册构建读取。 */
+    public String getPlayerName(UUID playerUuid) {
+        return playerNames.get(playerUuid);
     }
 
     /** 【作用】对局已进行的毫秒数（距创建时刻）。 */

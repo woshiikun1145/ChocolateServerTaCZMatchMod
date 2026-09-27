@@ -50,7 +50,8 @@ public class Clan {
 
     public String getName() { return name; }
     public String getAbbreviation() { return abbreviation; }
-    public String getBadgeBase64() { return badgeBase64; }
+    // JSON 显式 null（手改 clans.json）会覆盖字段默认值空串，getter 兜底避免下游 isEmpty()/digest() NPE
+    public String getBadgeBase64() { return badgeBase64 != null ? badgeBase64 : ""; }
 
     /** 徽标变更时必须调用：失效内容寻址 id 缓存 */
     public void setBadgeBase64(String badge) {
@@ -75,11 +76,11 @@ public class Clan {
         if (badgeIdCache == null) {
             try {
                 byte[] hash = MessageDigest.getInstance("SHA-256")
-                        .digest(badgeBase64.getBytes(StandardCharsets.UTF_8));
+                        .digest(getBadgeBase64().getBytes(StandardCharsets.UTF_8));
                 badgeIdCache = HexFormat.of().formatHex(hash, 0, 8);
             } catch (Exception e) {
                 // SHA-256 必然存在；万一异常退化为长度+哈希码组合（仍保持 16 字符内、内容相关）
-                badgeIdCache = String.format("%08x%08x", badgeBase64.length(), badgeBase64.hashCode());
+                badgeIdCache = String.format("%08x%08x", getBadgeBase64().length(), getBadgeBase64().hashCode());
             }
         }
         return badgeIdCache;
