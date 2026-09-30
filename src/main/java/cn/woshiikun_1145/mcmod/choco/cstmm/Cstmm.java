@@ -1,17 +1,13 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.command.ModCommands;
-import cn.woshiikun_1145.mcmod.choco.cstmm.command.QuotedNameArgumentType;
 import cn.woshiikun_1145.mcmod.choco.cstmm.listener.EventListener;
 import cn.woshiikun_1145.mcmod.choco.cstmm.manager.*;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import net.fabricmc.api.ModInitializer;
-import net.fabricmc.fabric.api.command.v2.ArgumentTypeRegistry;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
-import net.minecraft.command.argument.serialize.ConstantArgumentSerializer;
-import net.minecraft.util.Identifier;
 import net.minecraft.server.MinecraftServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,12 +46,6 @@ public class Cstmm implements ModInitializer {
         // 每步经 ModGuardian.run 包装：注册阶段发生异常即进入保护模式（后续步骤跳过、
         // 已注册的入口全部停用），服务器可正常启动
         ModGuardian.run("注册网络通道", NetworkHandler::register);
-        // 自定义参数类型注册：服务端命令树同步（CommandTreeS2CPacket）时按 id 序列化，
-        // 两端 mod 必须都含本类型，否则客户端收到未知参数类型会断连
-        ModGuardian.run("注册战队名参数类型", () -> ArgumentTypeRegistry.registerArgumentType(
-                Identifier.of("cstmm", "quoted_name"),
-                QuotedNameArgumentType.class,
-                ConstantArgumentSerializer.of(QuotedNameArgumentType::quotedName)));
         ModGuardian.run("注册指令", this::registerCommands);
         ModGuardian.run("注册事件监听", EventListener::register);
         ModGuardian.run("注册生命周期回调", this::registerServerEvents);

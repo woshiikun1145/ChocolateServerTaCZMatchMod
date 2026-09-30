@@ -6,12 +6,9 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.Base64ImageDecoder;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.Base64ImageDecoder.CardTexture;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ConfigDataCache;
-import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.FaceCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.QueueStatusCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.ClientHandshakeState;
-import cn.woshiikun_1145.mcmod.choco.cstmm.client.network.ClientNetworkHandler;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
-import cn.woshiikun_1145.mcmod.choco.cstmm.data.PlayerProfile;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.MatchActionPayload;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.RequestQueueStatusPayload;
 import net.fabricmc.api.EnvType;
@@ -43,12 +40,13 @@ import java.util.concurrent.ThreadLocalRandom;
  * 网络去向（C2S）：
  * <ul>
  *   <li>JOIN_QUEUE / JOIN_QUICK / LEAVE_QUEUE → 服务端 NetworkHandler.handleMatchAction → QueueManager（入队/退队）</li>
- *   <li>REQUEST_PROFILE → 服务端 PlayerDataManager.syncProfileToPlayer 回发战绩 → drawProfile 展示</li>
+ *   <li>REQUEST_PROFILE / REQUEST_LEADERBOARD → 服务端回发自己的战绩（PlayerProfilePayload）与全服履历排行
+ *       （LeaderboardPayload 分片），由履历页 ProfileTabPanel 展示</li>
  *   <li>RequestQueueStatusPayload(subscribe) → 服务端队列状态推送订阅/退订（匹配页"取消匹配"按钮与队列页共用快照）</li>
  * </ul>
  * 入站数据来源（S2C，均由 ClientNetworkHandler 接收）：
  * 地图卡片 ← ConfigDataCache（服务端配置同步，变更时回调 refreshMaps）；
- * 服务端弹窗 ← showPopup；队列快照 ← QueueStatusCache；战绩 ← PlayerProfileCache。
+ * 服务端弹窗 ← showPopup；队列快照 ← QueueStatusCache；履历 ← PlayerProfileCache + LeaderboardCache（ProfileTabPanel 读取）。
  */
 @Environment(EnvType.CLIENT)
 public class MatchMenuScreen extends Screen {
@@ -92,18 +90,19 @@ public class MatchMenuScreen extends Screen {
     private final QueueTabPanel queuePanel = new QueueTabPanel(this);
     private final ClanTabPanel clanPanel = new ClanTabPanel(this);
     private final PersonalizeTabPanel personalizePanel = new PersonalizeTabPanel(this);
+    private final ProfileTabPanel profilePanel = new ProfileTabPanel(this);
 
     public MatchMenuScreen() {
         super(Text.literal("匹配菜单"));
 
-        sidebarButtons.add(new SidebarButton("🏠 欢迎", 0));
-        sidebarButtons.add(new SidebarButton("⚔ 匹配", 1));
-        sidebarButtons.add(new SidebarButton("📋 队列", 2));
-        sidebarButtons.add(new SidebarButton("🛡 战队", 3));
-        sidebarButtons.add(new SidebarButton("📊 履历", 4));
-        sidebarButtons.add(new SidebarButton("🎨 个性化", 6));
+        sidebarButtons.add(new SidebarButton("欢迎", 0));
+        sidebarButtons.add(new SidebarButton("匹配", 1));
+        sidebarButtons.add(new SidebarButton("队列", 2));
+        sidebarButtons.add(new SidebarButton("战队", 3));
+        sidebarButtons.add(new SidebarButton("履历", 4));
+        sidebarButtons.add(new SidebarButton("个性化", 6));
         // 配置界面设计上只能通过 /cstmm config 打开，匹配菜单不提供配置入口
-        sidebarButtons.add(new SidebarButton("ℹ 关于", 5));
+        sidebarButtons.add(new SidebarButton("关于", 5));
 
         loadMaps();
     }
@@ -160,7 +159,7 @@ public class MatchMenuScreen extends Screen {
                         secretBtn.visible = about;
                         switch (tabId) {
                             case 3 -> clanPanel.onShow();
-                            case 4 -> requestProfile();
+                            case 4 -> profilePanel.onShow();
                         }
                         // 队列状态订阅为整个菜单生命周期（init 订阅 / removed 退订），
                         // 匹配页的"取消匹配"按钮与队列页共用同一份推送快照，无需按页切换
@@ -254,15 +253,6 @@ public class MatchMenuScreen extends Screen {
                 "COMPETITIVE".equals(selectedMode) ? "§a✔ 竞技模式" : "§7竞技模式"));
     }
 
-    /** 履历页进入时触发：发 REQUEST_PROFILE → 服务端 PlayerDataManager 回发战绩包 → PlayerProfileCache，由 drawProfile 读取展示 */
-    private void requestProfile() {
-        // 使用网络包请求，不再使用命令
-        MatchActionPayload payload = new MatchActionPayload(
-                MatchActionPayload.ActionType.REQUEST_PROFILE, "", 0, ""
-        );
-        ClientPlayNetworking.send(payload);
-    }
-
     // 重写 renderBackground 阻止模糊
     @Override
     public void renderBackground(DrawContext context, int mouseX, int mouseY, float delta) {
@@ -302,7 +292,7 @@ public class MatchMenuScreen extends Screen {
 
         // 标题栏
         context.fill(0, 0, screenWidth, HEADER_HEIGHT, 0xCC222222);
-        Text title = Text.literal("🎯 Chocolate Server TaCZ Match Mod");
+        Text title = Text.literal("Chocolate Server TaCZ Match Mod");
         context.drawText(textRenderer, title, 20, 16, accent, true);
 
         // 侧边栏
@@ -365,7 +355,7 @@ public class MatchMenuScreen extends Screen {
             case 1 -> drawMatchCards(context, x, y, width, height, mouseX, mouseY, delta);
             case 2 -> queuePanel.draw(context, x, y, width, height, mouseX, mouseY);
             case 3 -> clanPanel.draw(context, x, y, width, height, mouseX, mouseY);
-            case 4 -> drawProfile(context, x, y, width, height);
+            case 4 -> profilePanel.draw(context, x, y, width, height, mouseX, mouseY);
             case 5 -> drawAbout(context, x, y, width, height);
             case 6 -> personalizePanel.draw(context, x, y, width, height, mouseX, mouseY);
             default -> drawWelcome(context, x, y, width, height);
@@ -508,6 +498,8 @@ public class MatchMenuScreen extends Screen {
         }
         // 个性化页按钮/色板
         if (selectedTab == 6 && personalizePanel.mouseClicked(mouseX, mouseY, button)) return true;
+        // 履历页排序下拉框
+        if (selectedTab == 4 && profilePanel.mouseClicked(mouseX, mouseY, button)) return true;
         if (selectedTab == 1) {
             int x = CARDS_START_X;
             int y = CARDS_START_Y - scrollOffset;
@@ -562,43 +554,6 @@ public class MatchMenuScreen extends Screen {
         close();
         // 不在客户端发"已加入"提示：入队结果以服务端回复为准（服务端成功入队会发确认，
         // 已在队列/对局中被拒也会发原因），避免客户端乐观提示与服务端拒绝消息自相矛盾
-    }
-
-    /** 履历页渲染：数据源为 PlayerProfileCache（由 requestProfile 的服务端回包填充），缓存未就绪时显示加载中；头像来自档案同步携带的 face 字段 */
-    private void drawProfile(DrawContext context, int x, int y, int width, int height) {
-        // 页面标题跟随主题色（个性化页设置）
-        context.drawText(textRenderer, "📊 玩家履历", x + 20, y + 20, ClientConfig.getThemeColorArgb(), true);
-
-        PlayerProfile profile = ClientNetworkHandler.PlayerProfileCache.getInstance().getProfile();
-        if (profile == null) {
-            context.drawText(textRenderer, "§7加载中...", x + 20, y + 50, 0xAAAAAA, true);
-            context.drawText(textRenderer, "§7（请稍候）", x + 20, y + 70, 0x666666, true);
-            return;
-        }
-
-        // 头像（个性化绑定，客户端按绑定自行获取图片）：置于资料块左侧；未设置时文本保持原位
-        int lineY = y + 50;
-        int spacing = 22;
-        int textX = x + 20;
-        if (FaceCache.hasOwn()) {
-            QueueTabPanel.drawAvatar(context, x + 20, lineY - 2, 48, FaceCache.getOwnType(), FaceCache.getOwnId());
-            textX = x + 80;
-        }
-        context.drawText(textRenderer, "§7玩家: §f" + profile.getPlayerName(), textX, lineY, 0xFFFFFF, true);
-        lineY += spacing;
-        context.drawText(textRenderer, "§7总击杀: §c" + profile.getTotalKills(), textX, lineY, 0xFFFFFF, true);
-        lineY += spacing;
-        context.drawText(textRenderer, "§7总被击杀: §9" + profile.getTotalDeaths(), textX, lineY, 0xFFFFFF, true);
-        lineY += spacing;
-        context.drawText(textRenderer, "§7KD: §e" + profile.getKDString(), textX, lineY, 0xFFFFFF, true);
-        lineY += spacing;
-        context.drawText(textRenderer, "§7参赛场次: §a" + profile.getTotalMatches(), textX, lineY, 0xFFFFFF, true);
-        lineY += spacing;
-        context.drawText(textRenderer, "§7胜利场次: §6" + profile.getTotalWins(), textX, lineY, 0xFFFFFF, true);
-        lineY += spacing;
-        double winRate = profile.getTotalMatches() > 0 ?
-                (double) profile.getTotalWins() / profile.getTotalMatches() * 100 : 0;
-        context.drawText(textRenderer, "§7胜率: §b" + String.format("%.1f", winRate) + "%", textX, lineY, 0xFFFFFF, true);
     }
 
     /** 关于页渲染：纯静态文字，交互按钮（仓库/报告问题/彩蛋）在 init 中创建 */
@@ -715,6 +670,10 @@ public class MatchMenuScreen extends Screen {
         }
         if (selectedTab == 3) {
             clanPanel.scroll(verticalAmount);
+            return true;
+        }
+        if (selectedTab == 4) {
+            profilePanel.scroll(verticalAmount);
             return true;
         }
         if (selectedTab == 1) {

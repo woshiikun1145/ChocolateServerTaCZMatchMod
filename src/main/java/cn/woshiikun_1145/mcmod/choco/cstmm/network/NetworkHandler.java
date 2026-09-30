@@ -103,6 +103,7 @@ public class NetworkHandler {
         PayloadTypeRegistry.playS2C().register(ConfigMetaPayload.ID, ConfigMetaPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(OpenConfigScreenPayload.ID, OpenConfigScreenPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(PlayerProfilePayload.ID, PlayerProfilePayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(LeaderboardPayload.ID, LeaderboardPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(HandshakeS2CPayload.ID, HandshakeS2CPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(ShopDataS2CPayload.ID, ShopDataS2CPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(ClanDataPayload.ID, ClanDataPayload.CODEC);
@@ -738,6 +739,7 @@ public class NetworkHandler {
             case VOTE_YES -> VoteManager.getInstance().handleVote(player, true);
             case VOTE_NO -> VoteManager.getInstance().handleVote(player, false);
             case REQUEST_PROFILE -> PlayerDataManager.getInstance().syncProfileToPlayer(player);
+            case REQUEST_LEADERBOARD -> sendLeaderboard(player);
             case BUY_ITEM -> {
                 // 资格校验：仅竞技模式对局中的玩家可购买（模式按会话判定，地图配置已无模式）
                 MatchSession buySession = MatchManager.getInstance().getPlayerSession(player.getUuid());
@@ -1259,6 +1261,38 @@ public class NetworkHandler {
             return;
         }
         ServerPlayNetworking.send(player, new PlayerProfilePayload(json));
+    }
+
+    /**
+     * 【作用】下发全服履历排行（S2C LeaderboardPayload 分片）：把全部内存档案序列化为紧凑 JSON
+     * （{"players":[{"name":..,"kills":..,"deaths":..,"matches":..,"wins":..},...]}，只含排行页所需字段，
+     * 不下发 UUID/头像绑定等大字段），按 UTF-8 字节分片发送；排序由客户端本地完成。
+     * 【被谁使用】NetworkHandler 内部 handleMatchAction 的 REQUEST_LEADERBOARD 动作（履历页打开时请求）。服务端。
+     */
+    private static void sendLeaderboard(ServerPlayerEntity player) {
+        JsonObject root = new JsonObject();
+        JsonArray players = new JsonArray();
+        for (PlayerProfile p : PlayerDataManager.getInstance().getAllProfiles().values()) {
+            String name = p.getPlayerName();
+            if (name == null || name.isBlank()) {
+                // 极端情况：磁盘档案缺少名字字段——回退 UUID 前 8 位保证行可展示
+                name = p.getPlayerUuid() != null ? p.getPlayerUuid().toString().substring(0, 8) : "?";
+            }
+            JsonObject o = new JsonObject();
+            o.addProperty("name", name);
+            o.addProperty("kills", p.getTotalKills());
+            o.addProperty("deaths", p.getTotalDeaths());
+            o.addProperty("matches", p.getTotalMatches());
+            o.addProperty("wins", p.getTotalWins());
+            players.add(o);
+        }
+        root.add("players", players);
+        String json = GSON.toJson(root);
+        List<String> chunks = splitByUtf8Bytes(json, CONFIG_CHUNK_BYTES);
+        int totalParts = chunks.size();
+        for (int i = 0; i < totalParts; i++) {
+            ServerPlayNetworking.send(player, new LeaderboardPayload(i, totalParts, chunks.get(i)));
+        }
     }
 
     /**

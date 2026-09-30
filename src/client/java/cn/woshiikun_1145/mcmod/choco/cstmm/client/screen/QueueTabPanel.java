@@ -56,8 +56,14 @@ public class QueueTabPanel {
         }
     }
 
-    // 【作用】当前轮换展示的模式名（"休闲"/"竞技"），与 currentModeData 的匹配键一致
+    // 【作用】当前轮换展示的模式名（"休闲模式"/"竞技模式"），与服务端 ModeRow.mode（modeDisplayName）完全一致，
+    // 作为 currentModeData 的匹配键（旧版用"休闲"/"竞技"短名匹配导致队列人数/玩家列表永远为空）
     private String currentModeLabel() {
+        return showingCasual ? "休闲模式" : "竞技模式";
+    }
+
+    /** 模式短标签（"[休闲]"/"[竞技]"，地图行左下角展示用，不带"模式"后缀） */
+    private String currentModeTag() {
         return showingCasual ? "休闲" : "竞技";
     }
 
@@ -248,7 +254,7 @@ public class QueueTabPanel {
         context.drawText(tr, "§7" + idText, x + cellA - 10 - tr.getWidth(idText), y + 14, 0xAAAAAA, true);
         context.drawText(tr, "§e" + (cfg != null && cfg.getWinCondition() == MapConfig.WinCondition.KILLS ? "按击杀" : "按计时"),
                 x + 12, y + height - 22, 0xFFFFFF, true);
-        String modeTag = "§7[§e" + currentModeLabel() + "§7]";
+        String modeTag = "§7[§e" + currentModeTag() + "§7]";
         context.drawText(tr, modeTag, x + cellA - 10 - tr.getWidth(modeTag), y + height - 22, 0xFFFFFF, true);
 
         // 当前轮换到的模式数据
@@ -387,9 +393,9 @@ public class QueueTabPanel {
     /**
      * 【作用】按显示宽度截断文本并追加省略号（§ 格式码不占宽度、直接参与测量；
      * 截断落在 § 后时丢弃悬空的 § 字符，避免渲染出乱码）。
-     * 【被谁使用】drawOwnRow / drawClanRow 中列长文案。
+     * 【被谁使用】drawOwnRow / drawClanRow 中列长文案、ProfileTabPanel 排行玩家名。
      */
-    private static String truncate(TextRenderer tr, String s, int maxWidth) {
+    static String truncate(TextRenderer tr, String s, int maxWidth) {
         if (maxWidth <= 0) return "";
         if (tr.getWidth(s) <= maxWidth) return s;
         String t = s;

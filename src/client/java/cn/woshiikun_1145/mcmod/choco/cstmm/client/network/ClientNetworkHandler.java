@@ -7,6 +7,7 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClanCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ConfigDataCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ConfigDiskCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.FaceCache;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.LeaderboardCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.QueueStatusCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ShopDataCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.hud.HudOverlay;
@@ -195,6 +196,10 @@ public class ClientNetworkHandler {
             }
         }));
 
+        // ========== 全服履历排行接收（分片重组） ==========
+        ClientPlayNetworking.registerGlobalReceiver(LeaderboardPayload.ID, (payload, context) -> context.client().execute(() ->
+                LeaderboardCache.getInstance().apply(payload.partIndex(), payload.totalParts(), payload.data())));
+
         // ========== 握手请求接收（服务端主动发起） ==========
         ClientPlayNetworking.registerGlobalReceiver(HandshakeS2CPayload.ID, (payload, context) -> context.client().execute(() ->
                 ClientHandshakeState.onResponse(payload.serverVersion())
@@ -293,12 +298,13 @@ public class ClientNetworkHandler {
             ClientHandshakeState.onDisconnect();
             // 重置配置哈希握手状态（下次进服重新比对；磁盘缓存保留，重连可免收全量配置）
             pendingConfigHashHandshake = true;
-            // 断线时重置 HUD 显示并清空配置/商店/战队/队列/徽标/头像缓存，避免残留上一服务器的数据
+            // 断线时重置 HUD 显示并清空配置/商店/战队/队列/履历排行/徽标/头像缓存，避免残留上一服务器的数据
             HudOverlay.reset();
             ConfigDataCache.getInstance().clear();
             ShopDataCache.getInstance().clear();
             ClanCache.getInstance().clear();
             QueueStatusCache.getInstance().clear();
+            LeaderboardCache.getInstance().clear();
             BadgeCache.clear();
             FaceCache.clear();
             CommandHintCache.clear();

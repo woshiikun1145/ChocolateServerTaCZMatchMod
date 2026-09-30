@@ -288,7 +288,7 @@ public class QueueManager implements QueueApi {
         // 修复：快速匹配不需要存储team，用特殊标识即可
         playerQueueMap.put(uuid, new QueueEntry(QUICK_MAP_ID, queueMode, -1));  // -1 表示快速匹配
 
-        player.sendMessage(Text.literal("§a✅ 你已加入快速匹配队列，系统将自动分配地图。"), false);
+        player.sendMessage(Text.literal("§a你已加入快速匹配队列，系统将自动分配地图。"), false);
         Cstmm.LOGGER.debug("[CSTMM - QueueManager] {} joined quick queue ({})", player.getName(), queueMode);
         onQueueChanged();
     }

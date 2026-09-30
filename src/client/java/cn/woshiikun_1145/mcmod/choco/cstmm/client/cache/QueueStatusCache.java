@@ -105,13 +105,13 @@ public class QueueStatusCache {
             public String id = "";
             // 地图当前状态
             public String status = "AVAILABLE";
-            /** 按模式独立的队列数据（"竞技" / "休闲"），客户端每 3 秒轮换展示 */
+            /** 按模式独立的队列数据（"竞技模式" / "休闲模式"，与服务端 modeDisplayName 一致），客户端每 3 秒轮换展示 */
             public List<ModeRow> modes = List.of();
         }
 
         /** 单个模式下的队列数据 */
         public static class ModeRow {
-            // 模式名（"竞技" / "休闲"）
+            // 模式名（"竞技模式" / "休闲模式"，客户端按同名字符串匹配当前轮换展示的模式）
             public String mode = "";
             /** 排队总人数（队伍在开局时才分配，队列无蓝红之分） */
             public int count = 0;

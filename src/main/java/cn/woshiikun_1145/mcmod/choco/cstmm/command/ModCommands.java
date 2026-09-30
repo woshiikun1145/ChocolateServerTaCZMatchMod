@@ -124,6 +124,20 @@ public class ModCommands {
     private static final List<String> CLAN_EDIT_FIELDS = List.of("name", "abbr", "limit", "leader", "badge");
 
     /**
+     * 【作用】校验战队名写法：引号内名字首尾不得有空白（{@code " Team Kun"} 不合法——
+     *         名字必须被引号直接包裹，正确写法 {@code "Team Kun"}）。
+     * @return null 表示合法，否则返回可直接发给玩家的错误消息
+     * 【被谁使用】dataGetClan / dataEditClan / dataDeleteClan（string() 参数剥引号后的名字校验）。
+     */
+    private static String checkClanNameFormat(String name) {
+        if (!name.isEmpty() && (name.charAt(0) == ' ' || name.charAt(name.length() - 1) == ' ')) {
+            return "§c战队名写法不正确: §f\"" + name + "\" §7→ 引号必须直接包裹名字，"
+                    + "正确写法: §f\"" + name.trim() + "\"";
+        }
+        return null;
+    }
+
+    /**
      * 【作用】注册 /cstmm 命令树根节点，并挂接 queue/match/vote/config/reload/data 各子命令分支。
      * 【被谁使用】Cstmm#onInitialize（以方法引用注册到 Fabric CommandRegistrationCallback，服务端命令注册阶段调用）。
      */
@@ -488,16 +502,17 @@ public class ModCommands {
                                 .then(CommandManager.argument("field", StringArgumentType.word())
                                         .suggests(ModCommands::suggestPlayerGetFields)
                                         .executes(guard("data.get.player", ModCommands::dataGetPlayer)))))
-                // 战队名强制带引号：literal(") 由 Brigadier 消耗开引号（无引号输入解析失败），
-                // QuotedNameArgumentType 读"名字+闭引号"并自带建议（候选=裸名+闭引号，Tab 一击补全合法引号名）
+                // 战队名：string() 由 Brigadier 原生支持引号包裹空格（剥引号、处理转义）；
+                // 含空格名字必须加引号（无引号输入读到空格即停，后续词解析失败）；
+                // 引号内名字首尾不得有空白（" Team Kun" 不合法，执行器拒绝并提示正确写法）
                 .then(CommandManager.literal("clan")
-                        .then(CommandManager.literal("\"")
-                                .then(CommandManager.argument("clan", QuotedNameArgumentType.quotedName())
-                                        // 省略字段输出战队摘要；指定字段输出单值
-                                        .executes(guard("data.get.clan", ModCommands::dataGetClan))
-                                        .then(CommandManager.argument("field", StringArgumentType.word())
-                                                .suggests(ModCommands::suggestClanGetFields)
-                                                .executes(guard("data.get.clan", ModCommands::dataGetClan))))))
+                        .then(CommandManager.argument("clan", StringArgumentType.string())
+                                .suggests(ModCommands::suggestClanNames)
+                                // 省略字段输出战队摘要；指定字段输出单值
+                                .executes(guard("data.get.clan", ModCommands::dataGetClan))
+                                .then(CommandManager.argument("field", StringArgumentType.word())
+                                        .suggests(ModCommands::suggestClanGetFields)
+                                        .executes(guard("data.get.clan", ModCommands::dataGetClan))))))
                 // 单张地图查询：省略字段输出全字段摘要；指定字段输出单值
                 .then(CommandManager.literal("map")
                         .then(CommandManager.argument("mapId", StringArgumentType.string())
@@ -515,7 +530,7 @@ public class ModCommands {
                 .then(CommandManager.literal("maps")
                         .executes(guard("data.get.maps", ctx -> dataGetConfigItem(ctx, "maps"))))
                 .then(CommandManager.literal("clans")
-                        .executes(guard("data.get.clans", ctx -> dataGetConfigItem(ctx, "clans")))));
+                        .executes(guard("data.get.clans", ctx -> dataGetConfigItem(ctx, "clans"))));
 
         // ----- edit player / edit clan / edit map / edit global -----
         data.then(CommandManager.literal("edit")
@@ -539,15 +554,15 @@ public class ModCommands {
                                 .then(CommandManager.literal("name")
                                         .then(CommandManager.argument("newName", StringArgumentType.greedyString())
                                                 .executes(guard("data.edit.player.name", ModCommands::dataEditPlayerName))))))
-                // 战队名强制带引号（同 get）：字段 word、值 greedy 均为独立参数
+                // 战队名：string() 原生引号支持；字段 word、值 greedy 均为独立参数
                 .then(CommandManager.literal("clan")
-                        .then(CommandManager.literal("\"")
-                                .then(CommandManager.argument("clan", QuotedNameArgumentType.quotedName())
-                                        .then(CommandManager.argument("field", StringArgumentType.word())
-                                                .suggests(ModCommands::suggestClanFields)
-                                                .then(CommandManager.argument("value", StringArgumentType.greedyString())
-                                                        .suggests(ModCommands::suggestClanValue)
-                                                        .executes(guard("data.edit.clan", ModCommands::dataEditClan)))))))
+                        .then(CommandManager.argument("clan", StringArgumentType.string())
+                                .suggests(ModCommands::suggestClanNames)
+                                .then(CommandManager.argument("field", StringArgumentType.word())
+                                        .suggests(ModCommands::suggestClanFields)
+                                        .then(CommandManager.argument("value", StringArgumentType.greedyString())
+                                                .suggests(ModCommands::suggestClanValue)
+                                                .executes(guard("data.edit.clan", ModCommands::dataEditClan))))))
                 // 地图配置命令侧编辑：全部字段走 <字段> <值(greedy)>，列表用 add/remove/clear 子操作
                 .then(CommandManager.literal("map")
                         .then(CommandManager.argument("mapId", StringArgumentType.string())
@@ -574,11 +589,11 @@ public class ModCommands {
                                 .then(CommandManager.argument("target", StringArgumentType.word())
                                         .suggests(ModCommands::suggestDeleteTargets)
                                         .executes(guard("data.delete.player", ModCommands::dataDeletePlayer)))))
-                // 战队名强制带引号（同 get/edit）
+                // 战队名：string() 原生引号支持（含空格名字必须加引号）
                 .then(CommandManager.literal("clan")
-                        .then(CommandManager.literal("\"")
-                                .then(CommandManager.argument("clan", QuotedNameArgumentType.quotedName())
-                                        .executes(guard("data.delete.clan", ModCommands::dataDeleteClan)))))
+                        .then(CommandManager.argument("clan", StringArgumentType.string())
+                                .suggests(ModCommands::suggestClanNames)
+                                .executes(guard("data.delete.clan", ModCommands::dataDeleteClan))))
                 // 删除地图：正在对局中使用的地图拒绝删除（防对局僵死）
                 .then(CommandManager.literal("map")
                         .then(CommandManager.argument("mapId", StringArgumentType.string())
@@ -644,6 +659,11 @@ public class ModCommands {
     private static int dataGetClan(CommandContext<ServerCommandSource> ctx) {
         String name = StringArgumentType.getString(ctx, "clan");
         String field = optionalField(ctx);
+        String nameErr = checkClanNameFormat(name);
+        if (nameErr != null) {
+            ctx.getSource().sendMessage(Text.literal(nameErr));
+            return 0;
+        }
         Clan clan = ClanManager.getInstance().getClan(name);
         if (clan == null) {
             ctx.getSource().sendMessage(Text.literal("§c未找到战队: " + name
@@ -819,6 +839,11 @@ public class ModCommands {
         String name = StringArgumentType.getString(ctx, "clan");
         String field = StringArgumentType.getString(ctx, "field").toLowerCase();
         String value = StringArgumentType.getString(ctx, "value").trim();
+        String nameErr = checkClanNameFormat(name);
+        if (nameErr != null) {
+            ctx.getSource().sendMessage(Text.literal(nameErr));
+            return 0;
+        }
         ClanManager clans = ClanManager.getInstance();
         Clan clan = clans.getClan(name);
         if (clan == null) {
@@ -1502,8 +1527,12 @@ public class ModCommands {
 
     /** data delete clan：删除战队（等同解散：清除索引并落盘，在线成员收到通知与最新 MINE） */
     private static int dataDeleteClan(CommandContext<ServerCommandSource> ctx) {
-        // QuotedNameArgumentType 已剥引号：参数即战队名（强制引号格式）
         String name = StringArgumentType.getString(ctx, "clan");
+        String nameErr = checkClanNameFormat(name);
+        if (nameErr != null) {
+            ctx.getSource().sendMessage(Text.literal(nameErr));
+            return 0;
+        }
         String err = ClanManager.getInstance().deleteByAdmin(name);
         if (err != null) {
             ctx.getSource().sendMessage(Text.literal(err));
@@ -1704,7 +1733,7 @@ public class ModCommands {
                     == net.fabricmc.api.EnvType.SERVER;
 
     /** 【作用】全部战队名（SERVER=ClanManager 本地数据；CLIENT=clan_hints 缓存，未到则空）。
-     *  包私有：QuotedNameArgumentType 的名字建议数据源也使用。 */
+     *  包私有：suggestClanNames（战队名 Tab 补全）的数据源。 */
     static List<String> hintClanNames() {
         if (IS_SERVER_ENV) return ClanManager.getInstance().getAllClanNames();
         return CommandHintCache.isEmpty() ? List.of() : CommandHintCache.getNames();
@@ -1722,6 +1751,35 @@ public class ModCommands {
         }
         List<String> members = CommandHintCache.isEmpty() ? null : CommandHintCache.getMembers(clanName);
         return members == null ? List.of() : members;
+    }
+
+    /** data get/edit/delete clan 的战队名补全（string() 参数）：
+     *  引号输入 → 建议 "完整名"（选中即合法引号写法，含空格名可直接补全）；
+     *  无引号输入 → 建议裸词（含空格名选中后解析会读错位，执行器/解析错误会引导加引号）。
+     *  注意 Brigadier 建议必须以已输入整段为前缀，故引号场景建议文本保留前导引号。
+     *  provider 异常整体兜底降级为无建议（Brigadier 会静默吞异常，留日志便于排查）。 */
+    private static CompletableFuture<Suggestions> suggestClanNames(CommandContext<ServerCommandSource> ctx,
+                                                                   SuggestionsBuilder builder) {
+        try {
+            String remaining = builder.getRemaining();
+            if (remaining.startsWith("\"")) {
+                // 引号输入：剥掉前导引号做前缀匹配，建议 = 前导引号 + 完整名 + 闭引号
+                String prefix = remaining.substring(1).toLowerCase();
+                if (prefix.indexOf('"') >= 0) return builder.buildFuture(); // 已闭引号，补全阶段结束
+                for (String name : hintClanNames()) {
+                    if (name.toLowerCase().startsWith(prefix)) builder.suggest("\"" + name + "\"");
+                }
+                return builder.buildFuture();
+            }
+            String low = remaining.toLowerCase();
+            for (String name : hintClanNames()) {
+                if (name.toLowerCase().startsWith(low)) builder.suggest(name);
+            }
+            return builder.buildFuture();
+        } catch (Exception e) {
+            Cstmm.LOGGER.warn("[CSTMM - Commands] suggestClanNames failed", e);
+            return Suggestions.empty();
+        }
     }
 
     /** data edit player 的字段补全（avatar 走独立字面量分支，仅作提示展示） */

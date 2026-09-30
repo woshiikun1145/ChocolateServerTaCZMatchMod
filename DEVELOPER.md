@@ -50,7 +50,7 @@
 | `EventListener` | 玩家加入（握手触发）、死亡重生（回出生点）、伤害（友伤判定）、断线清理 |
 | `BandwidthTracker`（util） | `/cstmm debug bandwidth` 服务器带宽统计：玩家 JOIN 时向连接 Netty 管线最外侧注入出/入站字节计数器（`mixin` 包两个 Accessor 打通 protected/private 字段），1Hz 守护线程采样速率与逐秒记录 |
 | `mixin` 包 | Mixin 访问器（`ClientConnectionAccessor`/`ServerCommonNetworkHandlerAccessor`），仅供带宽统计读取连接管线；无注入型 Mixin |
-| `QuotedNameArgumentType`（command） | 战队名引号参数类型（`cstmm:quoted_name`，经 ArgumentTypeRegistry 注册）：literal `"` + 名字 + 闭引号，强制 `/cstmm data get\|edit\|delete clan` 的战队名带引号；自带 Tab 建议（候选 = 名字+闭引号），名字内空白自动 trim、支持 `\"`/`\\` 转义 |
+| 命令参数说明 | 战队名参数用原生 `StringArgumentType.string()`（引号包裹空格名由 Brigadier 原生解析）——**不使用自定义 ArgumentType**（服务器环境限制）；战队名建议数据源为 `clan_hints` 同步缓存（服务端执行时用 ClanManager） |
 
 ### 2.2 客户端模块
 
@@ -61,9 +61,9 @@
 | `ClientHandshakeState` | 握手状态机，全部功能的门禁 |
 | `ConfigDataCache` | 配置同步结果的客户端缓存（供界面渲染） |
 | `ConfigDiskCache` | 配置磁盘持久缓存（按服务器标识隔离；重连哈希一致免收全量配置） |
-| `MatchMenuScreen` | 匹配菜单（欢迎/匹配/队列/战队/履历/个性化/关于页，卡片背景 cover 裁剪渲染，关于页含仓库/问题反馈链接与"千万别点"彩蛋入口）；队列页/战队页/个性化页由 QueueTabPanel / ClanTabPanel / PersonalizeTabPanel 渲染 |
-| `QueueTabPanel` / `ClanTabPanel` / `PersonalizeTabPanel` | 队列状态页（own/clan/每图状态 + 渐变地图图）、战队页（列表/搜索/创建/详情/成员管理）与个性化页（主题色 + QQ/B站头像绑定） |
-| `ClanCache` / `QueueStatusCache` | 战队与队列状态 JSON 缓存（clan_data / queue_status 包） |
+| `MatchMenuScreen` | 匹配菜单（欢迎/匹配/队列/战队/履历/个性化/关于页，卡片背景 cover 裁剪渲染，关于页含仓库/问题反馈链接与"千万别点"彩蛋入口）；队列/战队/履历/个性化页由 QueueTabPanel / ClanTabPanel / ProfileTabPanel / PersonalizeTabPanel 渲染（履历页：上 1/3 自己履历 + 下 2/3 全服排行，可滚动，右上角下拉选择 K/D/胜率/总击杀排序） |
+| `QueueTabPanel` / `ClanTabPanel` / `ProfileTabPanel` / `PersonalizeTabPanel` | 队列状态页（own/clan/每图状态 + 渐变地图图）、战队页（列表/搜索/创建/详情/成员管理）、履历页（自己履历 + 全服排行）与个性化页（主题色 + QQ/B站头像绑定） |
+| `ClanCache` / `QueueStatusCache` / `LeaderboardCache` | 战队/队列状态/全服排行 JSON 缓存（clan_data / queue_status / leaderboard 包） |
 | `FaceCache` / `FaceImageCache` | 自己的头像绑定缓存（档案同步携带 avatarType/avatarId）与头像图片异步获取（QQ 拼接 qlogo 直链 / B站经 uapis 解析 face 直链，内存缓存 + 失败冷却；断线清空） |
 | `ClientConfig` | 客户端个性化配置 `config/cstmm/client/config.json`（当前仅界面主题色，懒加载 + 原子落盘） |
 | `BadgeCache` | 战队徽标两级缓存（badge 包按 badgeId 重组，落盘 `config/cstmm/client/cache/badges/<id>.b64`；进服上报磁盘已有 id 服务端免重发；内存+磁盘均缺失时自动发 request_badge 补发；断线仅清内存，磁盘保留跨重连复用） |
@@ -104,6 +104,7 @@
 | `cstmm:match_status` | S2C | 对局状态消息广播 |
 | `cstmm:hud_data` | S2C | HUD 数据（每秒推送） |
 | `cstmm:player_profile` | S2C | 玩家履历（JSON） |
+| `cstmm:leaderboard` | S2C | 全服履历排行（紧凑 JSON 分片；履历页打开时请求，K/D/胜率/总击杀排序由客户端本地完成） |
 | `cstmm:open_config_screen` | S2C | 服务端请求打开 OP 配置界面（空包） |
 | `cstmm:shop_data` | S2C | 商店数据（购买资格 + 商品列表） |
 | `cstmm:clan_action` | C2S | 战队操作（创建/加入/退出/解散/转让/踢人/编辑/查询；大徽标自动分片上传） |
@@ -137,17 +138,20 @@
 **match_action**（C2S）：`enum action` + `string mapName(64B)` + `int team` + `string target(64B)`
 
 - `ActionType` 枚举（ordinal 序列化，**只能在末尾追加**）：
-  `JOIN_QUEUE, LEAVE_QUEUE, VOTE_YES, VOTE_NO, VOTE_OVERTIME, SELECT_TEAM, BUY_ITEM, REQUEST_PROFILE, REQUEST_SHOP, JOIN_QUICK`
+  `JOIN_QUEUE, LEAVE_QUEUE, VOTE_YES, VOTE_NO, VOTE_OVERTIME, SELECT_TEAM, BUY_ITEM, REQUEST_PROFILE, REQUEST_SHOP, JOIN_QUICK, REQUEST_LEADERBOARD`
 - `JOIN_QUEUE`：mapName=地图 ID（**不再接受 `quick` 伪地图 ID**，与真实地图名冲突已修复）；team=队伍偏好（1 红 / 2 蓝 / 其他=自动）；**target=模式**（`COMPETITIVE`/`CASUAL`，空或非法按竞技兜底）
 - `JOIN_QUICK`：快速匹配专用动作，mapName/team 空闲，**target=模式**（同上规则）；进入按模式独立的快速匹配队列
 - `BUY_ITEM`：mapName 空闲，team=商品下标
 - `REQUEST_SHOP`：请求当前可购买的商品数据
+- `REQUEST_LEADERBOARD`：请求全服履历排行（履历页打开时发送；服务端以 `cstmm:leaderboard` 分片回发）
 
 **hud_data**（S2C）：`string mapName(64B)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame` + `varInt phase`（GamePhase ordinal）+ `string rosterJson(65536B)`。对局期间每秒广播（订阅式去重：内容不变跳过），结束时发 `inGame=false` 清除包。`remainingSeconds` 准备阶段=准备倒计时、战斗阶段=对局剩余秒数。`rosterJson` 为花名册 JSON（字段 u/n/t/k/d/lk/c/b/at/ai，详见 NETWORK.md），血量/存活由客户端本地读取。相关服务端新增：MatchSession 个人击杀/死亡/本条命击杀/上一条命击杀统计（EventListener 击杀与死亡事件写入）与玩家名缓存（setupPlayer 写入）。
 
 **match_status**（S2C）：`enum type（MATCH_STARTING / MATCH_ENDED / VOTE_STARTED / VOTE_RESULT / COUNTDOWN）` + `string message(128B)` + `int redKills` + `int blueKills`。
 
 **player_profile**（S2C）：履历 JSON 字符串；**UTF-8 字节数 ≥ 65536 时跳过发送**并 WARN（按字节校验，不是字符数）。
+
+**leaderboard**（S2C）：分片包（`varInt partIndex` + `varInt totalParts` + `string data(32767B)`，每片 ≤30000 字节），拼接后为 `{"players":[{"name","kills","deaths","matches","wins"},...]}`——全服档案的排行字段快照。排序（K/D、胜率、总击杀）由客户端本地完成；履历页打开时经 `REQUEST_LEADERBOARD` 触发，重新切页即更新。详见 NETWORK.md §5.2。
 
 **shop_data**（S2C）：`bool eligible` + `varInt itemCount` + 循环 `string itemId(256B)` + `varInt price` + `varInt maxPurchase`。数据流：客户端打开 ShopScreen 时在**构造器**发送 `REQUEST_SHOP`（放 init 会因界面刷新循环重复请求）→ 服务端校验（活跃对局 + isCompetitive）→ 回 `shop_data` → `ShopDataCache` 缓存并刷新界面。
 
@@ -170,7 +174,7 @@
 - 枚举字段使用 **ordinal 序列化**：`ActionType`、`MatchStatusPayload.StatusType` 只能在枚举**末尾**追加新值，中间插入/删除会导致两端语义错位。
 - 服务端与客户端模组版本必须一致；Fabric API 使用锁定的 0.115.6+1.21.1（`fabric.mod.json` 声明 `"fabric-api": "*"`，可按需收紧为 `>=0.115.6+1.21.1`）。
 - 新增 S2C/C2S 包时两端必须同步注册，否则解码不一致会被原版断开连接。
-- **自定义命令参数类型**（`cstmm:quoted_name`，战队名引号参数）经 `ArgumentTypeRegistry` 注册且两端一致——命令树同步按 id 序列化参数类型，客户端缺注册会断连。
+- **不使用自定义命令参数类型**（服务器环境限制）：战队名参数用原生 `StringArgumentType.string()`，引号包裹空格名由 Brigadier 原生解析；命令树同步无自定义类型依赖。
 - 原版限制：S2C 单包 64KB、C2S 单包 32768 字节——配置同步因此引入分片（下节）。
 
 ## 4. 配置同步与分片机制
@@ -250,11 +254,11 @@
 | `/cstmm data restore bags <玩家>` | OP≥2 | 恢复玩家全部已保存背包 |
 | `/cstmm data restore bags <玩家> <槽位>` | OP≥2 | 恢复指定槽位（0-40） |
 | `/cstmm data get player <玩家名\|UUID> [字段]` | OP≥2 | 查看玩家战绩档案（支持离线玩家，全量输出含头像绑定行）；可选字段输出单值：kills / deaths / matches / wins / penaltydeaths / kd / name / uuid / avatar（未绑定时显示"未绑定"）/ bags（背包快照概要：保存时间+非空物品数） |
-| `/cstmm data get clan "<战队名>" [字段]` | OP≥2 | 查看战队信息；可选字段输出单值：name / abbr / limit / leader / members / badge（超长 base64 只回长度与文件位置）/ createdat。**战队名必须带引号**（自定义 `cstmm:quoted_name` 参数类型：literal `"` + 名字 + 闭引号，由 Brigadier 强制，无引号输入解析失败）；Tab 补全链：`clan ` → `"`（引号字面量自动建议）→ `"` 后 Tab 给出 `名字+"` 候选（选中即完整引号名）→ 字段（裸词）。名字建议数据源为 `clan_hints` 同步缓存（服务端执行时用 ClanManager） |
+| `/cstmm data get clan "<战队名>" [字段]` | OP≥2 | 查看战队信息；可选字段输出单值：name / abbr / limit / leader / members / badge（超长 base64 只回长度与文件位置）/ createdat。**战队名含空格必须加引号**（string() 参数由 Brigadier 原生读引号并剥引号；无引号输入读到空格即停 → 解析失败）；**引号内名字首尾不得有空白**（`" Team Kun"` 不合法，执行器拒绝并提示正确写法 `"Team Kun"`）。Tab 补全：引号输入（`"Te`）→ 建议 `"Team Kun"` 完整引号名；无引号输入 → 裸词候选。字段为独立参数，Tab 裸字段词 |
 | `/cstmm data get map <地图ID> [字段]` | OP≥2 | 查看单张地图配置：省略字段输出全字段摘要；指定字段输出单值（id / displayname / enabled / wincondition / targetkills / maxduration / tierule / boundary / redboundary / blueboundary / redspawns / bluespawns / minplayers / cooldownseconds / minredplayers / minblueplayers / preparetime / boundarywarningtime / boundarypenaltykills / kickcooldownseconds / reinforcementmode / maxredplayers / maxblueplayers / reinforceable / dimension / background / shopitems） |
 | `/cstmm data get global [字段]` | OP≥2 | 不带字段输出 global.json 原文；指定字段输出单值：quicktimeout / gear（默认装备列表） |
 | `/cstmm data delete player <玩家名\|UUID> [profile\|bags\|avatar\|all]` | OP≥2 | 删除玩家数据：省略类型默认 all（战绩档案 players/<uuid>.json + 背包快照 bags/<uuid>.json）；avatar=清除头像绑定（写盘并同步在线客户端三处展示点，原本无绑定时提示无可删数据）；档案删除同时解除损坏标记，玩家重进服后从零建档 |
-| `/cstmm data delete clan "<战队名>"` | OP≥2 | 删除战队（等同队长解散：清除三索引并落盘，在线成员收到通知与最新 MINE）。**战队名必须带引号**（同 get 的 `cstmm:quoted_name` 参数类型），Tab 补全同上 |
+| `/cstmm data delete clan "<战队名>"` | OP≥2 | 删除战队（等同队长解散：清除三索引并落盘，在线成员收到通知与最新 MINE）。**战队名含空格必须加引号**（string() 原生引号解析）；引号内名字首尾不得有空白（同 get） |
 | `/cstmm data delete map <地图ID>` | OP≥2 | 删除地图配置（写盘并广播全服；正在对局中使用的地图拒绝删除，防对局僵死） |
 | `/cstmm data get maps\|clans` | OP≥2 | 读取对应 JSON 文件原文；≤1500 字符直接聊天输出，超出则回文件路径 + 开头预览 |
 | `/cstmm data edit player <玩家名\|UUID> <字段> <值>` | OP≥2 | 修改档案字段：kills / deaths / matches / wins / penaltyDeaths（支持离线玩家，改后写盘并同步在线客户端） |
@@ -262,12 +266,12 @@
 | `/cstmm data edit player <玩家名\|UUID> name <新名字>` | OP≥2 | 修改玩家档案显示名（仅影响履历/查询展示，不改 UUID；改后写盘并同步在线客户端） |
 | `/cstmm data edit map <地图ID> <字段> <值>` | OP≥2 | 命令侧修改地图配置任意字段（改后经 ConfigManager 写盘并广播全服在线客户端）：标量与整数字段直接赋值（targetkills/maxduration/boundarywarningtime/minredplayers/minblueplayers ≥1，其余整数 ≥0）；enabled/reinforceable 接受 true/false/1/0；wincondition=KILLS\|TIMER、tierule=OVERTIME\|DRAW、reinforcementmode=CONDITIONAL\|ALWAYS；boundary/redboundary/blueboundary 用 6 整数 `<minX> <minY> <minZ> <maxX> <maxY> <maxZ>` 或 clear 清空（全 0=未配置回退公共）；redspawns/bluespawns 用 `add <x> <y> <z>` / `remove <序号>`（至少保留 1 个）/ 不可 clear；shopitems 用 `add <物品ID> [价格] [限购]`（末尾两个纯数字解析为价格与限购，支持 "xxx 64" 数量后缀但此时需同时给价格限购）/ `remove <序号>` / `clear`；id 改名（非 ENDED 对局占用时拒绝，与删除同一保护）查重；displayname/background 接受任意文本（background 支持 clear） |
 | `/cstmm data edit global <字段> <值>` | OP≥2 | 命令侧修改全局配置（改后写盘并广播全服）：quicktimeout <秒≥1>；gear set <槽位> <物品ID>（槽位与配置界面同口径：armor.head/chest/legs/feet/body、weapon.mainhand/offhand、container.0~35，兼容简写 head/chest/legs/feet/mainhand/offhand；物品ID 可含数量后缀或 SNBT）；gear remove <槽位>（跨写法等价匹配，`head` 可删 `armor.head` 条目）/ gear clear。gear set 按槽位等价键覆盖同槽旧配置（head 与 armor.head 视为同一槽，不产生重复条目） |
-| `/cstmm data edit clan "<战队名>" <字段> <值>` | OP≥2 | 修改战队字段：name / abbr / limit（人数上限）/ leader（转让队长，支持离线成员）/ badge（URL、base64 ≤48KiB 或 clear 清空；游戏内命令 256 字符上限，超长 base64 经服务器控制台输入；改后写盘并推送成员客户端）。**战队名必须带引号**（同 get 的 `cstmm:quoted_name` 参数类型）。Tab 补全：`"` → `名字+"` → 字段 → 值（leader=成员名、badge=clear、limit=常用数字） |
+| `/cstmm data edit clan "<战队名>" <字段> <值>` | OP≥2 | 修改战队字段：name / abbr / limit（人数上限）/ leader（转让队长，支持离线成员）/ badge（URL、base64 ≤48KiB 或 clear 清空；游戏内命令 256 字符上限，超长 base64 经服务器控制台输入；改后写盘并推送成员客户端）。**战队名含空格必须加引号**（string() 原生引号解析）；**引号内名字首尾不得有空白**（`" Team Kun"` 不合法）。Tab 补全：引号输入 → `"完整名"`；字段（裸词）→ 值（leader=成员名、badge=clear、limit=常用数字） |
 | `/cstmm debug match_info_hud <t\|f>` | OP≥2 | 调试：强制显示/关闭比赛信息栏（屏幕顶部中央，淡入约 1 秒）。**仅作用于执行者自己的客户端**（信息栏为客户端显示，仅限游戏内玩家执行，不影响其他玩家）。开启后立即向执行者推送一次，此后每秒向其推送首个活跃对局的 HUD；无活跃对局时向执行者发调试预览计分板（地图名"HUD 调试预览"+ 0:0 + 90 秒倒计时，仅中央计分板无队伍卡片，验证显示链路）；关闭时立即向执行者发清空包（inGame=false）复位其 HUD |
 | `/cstmm debug bandwidth start\|stop\|get\|view` | OP≥2 | 调试：服务器带宽记录（Netty 管线最外侧字节计数器，统计每个连接加密压缩后的线路字节，含原版与模组全部流量；玩家 JOIN 时注入）。start=清零并开始逐秒采样；stop=停止并返回时长/总量/峰值汇总；get=当前最近 1 秒出/入站速率；view=总量/均值/峰值摘要 + 最近 15 条逐秒样本。采样线程为常驻 1Hz 守护线程 |
 | `/cstmm debug exception_protect_test [confirm]` | OP≥2 | 调试：全局异常保护链路测试（**危险操作，两步确认**）。不带参数=发起（发出警告并开启 30 秒确认窗口）；`confirm`=窗口内确认后从执行器抛出人为测试异常，经本命令的 guard 包装走与生产完全相同的保护链路（ModGuardian.engage → 控制台完整堆栈 → 全服警告广播 → 活跃对局强制结算 → 模组停用，服务器不崩）。保护已启用时被 guard 拦截并提示；重启服务器恢复 |
 
-玩家可用命令见 [README.md](README.md)。
+玩家可用命令见 [README.md](README.md) §五。
 
 ## 8. 配置文件字段参考
 

@@ -725,13 +725,13 @@ public class ConfigScreen extends Screen {
         int globalRowY = globalStartY + 18;
 
         ButtonWidget gearTab = ButtonWidget.builder(
-                Text.literal(globalTab == 0 ? "✅ 装备" : "装备"),
+                Text.literal(globalTab == 0 ? "装备" : "装备"),
                 button -> { globalTab = 0; clearChildren(); init(); }
         ).dimensions(tabX + 120, globalRowY, 70, 20).build();
         rightScrollables.add(gearTab);
 
         ButtonWidget paramTab = ButtonWidget.builder(
-                Text.literal(globalTab == 1 ? "✅ 参数" : "参数"),
+                Text.literal(globalTab == 1 ? "参数" : "参数"),
                 button -> { globalTab = 1; clearChildren(); init(); }
         ).dimensions(tabX + 200, globalRowY, 70, 20).build();
         rightScrollables.add(paramTab);
