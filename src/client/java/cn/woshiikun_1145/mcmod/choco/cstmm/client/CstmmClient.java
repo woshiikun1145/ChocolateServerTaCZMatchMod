@@ -3,9 +3,14 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.client;
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.hud.HudOverlay;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.network.ClientNetworkHandler;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.render.BombEntityRenderer;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.LastWordsScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.MatchMenuScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.ShopScreen;
+import cn.woshiikun_1145.mcmod.choco.cstmm.entity.BombEntity;
+import cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities;
+import cn.woshiikun_1145.mcmod.choco.cstmm.item.ModItems;
+import cn.woshiikun_1145.mcmod.choco.cstmm.manager.BombInteractionManager;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.MatchActionPayload;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.api.EnvType;
@@ -13,9 +18,11 @@ import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.text.Text;
+import net.minecraft.util.math.Box;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +46,10 @@ public class CstmmClient implements ClientModInitializer {
     public static KeyBinding keyVoteYes;
     // 投票反对按键（默认 F8），本类 tick 触发发送 VOTE_NO 动作包
     public static KeyBinding keyVoteNo;
+    // 安放 C4 按键（默认未绑定）：与原版使用键等效触发安放，键位在 控制 设置中自定义
+    public static KeyBinding keyPlantBomb;
+    // 拆除 C4 按键（默认未绑定）：与原版使用键等效触发拆除，键位在 控制 设置中自定义
+    public static KeyBinding keyDefuseBomb;
 
     /**
      * 【作用】Fabric 客户端初始化回调：依次注册网络包处理器、按键绑定与 HUD 覆盖层。
@@ -51,9 +62,18 @@ public class CstmmClient implements ClientModInitializer {
         ClientNetworkHandler.register();
         registerKeyBindings();
         HudOverlay.init();
+        // C4 实体渲染器注册（绿色长方体占位外观）
+        EntityRendererRegistry.register(ModEntities.C4, BombEntityRenderer::new);
 
         LOGGER.info("[CSTMM - Client] Client initialized successfully!");
     }
+
+    // 爆破交互按键状态（按住状态翻转时才发包，避免每 tick 刷包）
+    private static boolean plantHeld = false;
+    private static boolean defuseHeld = false;
+    // 安放中/安放完成后仍按着使用键 → 抑制拆除触发，直到松键后重新按下
+    // （修复：安放完成瞬间手上的 C4 消失、附近出现炸弹实体，若仍按着右键会立刻误发拆除 start）
+    private static boolean suppressDefuseUntilRelease = false;
 
     /**
      * 【作用】注册打开菜单/商城、投票赞成/反对 4 个按键绑定，并挂每客户端 tick 轮询回调处理按键。
@@ -85,6 +105,21 @@ public class CstmmClient implements ClientModInitializer {
                 "key.cstmm.vote_no",
                 InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_F8,
+                "category.cstmm"
+        ));
+
+        // 安放/拆除 C4 按键：默认未绑定（UNKNOWN_KEY），与原版使用键（右键）任一按住即触发，
+        // 键位可在 控制 → CSTMM 匹配系统 分类下自定义
+        keyPlantBomb = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.cstmm.plant_bomb",
+                InputUtil.Type.KEYSYM,
+                InputUtil.UNKNOWN_KEY.getCode(),
+                "category.cstmm"
+        ));
+        keyDefuseBomb = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.cstmm.defuse_bomb",
+                InputUtil.Type.KEYSYM,
+                InputUtil.UNKNOWN_KEY.getCode(),
                 "category.cstmm"
         ));
 
@@ -138,8 +173,62 @@ public class CstmmClient implements ClientModInitializer {
                 );
                 ClientPlayNetworking.send(payload);
             }
+
+            // 【爆破交互】手持 C4 长按右键安放 / 靠近 C4 长按右键拆除（均为使用键）：
+            // 按住状态（无界面打开时）翻转时发 start/stop，条件校验与进度累计在服务端
+            tickBombInteraction(client);
         });
 
         LOGGER.info("[CSTMM - Client] Registered key bindings");
+    }
+
+    /**
+     * 【作用】每客户端 tick 检测爆破交互按键（安放=手持 cstmm:c4 + 右键（使用键）按住；
+     *         拆除=3 格内存在 C4 实体 + 右键（使用键）按住），按住状态翻转时发
+     *         PLANT_BOMB/DEFUSE_BOMB 的 start/stop 请求。阵营/包点/范围等条件由服务端校验并反馈。
+     * 【被谁使用】本类 END_CLIENT_TICK 回调（仅游戏内且握手成功时）。
+     */
+    private static void tickBombInteraction(net.minecraft.client.MinecraftClient client) {
+        var player = client.player;
+        if (player == null) {
+            plantHeld = false;
+            defuseHeld = false;
+            suppressDefuseUntilRelease = false;
+            return;
+        }
+        boolean screenOpen = client.currentScreen != null;
+        // 安放与拆除触发键：原版使用键（右键）或自定义安放/拆除键（默认未绑定）任一按住即触发
+        boolean useHeld = !screenOpen && client.options.useKey.isPressed();
+        boolean plantKeyHeld = !screenOpen && keyPlantBomb.isPressed();
+        boolean defuseKeyHeld = !screenOpen && keyDefuseBomb.isPressed();
+
+        // 安放：主手手持 C4 且（使用键或自定义安放键）按住；服务端校验阵营/包点/阶段（自由安放开关放宽）
+        boolean planting = (useHeld || plantKeyHeld) && player.getMainHandStack().isOf(ModItems.C4);
+        if (planting != plantHeld) {
+            plantHeld = planting;
+            ClientPlayNetworking.send(new MatchActionPayload(
+                    MatchActionPayload.ActionType.PLANT_BOMB, "", 0, planting ? "start" : "stop"));
+        }
+        // 安放期间一直按着触发键 → 抑制拆除，直至全部触发键松开
+        // （安放完成后继续按住右键/安放键不触发拆弹，需松开后重新按下）
+        if (planting) {
+            suppressDefuseUntilRelease = true;
+        } else if (!useHeld && !plantKeyHeld && !defuseKeyHeld) {
+            suppressDefuseUntilRelease = false;
+        }
+
+        // 拆除：附近（3 格）有 C4 实体且（使用键或自定义拆除键）按住；服务端要求 CT 且在拆除距离内。
+        // 安放后未松键重按（suppressDefuseUntilRelease）时不触发
+        boolean nearBomb = false;
+        if (!screenOpen && client.world != null) {
+            Box box = player.getBoundingBox().expand(BombInteractionManager.DEFUSE_RANGE_CLIENT);
+            nearBomb = !client.world.getEntitiesByClass(BombEntity.class, box, e -> true).isEmpty();
+        }
+        boolean defusing = (useHeld || defuseKeyHeld) && nearBomb && !suppressDefuseUntilRelease;
+        if (defusing != defuseHeld) {
+            defuseHeld = defusing;
+            ClientPlayNetworking.send(new MatchActionPayload(
+                    MatchActionPayload.ActionType.DEFUSE_BOMB, "", 0, defusing ? "start" : "stop"));
+        }
     }
 }

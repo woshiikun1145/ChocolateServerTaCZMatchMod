@@ -27,9 +27,9 @@ import java.util.UUID;
  * 【作用】对局 HUD 覆盖层（CS2 风格顶部队伍栏）：屏幕顶部横贯三段式——
  *         己方队伍卡片列（左）+ 中央计分板 + 敌方队伍卡片列（右）。
  *         玩家卡片 = 名字条（[战队缩写][队伍]玩家名）+ 队色边框头像（右下角战队徽标，无则不显示），
- *         准备阶段下挂"个人击杀 + 本局 K/D（1 位小数）"与"上一条命击杀徽章（骷髅+N杀）"，
- *         对局期间下挂红色血条（存活）或白色小骷髅（阵亡）；头像变暗表示阵亡。
- *         中央计分板 = 地图名 + 红色倒计时 + 红蓝比分 + 双方存活人数。
+ *         卡片下挂"个人击杀 + 当局 K/D（1 位小数）"统计行（存活白色/阵亡置灰，两阶段均显示）；
+ *         准备阶段另有头像左下角血量数字与"上一条命击杀徽章（骷髅+N杀）"，对局期间为红色血条（存活）或白色小骷髅（阵亡）；头像变暗表示阵亡。
+ *         中央计分板 = 地图名 + 倒计时（>60s 白 → ≤60s 金 → ≤30s 红）+ 红蓝比分（领先亮队色/落后暗队色）+ 双方存活人数。
  *         血量/存活/阵亡由客户端本地读取（同服玩家实体），不占网络包。
  *         支持进出对局的淡入淡出动画；未握手成功时不渲染。
  * 【被谁使用】CstmmClient#onInitializeClient 调用 init() 注册到 HudRenderCallback；
@@ -57,13 +57,32 @@ public class HudOverlay implements HudRenderCallback {
     // 本局花名册（解析自 hud_data.rosterJson，按服务端顺序：红队在前蓝队在后）
     private static volatile List<RosterEntry> roster = List.of();
 
+    // ==================== 爆破回合状态（解析自 hud_data.extraJson，普通对局全为默认） ====================
+    // 是否爆破对局
+    private static volatile boolean bombMode = false;
+    // 队伍回合胜场（1=红队 2=蓝队，跟随队伍不随攻防转换）
+    private static volatile int wins1 = 0;
+    private static volatile int wins2 = 0;
+    // 当前充当 T（进攻方）的队伍编号（1/2），另一队为 CT
+    private static volatile int tTeam = 1;
+    // C4 已安放 / 爆炸倒计时秒数（安放位置不下发，CT 需自行寻找）
+    private static volatile boolean bombPlanted = false;
+    private static volatile int bombTimerSeconds = 0;
+    // 购买窗口开启（冻结时间 + 开局后 N 秒，服务端 EconomyManager 判定）
+    private static volatile boolean buyWindowOpen = false;
+    // 整队离线等待重连（挂起对局推进中的提示）
+    private static volatile boolean waitingReconnect = false;
+    // 拆弹进行中（CT 正在拆除炸弹的警告）
+    private static volatile boolean defuseInProgress = false;
+
     /**
      * 花名册单个玩家条目（解析自服务端 rosterJson）：
-     * uuid/名字/队伍(1红2蓝)/本局击杀/本局死亡/上一条命击杀/战队缩写/徽标引用/头像绑定。
+     * uuid/名字/队伍(1红2蓝)/本局击杀/本局死亡/上一条命击杀/战队缩写/徽标引用/头像绑定/
+     * 拆弹装备持有（爆破图 CT 专属，true=卡片显示拆弹器标记）。
      */
     private record RosterEntry(UUID uuid, String name, int team, int kills, int deaths,
                                int lastLifeKills, String clanAbbr, String badge,
-                               String avatarType, String avatarId) {}
+                               String avatarType, String avatarId, boolean defuseKit) {}
 
     // ==================== 布局常量（GUI 缩放坐标） ====================
     // 名字条高度
@@ -166,19 +185,72 @@ public class HudOverlay implements HudRenderCallback {
             drawScaledText(context, tr, mapDisplay, centerX, TOP_Y + 1, 0.75f, 0xFFAA00, true);
         }
 
-        // 第二行：倒计时（红色大数字，准备阶段为准备倒计时，战斗阶段为对局剩余时间）
-        if (remainingSeconds > 0 || preparing) {
-            drawScaledText(context, tr, formatTime(Math.max(0, remainingSeconds)),
-                    centerX, TOP_Y + 10, 1.5f, 0xFFFF5555, true);
+        // 第二行：倒计时（大数字；普通对局 >60s 白 → ≤60s 金 → ≤30s 红；
+        //         爆破对局 C4 安放后切换为红色 C4 爆炸倒计时）
+        if (remainingSeconds > 0 || preparing || (bombMode && bombPlanted)) {
+            int t;
+            int timeColor;
+            if (bombMode && bombPlanted) {
+                t = Math.max(0, bombTimerSeconds);
+                timeColor = 0xFFFF5555;
+            } else {
+                t = Math.max(0, remainingSeconds);
+                timeColor = preparing || t <= 30 ? 0xFFFF5555 : t <= 60 ? 0xFFFFAA00 : 0xFFEEEEEE;
+            }
+            drawScaledText(context, tr, formatTime(t),
+                    centerX, TOP_Y + 10, 1.5f, timeColor, true);
         }
 
-        // 第三行：红蓝比分（队色数字 + 白色分隔竖线）
-        String scoreText = "§c" + redKills + "§f | §9" + blueKills;
+        // 第三行：比分——爆破对局显示回合比分（T 黄 / CT 蓝），普通对局显示击杀比分（领先亮色/落后暗色）
+        String scoreText;
+        if (bombMode) {
+            int tWins = tTeam == 1 ? wins1 : wins2;
+            int ctWins = tTeam == 1 ? wins2 : wins1;
+            scoreText = "§eT " + tWins + " §8: §9" + ctWins + " CT";
+        } else {
+            String redColor = redKills >= blueKills ? "§c" : "§4";
+            String blueColor = blueKills >= redKills ? "§9" : "§1";
+            scoreText = redColor + redKills + "§f | " + blueColor + blueKills;
+        }
         drawScaledText(context, tr, scoreText, centerX, TOP_Y + 33, 1.0f, 0xFFFFFF, true);
 
         // 第四行：双方存活人数（人形图标 + 数字，己方左/敌方右）
         drawAliveCount(context, tr, centerX, true);
         drawAliveCount(context, tr, centerX, false);
+
+        // 第五行（计分板下方）：爆破状态提示（C4 已安放/拆弹警告/重连等待/购买窗口）
+        drawBombStatusLine(context, tr, centerX);
+    }
+
+    /**
+     * 【作用】爆破对局状态行（计分板下方居中，普通对局不显示）：
+     *         优先级 C4 已安放（红色，不显示包点位置，CT 需自行寻找）→ 拆弹警告（蓝色）
+     *         → 整队离线等待重连（黄色）→ 购买窗口开启（绿色，附商店按键提示）。最多显示一行。
+     * 【被谁使用】drawScoreboard（每帧）。
+     */
+    private static void drawBombStatusLine(DrawContext context, TextRenderer tr, int centerX) {
+        if (!bombMode) return;
+        String line = null;
+        int color = applyFade(0xFFFFFFFF);
+        if (bombPlanted) {
+            line = "C4 已安放";
+            color = applyFade(0xFFFF5555);
+        } else if (defuseInProgress) {
+            line = "炸弹正在被拆除！";
+            color = applyFade(0xFF5599FF);
+        } else if (waitingReconnect) {
+            line = "对方全队离线，等待重连（3 分钟）...";
+            color = applyFade(0xFFFFAA00);
+        } else if (buyWindowOpen) {
+            line = "购买时间（按 ' 打开商店）";
+            color = applyFade(0xFF55FF55);
+        }
+        if (line == null) return;
+        int y = TOP_Y + CARD_H + 4;
+        int w = tr.getWidth(Text.literal(line));
+        // 文字底衬（半透明黑横条），保证浅色地图背景下可读
+        context.fill(centerX - w / 2 - 3, y - 2, centerX + w / 2 + 3, y + 9, applyFade(0x88000000));
+        context.drawText(tr, Text.literal(line), centerX - w / 2, y, color, true);
     }
 
     /**
@@ -235,9 +307,9 @@ public class HudOverlay implements HudRenderCallback {
 
     /**
      * 【作用】绘制单张玩家卡片：名字条（[战队缩写][队伍]玩家名）→ 队色边框头像
-     *         （右下角战队徽标小图，无徽标不显示）→ 阶段下挂内容：
-     *         准备阶段 = 头像左下角血量数字 + 下方"个人击杀 + 本局 K/D"与"上一条命击杀徽章"；
-     *         对局期间 = 存活画红色血条、阵亡头像压暗并画白色小骷髅。
+     *         （右下角战队徽标小图，无徽标不显示）→ 阶段下挂内容（两阶段均有"当局击杀 + K/D"统计行）：
+     *         准备阶段 = 头像左下角血量数字 + 统计行（白色）+ "上一条命击杀徽章"；
+     *         对局期间 = 存活画红色血条、阵亡头像压暗并画白色小骷髅 + 统计行（存活白色/阵亡置灰）。
      * 【被谁使用】drawTeamRow（每帧每卡片）。
      */
     private static void drawCard(DrawContext context, TextRenderer tr, MinecraftClient client,
@@ -250,9 +322,11 @@ public class HudOverlay implements HudRenderCallback {
         context.fill(x, y, x + cardW, y + CARD_H, applyFade(0x88000000));
         context.drawBorder(x, y, cardW, CARD_H, applyFade(self ? SELF_FRAME : 0x44000000));
 
-        // ---- 名字条：[战队缩写][队伍]{玩家名}，阵亡置灰 ----
+        // ---- 名字条：[战队缩写][队伍]{玩家名}，阵亡置灰（爆破对局队伍标签为 T/CT）----
         String abbr = e.clanAbbr() == null ? "" : e.clanAbbr();
-        String teamTag = e.team() == 1 ? "红" : "蓝";
+        String teamTag = bombMode
+                ? (e.team() == tTeam ? "T" : "CT")
+                : (e.team() == 1 ? "红" : "蓝");
         String cCode = alive ? "§7" : "§8";
         String tCode = alive ? (e.team() == 1 ? "§c" : "§9") : "§8";
         String nCode = alive ? "§f" : "§8";
@@ -277,6 +351,14 @@ public class HudOverlay implements HudRenderCallback {
 
         // ---- 头像右下角战队徽标（没有设置徽标则不显示） ----
         drawClanBadge(context, e.badge(), avX + AV - 13, avY + AV - 13, 13);
+
+        // ---- 拆弹装备标记（爆破图 CT 且持有时，卡片右上角绿色小钳图标） ----
+        if (e.defuseKit()) {
+            int markX = x + cardW - 9;
+            int markY = y + 2;
+            context.fill(markX, markY, markX + 7, markY + 7, applyFade(0xB3006600));
+            context.drawText(tr, Text.literal("✂"), markX + 1, markY, applyFade(0xFF55FF55), true);
+        }
 
         // ---- 阶段下挂内容 ----
         if (preparing) {
@@ -315,6 +397,10 @@ public class HudOverlay implements HudRenderCallback {
             } else {
                 drawSkullIcon(context, x + cardW / 2 - 3, y + CARD_H + 3, applyFade(0xFFEEEEEE));
             }
+            // 下方：当局击杀 + K/D 统计行（存活白色 / 阵亡置灰），与准备阶段同格式
+            double kd = e.deaths() == 0 ? e.kills() : (double) e.kills() / e.deaths();
+            String statLine = (alive ? "§f" : "§8") + e.kills() + "杀 §7K/D " + String.format("%.1f", kd);
+            drawScaledText(context, tr, statLine, x + cardW / 2f, y + CARD_H + 10, 0.75f, 0xFFFFFF, true);
         }
     }
 
@@ -340,6 +426,10 @@ public class HudOverlay implements HudRenderCallback {
     /**
      * 【作用】绘制名字条文字（0.75 缩放居中）：[战队缩写][队伍]{玩家名}；
      * 超宽时只截断玩家名尾部为 …（保证格式码与队/战队标记完整，不会截断 § 转义对）。
+     * 【修复】旧实现用 while 逐字符截断（长度不变——删 1 字符补 1 个 …，最小只能缩到 "X…"），
+     *         当 头部[缩写][队] + "X…" 仍超宽时条件永不满足且字符串不再变化 → 渲染线程死循环
+     *         （表现：匹配传送进场后 HUD 首帧卡死、无报错只能杀进程）。改为有界 for 循环，
+     *         最多循环 名字长度-1 次，即使缩到 1 字符仍超宽也按原注释语义整体接受。
      * 【被谁使用】drawCard（每帧）。
      */
     private static void drawNameStrip(DrawContext context, TextRenderer tr, String abbr, String cCode,
@@ -350,10 +440,13 @@ public class HudOverlay implements HudRenderCallback {
         String head = abbrSeg + tCode + "[" + teamTag + "]" + nCode;
         String shownName = name;
         String text = head + shownName;
-        // 【作用】名字超宽时逐字符截断为 …；名字缩到 1 字符仍超宽则整体接受（极少见的超长缩写场景）
-        while (tr.getWidth(Text.literal(text)) * scale > maxW && shownName.length() > 1) {
-            shownName = shownName.substring(0, shownName.length() - 1) + "…";
-            text = head + shownName;
+        // 【作用】名字超宽时逐字符截断为 …；有界循环（最多 name.length()-1 次），缩到 1 字符仍超宽则整体接受
+        if (tr.getWidth(Text.literal(text)) * scale > maxW) {
+            for (int keep = name.length() - 1; keep >= 1; keep--) {
+                shownName = name.substring(0, keep) + "…";
+                text = head + shownName;
+                if (tr.getWidth(Text.literal(text)) * scale <= maxW) break;
+            }
         }
         drawScaledText(context, tr, text, (float) (x + maxW / 2.0), y, (float) scale, 0xFFFFFF, true);
     }
@@ -478,11 +571,12 @@ public class HudOverlay implements HudRenderCallback {
     // ==================== 数据更新方法 ====================
 
     /**
-     * 【作用】整体覆盖写入服务端推送的 HUD 数据（地图名/比分/倒计时/阶段/花名册 JSON），
-     *         花名册在此解析为条目列表（单包 ≤64KiB，解析失败保留上一次花名册并告警）。
+     * 【作用】整体覆盖写入服务端推送的 HUD 数据（地图名/比分/倒计时/阶段/花名册 JSON/扩展信息 JSON），
+     *         花名册在此解析为条目列表（单包 ≤64KiB，解析失败保留上一次花名册并告警）；
+     *         extraJson 为爆破回合状态（普通对局为 "{}"），解析进 bomb* 静态字段。
      * 【被谁使用】仅被 ClientNetworkHandler 的 HudDataPayload 接收器调用。
      */
-    public static void updateData(String name, int red, int blue, int time, boolean game, int phaseOrdinal, String rosterJson) {
+    public static void updateData(String name, int red, int blue, int time, boolean game, int phaseOrdinal, String rosterJson, String extraJson) {
         mapName = name;
         redKills = red;
         blueKills = blue;
@@ -490,6 +584,37 @@ public class HudOverlay implements HudRenderCallback {
         inGame = game;
         phase = phaseOrdinal;
         roster = parseRoster(rosterJson);
+        parseExtra(extraJson);
+    }
+
+    /**
+     * 【作用】解析 HUD 扩展信息 JSON（爆破回合状态：bombMode/round/wins1/wins2/tTeam/ot/
+     *         otRound/planted/bombTimer/buyTime/waiting/defusing）；损坏 JSON 静默保留旧值。
+     * 【被谁使用】updateData（每次收到 hud_data 包）。
+     */
+    private static void parseExtra(String extraJson) {
+        if (extraJson == null || extraJson.isEmpty()) return;
+        try {
+            JsonObject o = JsonParser.parseString(extraJson).getAsJsonObject();
+            bombMode = o.has("bombMode") && o.get("bombMode").isJsonPrimitive() && o.get("bombMode").getAsBoolean();
+            if (!bombMode) {
+                buyWindowOpen = false;
+                waitingReconnect = false;
+                defuseInProgress = false;
+                return;
+            }
+            wins1 = optInt(o, "wins1");
+            wins2 = optInt(o, "wins2");
+            tTeam = optInt(o, "tTeam") == 2 ? 2 : 1;
+            bombPlanted = o.has("planted") && o.get("planted").isJsonPrimitive() && o.get("planted").getAsBoolean();
+            bombTimerSeconds = optInt(o, "bombTimer");
+            buyWindowOpen = o.has("buyTime") && o.get("buyTime").isJsonPrimitive() && o.get("buyTime").getAsBoolean();
+            waitingReconnect = o.has("waiting") && o.get("waiting").isJsonPrimitive() && o.get("waiting").getAsBoolean();
+            defuseInProgress = o.has("defusing") && o.get("defusing").isJsonPrimitive() && o.get("defusing").getAsBoolean();
+        } catch (Exception e) {
+            cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm.LOGGER.warn(
+                    "[CSTMM - HudOverlay] Failed to parse HUD extra JSON, keeping previous bomb state", e);
+        }
     }
 
     /**
@@ -513,17 +638,18 @@ public class HudOverlay implements HudRenderCallback {
                     continue;
                 }
                 list.add(new RosterEntry(
-                        uuid,
-                        optString(o, "n"),
-                        optInt(o, "t"),
-                        optInt(o, "k"),
-                        optInt(o, "d"),
-                        optInt(o, "lk"),
-                        optString(o, "c"),
-                        optString(o, "b"),
-                        optString(o, "at"),
-                        optString(o, "ai")
-                ));
+                    uuid,
+                    optString(o, "n"),
+                    optInt(o, "t"),
+                    optInt(o, "k"),
+                    optInt(o, "d"),
+                    optInt(o, "lk"),
+                    optString(o, "c"),
+                    optString(o, "b"),
+                    optString(o, "at"),
+                    optString(o, "ai"),
+                    o.has("kit") && o.get("kit").isJsonPrimitive() && o.get("kit").getAsBoolean()
+            ));
             }
         } catch (Exception e) {
             cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm.LOGGER.warn(
@@ -555,6 +681,15 @@ public class HudOverlay implements HudRenderCallback {
         inGame = false;
         phase = 0;
         roster = List.of();
+        bombMode = false;
+        wins1 = 0;
+        wins2 = 0;
+        tTeam = 1;
+        bombPlanted = false;
+        bombTimerSeconds = 0;
+        buyWindowOpen = false;
+        waitingReconnect = false;
+        defuseInProgress = false;
         fadeAlpha = 0;
     }
 

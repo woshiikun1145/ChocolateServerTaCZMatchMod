@@ -92,7 +92,8 @@ public class ClientNetworkHandler {
                 payload.remainingSeconds(),
                 payload.inGame(),
                 payload.phase(),
-                payload.rosterJson()
+                payload.rosterJson(),
+                payload.extraJson()
         )));
 
         // ========== 匹配状态接收 ==========
@@ -207,7 +208,8 @@ public class ClientNetworkHandler {
 
         // ========== 商店数据接收 ==========
         ClientPlayNetworking.registerGlobalReceiver(ShopDataS2CPayload.ID, (payload, context) -> context.client().execute(() -> {
-            ShopDataCache.getInstance().update(payload.eligible(), payload.items());
+            ShopDataCache.getInstance().update(payload.eligible(), payload.bombMode(), payload.hasDefuser(),
+                    payload.money(), payload.buyWindowOpen(), payload.defuserPrice(), payload.columns());
             // 商店界面已打开时刷新其内容
             if (context.client().currentScreen instanceof ShopScreen screen) {
                 screen.refresh();

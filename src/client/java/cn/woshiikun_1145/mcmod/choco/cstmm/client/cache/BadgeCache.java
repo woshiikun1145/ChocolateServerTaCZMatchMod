@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 战队徽标分片缓存（客户端，内存 + 磁盘两级，按服务器隔离）。
- * 服务端 clan_data JSON 的 badge 字段携带内容寻址 id（SHA-256 前 8 字节 hex），
+ * 服务端 clan_data JSON 的 badge 字段携带内容寻址 id（MurmurHash3 32 位哈希，8 字符小写 hex），
  * 完整 base64 由 BadgePayload 分片下发，此处按 id 重组缓存并落盘
  * （config/cstmm/client/cache/badges/<host_port>/<id>.b64，内容寻址天然幂等，跨重连/跨启动复用）；
  * 重连进服时 ClientNetworkHandler 用 diskBadgeIds() 把磁盘已有的 id 上报服务端

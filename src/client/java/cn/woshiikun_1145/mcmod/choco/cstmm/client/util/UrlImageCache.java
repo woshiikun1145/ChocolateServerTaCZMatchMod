@@ -15,8 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 图片 URL → 纹理 的异步下载缓存（URL 战队徽标专用）。
  * URL 徽标不经过服务器分片下发（不占服务器带宽），客户端按 clan JSON 中的 URL 自行下载：
- * 下载大小上限与 base64 徽标一致（ClanManager.MAX_BADGE_BYTES = 48KiB），像素上限 1024
- * （防止小图解压出超大纹理占满显存），失败后 60s 冷却内不重试。
+ * 不限制 URL 长度、图片文件大小与像素尺寸，失败后 60s 冷却内不重试。
  * 纹理注册（GL 调用）通过 MinecraftClient.execute 切回渲染线程执行。
  * 【被谁使用】ClanTabPanel、QueueTabPanel 经 resolveBadgeTexture 渲染徽标；
  *             ClientNetworkHandler 的 DISCONNECT 回调调用 clear()。
@@ -26,8 +25,6 @@ public final class UrlImageCache {
     // 工具类，禁止实例化
     private UrlImageCache() {}
 
-    /** 下载/解码的像素尺寸上限（宽或高任一超过即拒绝） */
-    private static final int MAX_PIXELS = 1024;
     /** 下载失败后的重试冷却 */
     private static final long RETRY_COOLDOWN_MS = 60_000;
 
@@ -73,6 +70,18 @@ public final class UrlImageCache {
     }
 
     /**
+     * 【作用】地图背景图字段 → 纹理的统一入口：http/https 开头按 URL 走本类异步下载
+     *         （不限制图片大小与尺寸），否则按 Base64 直接解码。未下载完成/失败冷却中
+     *         返回 null（调用方纯色兜底，加载完成后下一帧自动显示）。
+     * 【被谁使用】MatchMenuScreen 匹配卡片背景、QueueTabPanel 队列行背景。仅客户端。
+     */
+    public static Base64ImageDecoder.CardTexture resolveBackgroundTexture(String backgroundValue) {
+        if (backgroundValue == null || backgroundValue.isEmpty()) return null;
+        if (ClanManager.isBadgeUrl(backgroundValue)) return get(backgroundValue);
+        return Base64ImageDecoder.decode(backgroundValue);
+    }
+
+    /**
      * 断线时清空（URL 徽标重连后按需重新下载）。
      * 【被谁使用】仅被 ClientNetworkHandler 的 DISCONNECT 回调调用。
      */
@@ -83,7 +92,7 @@ public final class UrlImageCache {
     }
 
     /**
-     * 【作用】后台线程执行：限长下载 → 解码 → 校验像素上限 → 切回渲染线程注册纹理；
+     * 【作用】后台线程执行：全量下载（不限大小）→ 解码 → 切回渲染线程注册纹理；
      *         失败则记录冷却时间戳。
      * 【被谁使用】仅被本类 get 启动的守护线程调用。
      */
@@ -92,21 +101,12 @@ public final class UrlImageCache {
             var conn = URI.create(url).toURL().openConnection();
             conn.setConnectTimeout(5000);
             conn.setReadTimeout(5000);
-            // 大小上限与 base64 徽标一致：多读 1 字节用于判断超限
+            // 不限制图片大小：全量读入后直接解码
             byte[] bytes;
             try (InputStream in = conn.getInputStream()) {
-                bytes = in.readNBytes(ClanManager.MAX_BADGE_BYTES + 1);
-            }
-            if (bytes.length > ClanManager.MAX_BADGE_BYTES) {
-                throw new IllegalArgumentException("image exceeds " + ClanManager.MAX_BADGE_BYTES + " bytes");
+                bytes = in.readAllBytes();
             }
             NativeImage image = Base64ImageDecoder.decodeImageBytes(bytes);
-            // 【作用】校验像素尺寸，防止小体积图片解压出超大纹理占满显存
-            if (image.getWidth() > MAX_PIXELS || image.getHeight() > MAX_PIXELS) {
-                int w = image.getWidth(), h = image.getHeight();
-                image.close();
-                throw new IllegalArgumentException("image too large (" + w + "x" + h + "px, max " + MAX_PIXELS + ")");
-            }
             // GL 调用必须回到渲染线程；已完成任务跳过注册（并发竞态下可能重复下载，但不会重复建纹理）
             MinecraftClient.getInstance().execute(() -> {
                 if (loaded.containsKey(url)) {

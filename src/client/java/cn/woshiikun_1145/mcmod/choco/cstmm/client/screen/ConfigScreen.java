@@ -6,6 +6,7 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.client.network.ClientNetworkHandler;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.GlobalConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.util.BlockPosAdapter;
+import cn.woshiikun_1145.mcmod.choco.cstmm.util.ItemStrings;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.api.EnvType;
@@ -86,6 +87,8 @@ public class ConfigScreen extends Screen {
 
     // 内置确认对话框（在当前界面内弹出，不暂停游戏）
     // textRenderer 懒获取：构造期 Screen.textRenderer 尚未赋值（init() 才赋值），直接传入会是 null（曾致 NPE 崩溃）
+    // this-escape 抑制：ConfirmDialog 仅保存引用 + 懒取 textRenderer，构造期不会回调本类的可覆写方法
+    @SuppressWarnings("this-escape")
     private final ConfirmDialog confirmDialog = new ConfirmDialog(this, this::font);
 
     /** 面板/对话框桥接：Screen.textRenderer 是 protected */
@@ -139,10 +142,8 @@ public class ConfigScreen extends Screen {
         fixedWidgets.clear();
         rightScrollables.clear();
         leftButtons.clear();
-        rightScrollOffset = 0;
-        leftScrollOffset = 0;
-        rightTotalHeight = 0;
-        leftTotalHeight = 0;
+        // 滚动偏移保留（增删行/切换标签等高度变化操作不再跳回顶部），重建完成后按内容高度钳制；
+        // 需要回到顶部的场景（切换地图/重载配置）由调用方显式置零
 
         computeLayout();
         buildTopBar();
@@ -155,6 +156,12 @@ public class ConfigScreen extends Screen {
 
         rightTotalHeight = Math.max(globalRowY + 20, editY + 20) - contentTop;
         if (leftTotalHeight < headerHeight + 40) leftTotalHeight = headerHeight + 40;
+
+        // 钳制滚动偏移：内容变矮（删除行等）时避免停留在超出范围的偏移上
+        rightScrollOffset = MathHelper.clamp(rightScrollOffset, 0,
+                Math.max(0, rightTotalHeight - contentHeight));
+        leftScrollOffset = MathHelper.clamp(leftScrollOffset, 0,
+                Math.max(0, leftTotalHeight - (height - headerHeight - footerHeight)));
     }
 
     /** 布局尺寸计算 */
@@ -230,6 +237,7 @@ public class ConfigScreen extends Screen {
                                             selectedMapIndex = index;
                                             editingMap = ConfigScreenSupport.deepCopyMap(maps.get(index));
                                             hasUnsavedChanges = false;
+                                            rightScrollOffset = 0; // 切换地图回到编辑器顶部
                                             clearChildren();
                                             init();
                                         }
@@ -237,6 +245,7 @@ public class ConfigScreen extends Screen {
                             } else {
                                 selectedMapIndex = index;
                                 editingMap = ConfigScreenSupport.deepCopyMap(maps.get(index));
+                                rightScrollOffset = 0; // 切换地图回到编辑器顶部
                                 clearChildren();
                                 init();
                             }
@@ -305,7 +314,22 @@ public class ConfigScreen extends Screen {
                     }
             ).dimensions(editX, editY, 90, 20).build();
             rightScrollables.add(enableBtn);
+
+            // ---- 地图类型（NORMAL=普通击杀/计时图；BOMB=爆破图） ----
+            ButtonWidget gameTypeBtn = ButtonWidget.builder(
+                    Text.literal("类型: " + (editingMap.isBombMap() ? "BOMB" : "NORMAL")),
+                    button -> {
+                        editingMap.setGameType(editingMap.isBombMap() ? "NORMAL" : "BOMB");
+                        button.setMessage(Text.literal("类型: " + (editingMap.isBombMap() ? "BOMB" : "NORMAL")));
+                        hasUnsavedChanges = true;
+                        clearChildren();
+                        init();
+                    }
+            ).dimensions(editX + 100, editY, 130, 20).build();
+            rightScrollables.add(gameTypeBtn);
             editY += ROW_GAP;
+            addHint(editX, editY, "地图类型：NORMAL=普通图；BOMB=爆破图（多回合 + C4 + 经济，切回 NORMAL 会清空包点）");
+            editY += 11;
 
             // ---- 结算方式 ----
             ButtonWidget winCondBtn = ButtonWidget.builder(
@@ -559,95 +583,194 @@ public class ConfigScreen extends Screen {
             addHint(editX, editY, "对局所在维度 ID（如 minecraft:overworld），非法值回退主世界");
             editY += 11;
 
-            // ---- 商店物品（按地图配置） ----
-            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("商店物品:"), 9));
+            // ---- 商店物品（购买页 5 列网格；爆破图分类列编辑器见爆破区） ----
+            if (!editingMap.isBombMap()) {
+            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("商店物品（购买页 5 列网格布局）:"), 9));
             editY += 18;
+            editY = addShopColumnEditor(editX, editY, 5, true, false, false);
+            editY = addShopPreview(editX, editY, false, false);
+            } // end !isBombMap（普通图分类列编辑器）
 
-            // 列布局：物品ID（可带NBT） | 价格 | 限购次数 | 删除
-            int shopItemFieldWidth = Math.max(100, Math.min(200, contentWidth - 280));
-            int shopPriceFieldX = editX + shopItemFieldWidth + 10;
-            int shopMaxFieldX = shopPriceFieldX + 60;
-            int shopDelX = shopMaxFieldX + 60;
+            // ---- 爆破图包点（仅 BOMB 图显示）----
+            if (editingMap.isBombMap()) {
+                rightScrollables.add(new LabelWidget(editX, editY, Text.literal("爆破包点 (Bombsites):"), 9));
+                editY += 18;
 
-            // 表头
-            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("物品ID（可带NBT）"), 9));
-            rightScrollables.add(new LabelWidget(shopPriceFieldX, editY, Text.literal("价格"), 9));
-            rightScrollables.add(new LabelWidget(shopMaxFieldX, editY, Text.literal("限购次数"), 9));
-            rightScrollables.add(new LabelWidget(shopDelX, editY, Text.literal("删除"), 9));
-            editY += 18;
+                List<MapConfig.Bombsite> sites = editingMap.getBombsites();
+                // 列布局：名称 | X | Y | Z | 半径 | 删除
+                int siteNameW = 60;
+                int siteCoordW = Math.min(70, (contentWidth - siteNameW - 130) / 4);
+                int siteX0 = editX + siteNameW + 6;
+                int siteDelX = siteX0 + siteCoordW * 4 + 24;
 
-            List<GlobalConfig.ShopItem> shopItems = editingMap.getShopItems();
-            for (int i = 0; i < shopItems.size(); i++) {
-                GlobalConfig.ShopItem item = shopItems.get(i);
-                final int idx = i;
+                // 表头（列含义：名称 / 坐标 X·Y·Z / 安放判定半径 / 删除），与下方输入框逐列对齐
+                if (!sites.isEmpty()) {
+                    rightScrollables.add(new LabelWidget(editX, editY, Text.literal("名称"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0, editY, Text.literal("X"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8), editY, Text.literal("Y"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8) * 2, editY, Text.literal("Z"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8) * 3, editY, Text.literal("半径"), 9));
+                    rightScrollables.add(new LabelWidget(siteDelX, editY, Text.literal("删除"), 9));
+                    editY += 12;
+                }
 
-                // 输入框1：物品ID（可带NBT）
-                TextFieldWidget shopItemField = new TextFieldWidget(textRenderer, editX, editY + i * 22, shopItemFieldWidth, 18, Text.literal(""));
-                shopItemField.setMaxLength(256);
-                shopItemField.setText(item.getItemId() != null ? item.getItemId() : "");
-                shopItemField.setChangedListener(s -> {
-                    shopItems.get(idx).setItemId(s);
-                    hasUnsavedChanges = true;
-                });
-                rightScrollables.add(shopItemField);
+                for (int i = 0; i < sites.size(); i++) {
+                    MapConfig.Bombsite site = sites.get(i);
+                    final int idx = i;
+                    int rowY = editY + i * 22;
 
-                // 输入框2：价格
-                NumberTextField priceField = new NumberTextField(shopPriceFieldX, editY + i * 22, 50, 18, Text.literal(""));
-                priceField.setText(String.valueOf(item.getPrice()));
-                priceField.setChangedListener(s -> {
-                    if (!s.isEmpty()) {
-                        try {
-                            shopItems.get(idx).setPrice(Integer.parseInt(s));
-                            hasUnsavedChanges = true;
-                        } catch (NumberFormatException ignored) {}
+                    TextFieldWidget siteNameField = new TextFieldWidget(textRenderer, editX, rowY, siteNameW, 18, Text.literal(""));
+                    siteNameField.setText(site.getName());
+                    siteNameField.setChangedListener(s -> {
+                        if (!s.isBlank()) sites.get(idx).setName(s);
+                        hasUnsavedChanges = true;
+                    });
+                    rightScrollables.add(siteNameField);
+
+                    int[] coords = {site.getX(), site.getY(), site.getZ()};
+                    for (int c = 0; c < 3; c++) {
+                        final int axis = c;
+                        NumberTextField coordField = new NumberTextField(siteX0 + c * (siteCoordW + 8), rowY, siteCoordW, 18, Text.literal(""));
+                        coordField.setText(String.valueOf(coords[c]));
+                        coordField.setChangedListener(s -> {
+                            if (!s.isEmpty()) {
+                                try {
+                                    int v = Integer.parseInt(s);
+                                    if (axis == 0) sites.get(idx).setX(v);
+                                    else if (axis == 1) sites.get(idx).setY(v);
+                                    else sites.get(idx).setZ(v);
+                                    hasUnsavedChanges = true;
+                                } catch (NumberFormatException ignored) {}
+                            }
+                        });
+                        rightScrollables.add(coordField);
                     }
-                });
-                rightScrollables.add(priceField);
 
-                // 输入框3：限购次数
-                NumberTextField maxPurchaseField = new NumberTextField(shopMaxFieldX, editY + i * 22, 50, 18, Text.literal(""));
-                maxPurchaseField.setText(String.valueOf(item.getMaxPurchase()));
-                maxPurchaseField.setChangedListener(s -> {
-                    if (!s.isEmpty()) {
-                        try {
-                            shopItems.get(idx).setMaxPurchase(Integer.parseInt(s));
-                            hasUnsavedChanges = true;
-                        } catch (NumberFormatException ignored) {}
-                    }
-                });
-                rightScrollables.add(maxPurchaseField);
+                    NumberTextField radiusField = new NumberTextField(siteX0 + 3 * (siteCoordW + 8), rowY, siteCoordW, 18, Text.literal(""));
+                    radiusField.setText(String.valueOf(site.getRadius()));
+                    radiusField.setChangedListener(s -> {
+                        if (!s.isEmpty()) {
+                            try {
+                                sites.get(idx).setRadius(Integer.parseInt(s));
+                                hasUnsavedChanges = true;
+                            } catch (NumberFormatException ignored) {}
+                        }
+                    });
+                    rightScrollables.add(radiusField);
 
-                ButtonWidget delShopItemBtn = ButtonWidget.builder(
-                        Text.literal("×"),
+                    ButtonWidget delSiteBtn = ButtonWidget.builder(
+                            Text.literal("×"),
+                            button -> {
+                                List<MapConfig.Bombsite> remaining = new java.util.ArrayList<>(editingMap.getBombsites());
+                                remaining.remove(idx);
+                                editingMap.setBombsites(remaining);
+                                hasUnsavedChanges = true;
+                                clearChildren();
+                                init();
+                            }
+                    ).dimensions(siteDelX, rowY, 16, 18).build();
+                    rightScrollables.add(delSiteBtn);
+                }
+                editY += sites.size() * 22 + 4;
+
+                // 快速添加：以玩家脚下方块坐标新建包点（可视化取点）
+                ButtonWidget addSiteHereBtn = ButtonWidget.builder(
+                        Text.literal("+ 在脚下添加包点"),
                         button -> {
-                            editingMap.getShopItems().remove(idx);
+                            MinecraftClient client = MinecraftClient.getInstance();
+                            if (client.player == null) return;
+                            var pos = client.player.getBlockPos();
+                            java.util.List<MapConfig.Bombsite> updated = new java.util.ArrayList<>(editingMap.getBombsites());
+                            updated.add(new MapConfig.Bombsite("A", pos.getX(), pos.getY(), pos.getZ(), 3));
+                            editingMap.setBombsites(updated);
                             hasUnsavedChanges = true;
                             clearChildren();
                             init();
                         }
-                ).dimensions(shopDelX, editY + i * 22, 16, 18).build();
-                rightScrollables.add(delShopItemBtn);
+                ).dimensions(editX, editY, 150, 20).build();
+                rightScrollables.add(addSiteHereBtn);
+                editY += ROW_GAP;
+                addHint(editX, editY, "包点：站入立方体范围内即可安放 C4（半径为半边长，三轴 |坐标差| ≤ 半径，无需注视方块）");
+                editY += 11;
+                addHint(editX, editY, "快速取点：走到包点中央，点击\"在脚下添加包点\"即可写入当前位置");
+                editY += 11;
+
+                // ---- C4 参数（BombSettings，按图配置）----
+                rightScrollables.add(new LabelWidget(editX, editY, Text.literal("C4 参数:"), 9));
+                editY += 18;
+                MapConfig.BombSettings bs = editingMap.getBombSettings();
+
+                // 第一行：整数参数（回合限时/C4倒计时/安放耗时/裸拆/带装备拆/回合间歇/爆音范围）
+                int bsFieldW = Math.min(56, (contentWidth - 150) / 7);
+                String[] intLabels = {"回合限时(s)", "C4倒计时(s)", "安放耗时(s)", "裸拆(s)", "带装备拆(s)", "回合间歇(s)", "爆音范围"};
+                int[] intValues = {bs.getRoundTimeSeconds(), bs.getC4TimerSeconds(), bs.getPlantTimeSeconds(),
+                        bs.getDefuseSeconds(), bs.getDefuseKitSeconds(), bs.getRoundIntermissionSeconds(), bs.getExplosionSoundRange()};
+                java.util.function.IntConsumer[] intSetters = {
+                        bs::setRoundTimeSeconds, bs::setC4TimerSeconds, bs::setPlantTimeSeconds,
+                        bs::setDefuseSeconds, bs::setDefuseKitSeconds, bs::setRoundIntermissionSeconds, bs::setExplosionSoundRange
+                };
+                for (int c = 0; c < intLabels.length; c++) {
+                    final int axis = c;
+                    int fx = editX + c * (bsFieldW + 8);
+                    rightScrollables.add(new LabelWidget(fx, editY, Text.literal(intLabels[c]), 9));
+                    NumberTextField f = new NumberTextField(fx, editY + 11, bsFieldW, 18, Text.literal(""));
+                    f.setText(String.valueOf(intValues[c]));
+                    f.setChangedListener(s -> {
+                        if (!s.isEmpty()) {
+                            try {
+                                intSetters[axis].accept(Integer.parseInt(s));
+                                editingMap.setBombSettings(bs);
+                                hasUnsavedChanges = true;
+                            } catch (NumberFormatException ignored) {}
+                        }
+                    });
+                    rightScrollables.add(f);
+                }
+                editY += 34;
+
+                // 第二行：爆炸模型参数（双精度）
+                String[] dblLabels = {"衰减系数m", "基础伤害h", "减伤起点lA", "减伤终点lB", "背对减伤dB"};
+                double[] dblValues = {bs.getExplosionM(), bs.getExplosionH(), bs.getExplosionLA(),
+                        bs.getExplosionLB(), bs.getExplosionBackDamage()};
+                java.util.function.DoubleConsumer[] dblSetters = {
+                        bs::setExplosionM, bs::setExplosionH, bs::setExplosionLA,
+                        bs::setExplosionLB, bs::setExplosionBackDamage
+                };
+                for (int c = 0; c < dblLabels.length; c++) {
+                    final int axis = c;
+                    int fx = editX + c * (bsFieldW + 8);
+                    rightScrollables.add(new LabelWidget(fx, editY, Text.literal(dblLabels[c]), 9));
+                    DecimalTextField f = new DecimalTextField(fx, editY + 11, bsFieldW, 18, Text.literal(""));
+                    f.setText(String.valueOf(dblValues[c]));
+                    f.setChangedListener(s -> {
+                        if (!s.isEmpty()) {
+                            try {
+                                dblSetters[axis].accept(Double.parseDouble(s));
+                                editingMap.setBombSettings(bs);
+                                hasUnsavedChanges = true;
+                            } catch (NumberFormatException ignored) {}
+                        }
+                    });
+                    rightScrollables.add(f);
+                }
+                editY += 34;
+                addHint(editX, editY, "伤害计算：d1=-m·l^2+h 减伤率 p 在 lA~lB 线性衰减到 0；eCR=碰撞箱未遮挡占比，eCR≥0.5 时 eCRB=1/eCR，否则 eCRB=0.5；最终伤害d=d1*p*eCRB-dB（向下取整，最小0）");
+                editY += 11;
+
+                // ---- 购买页分类列（T/红 与 CT/蓝 分开配置；各 4 列，第 1 列固定装备列）----
+                // 旧配置兼容：T/CT 均未独立配置但存在通用列（旧版单套配置）时，
+                // 复制为两队初始配置（仅在编辑副本上生效，保存后才落盘）
+                if (editingMap.getShopColumnsT().isEmpty() && editingMap.getShopColumnsCT().isEmpty()
+                        && !editingMap.getShopColumns().isEmpty()) {
+                    editingMap.setShopColumnsT(ConfigScreenSupport.copyShopColumns(editingMap.getShopColumns()));
+                    editingMap.setShopColumnsCT(ConfigScreenSupport.copyShopColumns(editingMap.getShopColumns()));
+                }
+
+                editY = addShopColumnEditor(editX, editY, 4, false, true, true);
+                editY = addShopPreview(editX, editY, true, true);
+                editY = addShopColumnEditor(editX, editY, 4, false, true, false);
+                editY = addShopPreview(editX, editY, true, false);
             }
-            editY += shopItems.size() * 22 + 4;
-
-            // 手动添加 + 手持添加
-            ButtonWidget addShopItemBtn = ButtonWidget.builder(
-                    Text.literal("+ 添加商品"),
-                    button -> {
-                        editingMap.getShopItems().add(new GlobalConfig.ShopItem("", 0, 1));
-                        hasUnsavedChanges = true;
-                        clearChildren();
-                        init();
-                    }
-            ).dimensions(editX, editY, 110, 20).build();
-            rightScrollables.add(addShopItemBtn);
-
-            ButtonWidget addShopFromHandBtn = ButtonWidget.builder(
-                    Text.literal("添加武器 (手持物品)"),
-                    button -> addWeaponFromHand()
-            ).dimensions(editX + 120, editY, 160, 20).build();
-            rightScrollables.add(addShopFromHandBtn);
-            editY += ROW_GAP;
 
             // ---- 边界坐标（公共 + 红队 + 蓝队，队伍边界全 0 = 使用公共边界） ----
             // 位置调整：BOUNDARY_COL_SPACING（组间距）/ BOUNDARY_FIELD_OFFSET（输入框偏移）
@@ -697,9 +820,10 @@ public class ConfigScreen extends Screen {
             rightScrollables.add(addBlueBtn);
             editY += ROW_GAP;
 
-            // ---- 背景图 Base64 ----
-            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("背景图 Base64:")));
+            // ---- 背景图（Base64 或 http(s):// 图片 URL，Base64 上限 327680 字符） ----
+            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("背景图 (Base64/URL):")));
             TextFieldWidget backgroundField = new TextFieldWidget(textRenderer, editX + 120, editY, contentWidth - 140, 18, Text.literal(""));
+            backgroundField.setMaxLength(400000);
             backgroundField.setText(editingMap.getBackgroundBase64() != null ? editingMap.getBackgroundBase64() : "");
             backgroundField.setChangedListener(s -> {
                 editingMap.setBackgroundBase64(s);
@@ -707,6 +831,8 @@ public class ConfigScreen extends Screen {
             });
             rightScrollables.add(backgroundField);
             editY += ROW_GAP;
+            addHint(editX, editY, "填 http(s):// 开头的图片 URL（无大小限制，客户端自行下载）或 Base64（上限 327680 字符）");
+            editY += 11;
         }
 
         return editY;
@@ -767,9 +893,9 @@ public class ConfigScreen extends Screen {
                 });
                 rightScrollables.add(slotField);
 
-                // 输入框2：物品ID（可带NBT）
+                // 输入框2：物品ID（可带数量后缀或组件 SNBT；上限放宽防手持添加导出的组件串被截断）
                 TextFieldWidget itemField = new TextFieldWidget(textRenderer, gearItemFieldX, globalRowY + i * 22, gearItemFieldWidth, 18, Text.literal(""));
-                itemField.setMaxLength(256);
+                itemField.setMaxLength(4096);
                 itemField.setText(slot.getItemId());
                 itemField.setChangedListener(s -> {
                     globalConfig.getDefaultGear().get(idx).setItemId(s);
@@ -798,8 +924,14 @@ public class ConfigScreen extends Screen {
                         clearChildren();
                         init();
                     }
-            ).dimensions(tabX, globalRowY, 120, 20).build();
+            ).dimensions(tabX, globalRowY, 110, 20).build();
             rightScrollables.add(addGearBtn);
+
+            ButtonWidget addGearHandBtn = ButtonWidget.builder(
+                    Text.literal("手持添加 (含组件)"),
+                    button -> addGearFromHand()
+            ).dimensions(tabX + 120, globalRowY, 150, 20).build();
+            rightScrollables.add(addGearHandBtn);
             globalRowY += ROW_GAP;
 
             rightScrollables.add(new LabelWidget(tabX, globalRowY,
@@ -864,6 +996,250 @@ public class ConfigScreen extends Screen {
         addBoundaryField(editX + BOUNDARY_COL_SPACING, bY, "Max Y:", boundary::setMaxY, boundary.getMaxY());
         addBoundaryField(editX + 2 * BOUNDARY_COL_SPACING, bY, "Max Z:", boundary::setMaxZ, boundary.getMaxZ());
         return bY + ROW_GAP;
+    }
+
+    /**
+     * 【作用】商店分类列编辑器（购买页网格布局的列配置）：
+     *         每列可配列头名称与列头图标，列内商品行 = 物品ID（/give 格式）| 价格 | (限购，仅普通图)
+     *         | 显示名 | 图标 | 删除；支持逐列添加商品/手持添加（保留数据组件）与添加/删除列。
+     *         普通图 5 列通用；爆破图 T/红 与 CT/蓝 各自独立配置（tTeam 选择编辑哪支队伍），
+     *         各最多 4 列（购买页第 1 列固定为装备列：CT 拆弹装备、T 方空列）。
+     * @param tTeam 爆破图时 true=编辑 T 方（红队）列、false=编辑 CT 方（蓝队）列；普通图忽略
+     * @return 推进后的 editY
+     */
+    private int addShopColumnEditor(int editX, int editY, int maxCols, boolean showMaxPurchase,
+                                    boolean bombMode, boolean tTeam) {
+        rightScrollables.add(new LabelWidget(editX, editY, Text.literal(bombMode
+                ? (tTeam ? "T 方（红队）购买页分类列（最多 " + maxCols
+                        + " 列；第 1 列固定为装备列，T 方显示空列）:"
+                        : "CT 方（蓝队）购买页分类列（最多 " + maxCols
+                        + " 列；第 1 列固定为拆弹装备，仅 CT 可见）:")
+                : "商店分类列（购买页 " + maxCols + " 列网格布局）:"), 9));
+        editY += 18;
+
+        // 列列表存取：普通图 = shopColumns；爆破图按 tTeam = shopColumnsT / shopColumnsCT
+        List<MapConfig.ShopColumn> shopCols = bombMode
+                ? new ArrayList<>(tTeam ? editingMap.getShopColumnsT() : editingMap.getShopColumnsCT())
+                : new ArrayList<>(editingMap.getShopColumns());
+        // 超出上限的列直接截断（与购买页生效列数一致）
+        while (shopCols.size() > maxCols) {
+            shopCols.remove(shopCols.size() - 1);
+        }
+        writeShopColumns(shopCols, bombMode, tTeam);
+
+        // 商品行布局：物品ID | 价格 | (限购) | 显示名 | 图标 | ×
+        int fixedRight = 45 + (showMaxPurchase ? 51 : 0) + 96 + 86 + 22; // 价格/限购/显示名/图标/删除 固定宽
+        int colItemNameW = Math.max(60, contentWidth - fixedRight - 60);
+        int itemRowX = editX + 14;
+        int priceX = itemRowX + colItemNameW + 6;
+        int maxX = priceX + 45 + 6;
+        int nameX = showMaxPurchase ? maxX + 45 + 6 : priceX + 45 + 6;
+        int iconX = nameX + 90 + 6;
+        int delX = iconX + Math.min(80, contentWidth - 320 - colItemNameW) + 6;
+
+        // 商品行表头（与下方商品行逐列对齐；有列时才显示）
+        if (!shopCols.isEmpty()) {
+            rightScrollables.add(new LabelWidget(itemRowX, editY, Text.literal("物品ID（/give 格式）"), 9));
+            rightScrollables.add(new LabelWidget(priceX, editY, Text.literal("价格"), 9));
+            if (showMaxPurchase) {
+                rightScrollables.add(new LabelWidget(maxX, editY, Text.literal("限购"), 9));
+            }
+            rightScrollables.add(new LabelWidget(nameX, editY, Text.literal("显示名"), 9));
+            rightScrollables.add(new LabelWidget(iconX, editY, Text.literal("图标"), 9));
+            rightScrollables.add(new LabelWidget(delX, editY, Text.literal("删除"), 9));
+            editY += 16;
+        }
+
+        for (int c = 0; c < shopCols.size(); c++) {
+            MapConfig.ShopColumn col = shopCols.get(c);
+            final int colIdx = c;
+
+            // 列头行：序号 + 名称框 + 图标框 + 删除列（爆破图列号从 2 起：第 1 列固定为拆弹装备）
+            rightScrollables.add(new LabelWidget(editX, editY + 3,
+                    Text.literal((bombMode ? "列 " + (c + 2) : "列 " + (c + 1)) + ":"), 9));
+            TextFieldWidget colNameField = new TextFieldWidget(textRenderer, editX + 34, editY, 90, 18, Text.literal(""));
+            colNameField.setMaxLength(64);
+            colNameField.setText(col.getName());
+            colNameField.setChangedListener(s -> {
+                if (!s.isBlank()) shopCols.get(colIdx).setName(s);
+                hasUnsavedChanges = true;
+            });
+            rightScrollables.add(colNameField);
+
+            TextFieldWidget colIconField = new TextFieldWidget(textRenderer, editX + 132, editY,
+                    Math.min(200, contentWidth - 320), 18, Text.literal(""));
+            colIconField.setMaxLength(32000);
+            colIconField.setText(col.getIcon());
+            colIconField.setChangedListener(s -> {
+                shopCols.get(colIdx).setIcon(s);
+                hasUnsavedChanges = true;
+            });
+            rightScrollables.add(colIconField);
+
+            ButtonWidget delColBtn = ButtonWidget.builder(Text.literal("× 删除列"), button -> {
+                shopCols.remove(colIdx);
+                writeShopColumns(shopCols, bombMode, tTeam);
+                hasUnsavedChanges = true;
+                clearChildren();
+                init();
+            }).dimensions(editX + 140 + Math.min(200, contentWidth - 320), editY - 1, 64, 18).build();
+            rightScrollables.add(delColBtn);
+            editY += 22;
+
+            // 缩进商品行：物品ID | 价格 | (限购) | 显示名 | 图标 | ×
+            List<GlobalConfig.ShopItem> colItems = col.getItems();
+            for (int r = 0; r < colItems.size(); r++) {
+                GlobalConfig.ShopItem item = colItems.get(r);
+                final int rIdx = r;
+                int rowY = editY + r * 22;
+
+                // 物品串：/give 格式 "id[组件] 数量"（兼容旧 SNBT）；上限放宽防手持导出的组件串被截断
+                TextFieldWidget f = new TextFieldWidget(textRenderer, itemRowX, rowY, colItemNameW, 18, Text.literal(""));
+                f.setMaxLength(4096);
+                f.setText(item.getItemId() != null ? item.getItemId() : "");
+                f.setChangedListener(s -> {
+                    colItems.get(rIdx).setItemId(s);
+                    hasUnsavedChanges = true;
+                });
+                rightScrollables.add(f);
+
+                NumberTextField pf = new NumberTextField(priceX, rowY, 45, 18, Text.literal(""));
+                pf.setText(String.valueOf(item.getPrice()));
+                pf.setChangedListener(s -> {
+                    if (!s.isEmpty()) {
+                        try {
+                            colItems.get(rIdx).setPrice(Integer.parseInt(s));
+                            hasUnsavedChanges = true;
+                        } catch (NumberFormatException ignored) {}
+                    }
+                });
+                rightScrollables.add(pf);
+
+                // 限购次数（0 = 不限购；仅普通图免费商店生效，爆破图按余额购买不显示）
+                if (showMaxPurchase) {
+                    NumberTextField mf = new NumberTextField(maxX, rowY, 45, 18, Text.literal(""));
+                    mf.setText(String.valueOf(item.getMaxPurchase()));
+                    mf.setChangedListener(s -> {
+                        if (!s.isEmpty()) {
+                            try {
+                                colItems.get(rIdx).setMaxPurchase(Integer.parseInt(s));
+                                hasUnsavedChanges = true;
+                            } catch (NumberFormatException ignored) {}
+                        }
+                    });
+                    rightScrollables.add(mf);
+                }
+
+                TextFieldWidget nf = new TextFieldWidget(textRenderer, nameX, rowY, 90, 18, Text.literal(""));
+                nf.setMaxLength(128);
+                nf.setText(item.getDisplayName());
+                nf.setChangedListener(s -> {
+                    colItems.get(rIdx).setDisplayName(s);
+                    hasUnsavedChanges = true;
+                });
+                rightScrollables.add(nf);
+
+                // 图标：base64（上限 32000 字符）/ http(s) URL / 留空 = 物品栏贴图
+                TextFieldWidget if_ = new TextFieldWidget(textRenderer, iconX, rowY,
+                        Math.min(80, contentWidth - 320 - colItemNameW), 18, Text.literal(""));
+                if_.setMaxLength(32000);
+                if_.setText(item.getIcon());
+                if_.setChangedListener(s -> {
+                    colItems.get(rIdx).setIcon(s);
+                    hasUnsavedChanges = true;
+                });
+                rightScrollables.add(if_);
+
+                ButtonWidget delItemBtn = ButtonWidget.builder(Text.literal("×"), button -> {
+                    colItems.remove(rIdx);
+                    col.setItems(colItems);
+                    writeShopColumns(shopCols, bombMode, tTeam);
+                    hasUnsavedChanges = true;
+                    clearChildren();
+                    init();
+                }).dimensions(delX, rowY, 16, 18).build();
+                rightScrollables.add(delItemBtn);
+            }
+            editY += colItems.size() * 22 + 2;
+
+            // 列内添加商品 + 手持添加（捕获当前主手物品到该列，/give 格式含数据组件）
+            int addItemY = editY;
+            ButtonWidget addItemBtn = ButtonWidget.builder(Text.literal("+ 此列添加商品"), button -> {
+                shopCols.get(colIdx).getItems().add(new GlobalConfig.ShopItem("", 0, 0));
+                writeShopColumns(shopCols, bombMode, tTeam);
+                hasUnsavedChanges = true;
+                clearChildren();
+                init();
+            }).dimensions(itemRowX, addItemY, 110, 20).build();
+            rightScrollables.add(addItemBtn);
+
+            ButtonWidget handAddBtn = ButtonWidget.builder(Text.literal("手持添加到本列"), button -> {
+                String itemStr = handItemNbt();
+                if (itemStr == null) return;
+                shopCols.get(colIdx).getItems().add(new GlobalConfig.ShopItem(itemStr, 0, 0));
+                writeShopColumns(shopCols, bombMode, tTeam);
+                hasUnsavedChanges = true;
+                clearChildren();
+                init();
+            }).dimensions(itemRowX + 120, addItemY, 130, 20).build();
+            rightScrollables.add(handAddBtn);
+            editY += ROW_GAP + 4;
+        }
+
+        if (shopCols.size() < maxCols) {
+            ButtonWidget addColBtn = ButtonWidget.builder(Text.literal("+ 添加分类列"), button -> {
+                shopCols.add(new MapConfig.ShopColumn("分类"));
+                writeShopColumns(shopCols, bombMode, tTeam);
+                hasUnsavedChanges = true;
+                clearChildren();
+                init();
+            }).dimensions(editX, editY, 110, 20).build();
+            rightScrollables.add(addColBtn);
+            editY += ROW_GAP;
+        }
+
+        // 字段说明（按模式区分：爆破图第 1 列为固定装备列且 T/CT 分开配置；普通图全 5 列可配且免费发放）
+        addHint(editX, editY, bombMode
+                ? (tTeam
+                        ? "购买页第 1 列为装备列，T 方显示空列（无固定购买项）；本节配置仅对 T 方（红队）生效，列内商品超出可滚轮上下滚动"
+                        : "购买页第 1 列固定为拆弹装备（价格在全局经济参数 defuserPrice，仅 CT 可见）；本节配置仅对 CT 方（蓝队）生效")
+                : "购买页为 " + maxCols + " 列网格布局（免费发放，按列展示）；列内商品超出可滚轮上下滚动");
+        editY += 11;
+        addHint(editX, editY, "物品串用 /give 格式：id[minecraft:组件={...}] 数量（手持添加自动生成）；图标可填 base64（≤32K）/图片 URL/留空（= 物品栏贴图）");
+        editY += 11;
+        return editY;
+    }
+
+    /**
+     * 【作用】把分类列列表写回编辑中地图的对应字段：普通图 → shopColumns；
+     *         爆破图 tTeam=true → shopColumnsT（红/T）、false → shopColumnsCT（蓝/CT）。
+     * 【被谁使用】addShopColumnEditor（初始化截断与增删列/商品后回写）。
+     */
+    private void writeShopColumns(List<MapConfig.ShopColumn> cols, boolean bombMode, boolean tTeam) {
+        if (!bombMode) {
+            editingMap.setShopColumns(cols);
+        } else if (tTeam) {
+            editingMap.setShopColumnsT(cols);
+        } else {
+            editingMap.setShopColumnsCT(cols);
+        }
+    }
+
+    /**
+     * 【作用】购买页预览（按当前配置实时绘制 5 列网格布局，随编辑刷新）：
+     *         爆破图按队伍分开预览——tTeam=true 为 T 方视角（第 1 列空列）、false 为 CT 方视角
+     *         （第 1 列拆弹装备）；普通图为 5 列分类网格。
+     * @return 推进后的 editY
+     */
+    private int addShopPreview(int editX, int editY, boolean bomb, boolean tTeam) {
+        List<MapConfig.ShopColumn> cols = bomb
+                ? editingMap.getBombShopColumnsForTeam(tTeam)
+                : editingMap.getShopColumns();
+        int maxRows = cols.stream().mapToInt(col -> col.getItems().size()).max().orElse(1);
+        int previewH = 16 + Math.min(Math.max(1, maxRows), 5) * 24 + 4;
+        rightScrollables.add(new ShopPreviewWidget(editX, editY, contentWidth, previewH,
+                () -> editingMap, () -> globalConfig.getBombEconomy().getDefuserPrice(), bomb, tTeam));
+        return editY + previewH + 14;
     }
 
     /**
@@ -932,6 +1308,7 @@ public class ConfigScreen extends Screen {
         selectedMapIndex = maps.size() - 1;
         editingMap = ConfigScreenSupport.deepCopyMap(newMap);
         hasUnsavedChanges = true;
+        rightScrollOffset = 0; // 新建地图回到编辑器顶部
         clearChildren();
         init();
     }
@@ -967,6 +1344,7 @@ public class ConfigScreen extends Screen {
             editingMap = null;
         }
         hasUnsavedChanges = true;
+        rightScrollOffset = 0; // 删除地图后回到编辑器顶部
         clearChildren();
         init();
     }
@@ -1007,6 +1385,30 @@ public class ConfigScreen extends Screen {
             }
         }
 
+        // 背景图校验：Base64 上限 327680 字符；http/https URL 不限大小
+        for (MapConfig m : maps) {
+            String bg = m.getBackgroundBase64();
+            if (bg == null || bg.isEmpty()) continue;
+            if (bg.startsWith("http://") || bg.startsWith("https://")) continue;
+            if (bg.length() > 327680) {
+                confirmDialog.show(
+                        Text.literal("§c背景图超长"),
+                        Text.literal("地图 §f" + m.getId() + "§r 的背景图 Base64 为 " + bg.length()
+                                + " 字符（上限 327680）。请压缩图片，或改用图片 URL（http/https 链接）"),
+                        null
+                );
+                return;
+            }
+        }
+
+        // 物品ID 解析预校验（仅警告不阻断）：列出发放时会解析失败的条目，
+        // 旧版 1.20 tag NBT 已由服务端自动迁移，无需手动改写
+        List<String> invalidItems = collectInvalidItemIds();
+        if (!invalidItems.isEmpty()) {
+            MinecraftClient.getInstance().player.sendMessage(Text.literal(
+                    "§e[警告] 以下物品ID无法解析，发放时将静默失败：§f" + String.join("、", invalidItems)), false);
+        }
+
         try {
             com.google.gson.JsonObject obj = new com.google.gson.JsonObject();
             obj.add("maps", GSON.toJsonTree(maps));
@@ -1042,6 +1444,49 @@ public class ConfigScreen extends Screen {
     }
 
     /**
+     * 【作用】保存前的物品ID解析预校验：遍历全部地图的商店商品（普通图 = 分类列平铺；
+     *         爆破图 = T/CT 两套分类列各自平铺，未配置时回退通用列/旧版平铺 shopItems，
+     *         相同物品串去重防重复警告）与全局默认装备，用与服务端一致的方式解析
+     *         （ItemStrings.isPlausible：/give 格式 / SNBT / 纯ID），返回无法解析条目的展示列表
+     *         （格式 "地图ID/全局: 条目"，上限 8 条防刷屏）。空手无玩家世界时跳过校验。
+     */
+    private List<String> collectInvalidItemIds() {
+        List<String> invalid = new java.util.ArrayList<>();
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.world == null) return invalid;
+
+        for (MapConfig m : maps) {
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            List<GlobalConfig.ShopItem> toCheck = new java.util.ArrayList<>(m.getFlatShopItems());
+            if (m.isBombMap()) {
+                toCheck.addAll(m.getBombFlatShopItems(true));
+                toCheck.addAll(m.getBombFlatShopItems(false));
+            }
+            for (GlobalConfig.ShopItem item : toCheck) {
+                String id = item.getItemId();
+                if (id == null || id.isBlank() || !seen.add(id)) continue;
+                if (!ItemStrings.isPlausible(id) && invalid.size() < 8) {
+                    invalid.add(m.getId() + ": " + shortItemPreview(id));
+                }
+            }
+        }
+        for (GlobalConfig.EquipSlot gear : globalConfig.getDefaultGear()) {
+            String id = gear.getItemId();
+            if (id == null || id.isBlank()) continue;
+            if (!ItemStrings.isPlausible(id) && invalid.size() < 8) {
+                invalid.add("全局装备: " + shortItemPreview(id));
+            }
+        }
+        return invalid;
+    }
+
+    /** 物品条目的短展示（截断 NBT 部分只留物品ID，避免聊天刷屏）。 */
+    private String shortItemPreview(String raw) {
+        int brace = raw.indexOf('{');
+        return brace >= 0 ? raw.substring(0, brace).trim() + "{...}" : raw;
+    }
+
+    /**
      * 【作用】重新加载配置：放行一次被动同步刷新后向服务端请求同步，并立即重建界面。
      */
     private void reloadConfig() {
@@ -1066,26 +1511,44 @@ public class ConfigScreen extends Screen {
         }
         allowNextSyncRefresh = false;
         loadData();
+        rightScrollOffset = 0; // 重载后回到编辑器顶部
         clearChildren();
         init();
     }
 
-    // ---------- 添加武器到当前编辑地图的商店物品（手持物品，使用物品ID） ----------
-    private void addWeaponFromHand() {
+    // ---------- 添加手持物品到全局默认装备（槽位=下一个空闲 container.N） ----------
+    private void addGearFromHand() {
+        String itemNbt = handItemNbt();
+        if (itemNbt == null) return;
+        globalConfig.getDefaultGear().add(new GlobalConfig.EquipSlot(nextFreeContainerSlot(), itemNbt));
+        hasUnsavedChanges = true;
+        clearChildren();
+        init();
+    }
+
+    /**
+     * 【作用】取玩家主手物品的 /give 格式字符串（含数据组件导出）：
+     *         ItemStrings.fromStack 导出 "id[minecraft:组件={...}] 数量"，保留附魔/耐久/自定义名称
+     *         等 1.21 组件（服务端 ItemStrings.toStack 与客户端预览均可解析）；
+     *         空手返回 null 并提示。
+     */
+    private String handItemNbt() {
         MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null) return;
+        if (client.player == null) return null;
         var stack = client.player.getMainHandStack();
         if (stack.isEmpty()) {
             client.player.sendMessage(Text.literal("§c请手持一个物品"), false);
-            return;
+            return null;
         }
-        String itemId = Registries.ITEM.getId(stack.getItem()).toString();
-        GlobalConfig.ShopItem item = new GlobalConfig.ShopItem(itemId, 0, 1);
-        editingMap.getShopItems().add(item);
-        hasUnsavedChanges = true;
-        client.player.sendMessage(Text.literal("§a已添加武器: " + stack.getName().getString()), false);
-        clearChildren();
-        init();
+        try {
+            return cn.woshiikun_1145.mcmod.choco.cstmm.util.ItemStrings.fromStack(
+                    stack, client.world.getRegistryManager());
+        } catch (Exception e) {
+            // 序列化兜底：仅写纯物品 ID（丢失组件，与旧行为一致）
+            String id = Registries.ITEM.getId(stack.getItem()).toString();
+            client.player.sendMessage(Text.literal("§e组件序列化失败，仅添加物品ID: " + id), false);
+            return id;
+        }
     }
 
     // ---------- 渲染 ----------
@@ -1151,8 +1614,9 @@ public class ConfigScreen extends Screen {
             if (drawable instanceof ClickableWidget widget) {
                 // 传入滚动调整后的鼠标坐标，保证 hover 高亮与实际渲染位置一致
                 widget.render(context, mouseX, mouseY + rightScrollOffset, delta);
-            } else if (drawable instanceof LabelWidget label) {
-                label.render(context, mouseX, mouseY, delta);
+            } else {
+                // 非交互控件（LabelWidget / ShopPreviewWidget）：无视鼠标坐标直接渲染
+                drawable.render(context, mouseX, mouseY, delta);
             }
         }
         matrices.pop();

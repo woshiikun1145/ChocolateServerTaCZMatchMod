@@ -76,7 +76,7 @@ public class ClanTabPanel {
         dlgAbbrField.setMaxLength(10);
         dlgBadgeField = makeField(240, "徽标 Base64 或图片 URL（可留空）");
         // TextFieldWidget 默认上限 32 字符——徽标输入框不设长度上限，可粘贴 base64 或 URL；
-        // 超限时（URL ≤512 字符 / base64 解码后 ≤48KiB）在提交前就地拦截，不发分片包
+        // base64 解码后超 48KiB 时在提交前就地拦截（URL 不限大小），不发分片包
         dlgBadgeField.setMaxLength(Integer.MAX_VALUE);
         dlgLimitField = makeField(240, "成员数量限制（0=无限制）");
         dlgLimitField.setMaxLength(6);
@@ -440,7 +440,7 @@ public class ClanTabPanel {
         placeField(dlgNameField, lx, ly + 11, dw - 24); ly += 30;
         context.drawText(tr, "§7战队缩写（≤10字符）", lx, ly, 0xAAAAAA, true);
         placeField(dlgAbbrField, lx, ly + 11, dw - 24); ly += 30;
-        // 徽标支持 Base64（解码后 ≤48KiB）或图片 URL（≤512 字符），均可留空
+        // 徽标支持 Base64（解码后 ≤48KiB）或图片 URL（不限大小），均可留空
         context.drawText(tr, "§7徽标 Base64/URL:（可留空）", lx, ly, 0xAAAAAA, true);
         placeField(dlgBadgeField, lx, ly + 11, dw - 24); ly += 30;
         context.drawText(tr, "§7成员上限（0=无限制）", lx, ly, 0xAAAAAA, true);
@@ -569,7 +569,7 @@ public class ClanTabPanel {
             }
             if (name.isEmpty()) { dialogError = "战队名称不能为空"; return; }
             if (abbr.isEmpty()) { dialogError = "战队缩写不能为空"; return; }
-            // 徽标校验与服务端同规则（URL ≤512 字符 / base64 解码后 ≤48KiB）：
+            // 徽标校验与服务端同规则（base64 解码后 ≤48KiB；URL 不限大小）：
             // 提交前就地拦截而不是发分片包等服务端拒收（届时对话框已关闭，无法就地修正）
             String badgeError = ClanManager.validateBadge(badge);
             if (badgeError != null) {

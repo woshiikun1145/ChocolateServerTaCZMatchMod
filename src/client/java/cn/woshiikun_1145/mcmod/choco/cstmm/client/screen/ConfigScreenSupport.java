@@ -2,13 +2,16 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.client.screen;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.GlobalConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
+import cn.woshiikun_1145.mcmod.choco.cstmm.util.BlockPosAdapter;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 【作用】配置界面纯函数辅助（自 ConfigScreen 提取，逻辑逐字保留）：
- * 深拷贝与保存前校验。
+ * 【作用】配置界面纯函数辅助（自 ConfigScreen 提取）：
+ * 深拷贝（Gson 往返，保证全部持久化字段不丢失）与保存前校验。
  * 【被谁使用】仅 ConfigScreen 使用（loadData/addNewMap 等处深拷贝，saveConfig 保存前校验）。
  */
 final class ConfigScreenSupport {
@@ -16,66 +19,70 @@ final class ConfigScreenSupport {
     private ConfigScreenSupport() {
     }
 
-    // 【作用】深拷贝单张地图配置（含商店物品/边界/出生点集合），编辑副本与缓存数据互不影响
+    // 深拷贝专用 Gson（注册 BlockPos 适配器处理出生点列表；与 ConfigScreen 保存用实例同构）
+    private static final Gson COPY_GSON = new GsonBuilder()
+            .registerTypeAdapter(net.minecraft.util.math.BlockPos.class, new BlockPosAdapter())
+            .create();
+
+    /**
+     * 【作用】深拷贝单张地图配置：Gson 序列化→反序列化往返，自动覆盖全部持久化字段
+     *         （gameType/包点/炸弹参数/商店分类列/商店物品/地图默认装备等——此前手写逐字段
+     *         拷贝漏掉新字段导致保存时静默重置），编辑副本与缓存数据互不影响。
+     */
     static MapConfig deepCopyMap(MapConfig src) {
-        MapConfig dst = new MapConfig();
-        dst.setId(src.getId());
-        dst.setDisplayName(src.getDisplayName());
-        dst.setEnabled(src.isEnabled());
-        dst.setWinCondition(src.getWinCondition());
-        dst.setTargetKills(src.getTargetKills());
-        dst.setMaxDuration(src.getMaxDuration());
-        dst.setTieRule(src.getTieRule());
-        dst.setMinRedPlayers(src.getMinRedPlayers());
-        dst.setMinBluePlayers(src.getMinBluePlayers());
-        dst.setPrepareTime(src.getPrepareTime());
-        dst.setBoundaryWarningTime(src.getBoundaryWarningTime());
-        dst.setBoundaryPenaltyKills(src.getBoundaryPenaltyKills());
-        dst.setKickCooldownSeconds(src.getKickCooldownSeconds());
-        dst.setCooldownSeconds(src.getCooldownSeconds());
-        dst.setReinforceable(src.isReinforceable());
-        dst.setDimension(src.getDimension());
-        dst.setReinforcementMode(src.getReinforcementMode());
-        dst.setMaxRedPlayers(src.getMaxRedPlayers());
-        dst.setMaxBluePlayers(src.getMaxBluePlayers());
-        dst.setBackgroundBase64(src.getBackgroundBase64());
-        // 商店物品按地图配置，逐项深拷贝（源列表可能为 Gson 反序列化产生的 null）
-        List<GlobalConfig.ShopItem> srcShopItems = src.getShopItems();
-        List<GlobalConfig.ShopItem> dstShopItems = new ArrayList<>();
-        if (srcShopItems != null) {
-            for (GlobalConfig.ShopItem item : srcShopItems) {
-                dstShopItems.add(new GlobalConfig.ShopItem(item.getItemId(), item.getPrice(), item.getMaxPurchase()));
+        MapConfig dst = COPY_GSON.fromJson(COPY_GSON.toJsonTree(src), MapConfig.class);
+        if (dst == null) {
+            dst = new MapConfig();
+        }
+        return normalizeMap(dst);
+    }
+
+    /** Gson 往返后兜底：缺字段（null）重置为构造器默认值，避免编辑态写入临时对象丢失。 */
+    private static MapConfig normalizeMap(MapConfig m) {
+        if (m.getBoundary() == null) m.setBoundary(new MapConfig.Boundary());
+        if (m.getRedBoundary() == null) m.setRedBoundary(new MapConfig.Boundary());
+        if (m.getBlueBoundary() == null) m.setBlueBoundary(new MapConfig.Boundary());
+        if (m.getRedSpawns() == null) m.setRedSpawns(new ArrayList<>());
+        if (m.getBlueSpawns() == null) m.setBlueSpawns(new ArrayList<>());
+        if (m.getBombSettings() == null) m.setBombSettings(new MapConfig.BombSettings());
+        if (m.getShopItems() == null) m.setShopItems(new ArrayList<>());
+        if (m.getShopColumns() == null) m.setShopColumns(new ArrayList<>());
+        if (m.getShopColumnsT() == null) m.setShopColumnsT(new ArrayList<>());
+        if (m.getShopColumnsCT() == null) m.setShopColumnsCT(new ArrayList<>());
+        if (m.getBombsites() == null) m.setBombsites(new ArrayList<>());
+        if (m.getDefaultGear() == null) m.setDefaultGear(new ArrayList<>());
+        return m;
+    }
+
+    /**
+     * 【作用】深拷贝商店分类列列表（含列内商品逐项复制）：
+     *         用于爆破图 T/CT 队伍列的旧配置预填——两支队伍复制独立副本，
+     *         避免共享 ShopItem 对象导致一侧编辑串扰另一侧。
+     * 【被谁使用】ConfigScreen（爆破分类列编辑器的旧配置兼容预填）。
+     */
+    static List<MapConfig.ShopColumn> copyShopColumns(List<MapConfig.ShopColumn> src) {
+        List<MapConfig.ShopColumn> out = new ArrayList<>();
+        for (MapConfig.ShopColumn col : src) {
+            MapConfig.ShopColumn copy = new MapConfig.ShopColumn(col.getName());
+            copy.setIcon(col.getIcon());
+            for (GlobalConfig.ShopItem item : col.getItems()) {
+                copy.getItems().add(new GlobalConfig.ShopItem(item.getItemId(), item.getPrice(),
+                        item.getMaxPurchase(), item.getTeam(), item.getDisplayName(), item.getIcon()));
             }
+            out.add(copy);
         }
-        dst.setShopItems(dstShopItems);
-        copyBoundary(src.getBoundary(), dst.getBoundary());
-        copyBoundary(src.getRedBoundary(), dst.getRedBoundary());
-        copyBoundary(src.getBlueBoundary(), dst.getBlueBoundary());
-        dst.getRedSpawns().clear();
-        dst.getRedSpawns().addAll(src.getRedSpawns());
-        dst.getBlueSpawns().clear();
-        dst.getBlueSpawns().addAll(src.getBlueSpawns());
-        return dst;
+        return out;
     }
 
-    // 【作用】深拷贝单个边界对象（公共/红队/蓝队边界共用，六个坐标逐字段复制）
-    private static void copyBoundary(MapConfig.Boundary src, MapConfig.Boundary dst) {
-        dst.setMinX(src.getMinX());
-        dst.setMinY(src.getMinY());
-        dst.setMinZ(src.getMinZ());
-        dst.setMaxX(src.getMaxX());
-        dst.setMaxY(src.getMaxY());
-        dst.setMaxZ(src.getMaxZ());
-    }
-
-    // 【作用】深拷贝全局配置（含默认装备槽位列表）
+    // 【作用】深拷贝全局配置：Gson 往返覆盖全部字段（含 bombEconomy——此前逐字段拷贝漏掉，
+    //        界面保存会把爆破经济参数重置为默认值）
     static GlobalConfig deepCopyGlobal(GlobalConfig src) {
-        GlobalConfig dst = new GlobalConfig();
-        dst.setQuickTimeout(src.getQuickTimeout());
-        dst.getDefaultGear().clear();
-        for (GlobalConfig.EquipSlot slot : src.getDefaultGear()) {
-            dst.getDefaultGear().add(new GlobalConfig.EquipSlot(slot.getSlot(), slot.getItemId()));
+        GlobalConfig dst = COPY_GSON.fromJson(COPY_GSON.toJsonTree(src), GlobalConfig.class);
+        if (dst == null) {
+            dst = new GlobalConfig();
         }
+        if (dst.getDefaultGear() == null) dst.setDefaultGear(new ArrayList<>());
+        if (dst.getBombEconomy() == null) dst.setBombEconomy(new GlobalConfig.BombEconomy());
         return dst;
     }
 

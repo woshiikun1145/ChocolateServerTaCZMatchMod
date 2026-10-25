@@ -87,9 +87,15 @@ public class MatchMenuScreen extends Screen {
     /** 匹配页左下角"取消匹配"按钮：玩家处于任一匹配队列时显示，效果与 /cstmm queue leave 相同 */
     private ButtonWidget cancelMatchBtn;
 
+    // this-escape 抑制：四个面板仅在字段初始化时保存 Screen 引用（构造期不回调可覆写方法），
+    // Screen 的实际控件初始化在 init()（面板经 font()/addTextField() 桥接取 protected 成员）
+    @SuppressWarnings("this-escape")
     private final QueueTabPanel queuePanel = new QueueTabPanel(this);
+    @SuppressWarnings("this-escape")
     private final ClanTabPanel clanPanel = new ClanTabPanel(this);
+    @SuppressWarnings("this-escape")
     private final PersonalizeTabPanel personalizePanel = new PersonalizeTabPanel(this);
+    @SuppressWarnings("this-escape")
     private final ProfileTabPanel profilePanel = new ProfileTabPanel(this);
 
     public MatchMenuScreen() {
@@ -406,11 +412,11 @@ public class MatchMenuScreen extends Screen {
             context.fill(cardX, cardY, cardX + CARD_WIDTH, cardY + CARD_HEIGHT, bgColor);
             context.drawBorder(cardX, cardY, CARD_WIDTH, CARD_HEIGHT, 0x44FFFFFF);
 
-            // 卡片背景：等比裁剪铺满（cover）；快速匹配用内置 quick.png，其余用配置的 Base64 图，均无则纯色兜底
+            // 卡片背景：等比裁剪铺满（cover）；快速匹配用内置 quick.png，其余用配置的 Base64/URL 图，均无则纯色兜底
             int bgX = cardX + 2, bgY = cardY + 2;
             int bgW = CARD_WIDTH - 4, bgH = CARD_HEIGHT - 4;
             CardTexture tex = QUICK_CARD_ID.equals(card.id) ? getQuickCardTexture()
-                    : Base64ImageDecoder.decode(card.backgroundBase64);
+                    : cn.woshiikun_1145.mcmod.choco.cstmm.client.util.UrlImageCache.resolveBackgroundTexture(card.backgroundBase64);
             if (tex != null) {
                 // 与外层内容区裁剪求交集后再裁剪，保证滚动出可视区的卡片不会画到内容区外
                 int clipX1 = Math.max(bgX, x), clipY1 = Math.max(bgY, y);

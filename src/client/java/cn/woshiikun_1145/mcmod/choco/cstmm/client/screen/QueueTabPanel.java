@@ -368,7 +368,7 @@ public class QueueTabPanel {
         context.fill(x, y, x + width, y + height, 0xFF0D0D15);
         Base64ImageDecoder.CardTexture tex = "quick".equals(mapId)
                 ? MatchMenuScreen.getQuickCardTexture()
-                : Base64ImageDecoder.decode(backgroundOf(mapId));
+                : cn.woshiikun_1145.mcmod.choco.cstmm.client.util.UrlImageCache.resolveBackgroundTexture(backgroundOf(mapId));
         if (tex != null) {
             // cover 居中：等比缩放至铺满单元格，超出部分居中裁剪（与匹配页卡片背景同款算法）
             double scale = Math.max((double) width / tex.width(), (double) height / tex.height());
