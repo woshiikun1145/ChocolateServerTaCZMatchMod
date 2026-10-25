@@ -20,7 +20,7 @@ public record RequestBadgePayload(String badgeId) implements CustomPayload {
             Identifier.of("cstmm", "request_badge")
     );
 
-    // 【作用】编解码器：badgeId（上限 16 字符）与 PacketByteBuf 互转
+    // 【作用】编解码器：badgeId（8 字符小写 hex，上限 16 字符余量）与 PacketByteBuf 互转
     public static final PacketCodec<PacketByteBuf, RequestBadgePayload> CODEC = PacketCodec.of(
             (payload, buf) -> buf.writeString(payload.badgeId(), 16),
             buf -> new RequestBadgePayload(buf.readString(16))

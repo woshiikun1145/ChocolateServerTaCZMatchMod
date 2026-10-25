@@ -42,9 +42,12 @@ public class Cstmm implements ModInitializer {
 
         LOGGER.info("[CSTMM - Main] Initializing mod...");
 
-        // 按序注册各子系统：网络通道 → 指令 → 事件监听 → 生命周期/每 tick 回调
+        // 按序注册各子系统：物品与实体（须在注册表冻结前）→ 网络通道 → 指令 → 事件监听 → 生命周期/每 tick 回调
         // 每步经 ModGuardian.run 包装：注册阶段发生异常即进入保护模式（后续步骤跳过、
         // 已注册的入口全部停用），服务器可正常启动
+        ModGuardian.run("注册物品", cn.woshiikun_1145.mcmod.choco.cstmm.item.ModItems::initialize);
+        ModGuardian.run("注册实体", cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities::initialize);
+        ModGuardian.run("注册音效", cn.woshiikun_1145.mcmod.choco.cstmm.sound.ModSounds::initialize);
         ModGuardian.run("注册网络通道", NetworkHandler::register);
         ModGuardian.run("注册指令", this::registerCommands);
         ModGuardian.run("注册事件监听", EventListener::register);

@@ -39,10 +39,10 @@ public class MatchManager implements MatchApi {
     /** 强制显示的目标玩家 UUID：开启时为执行命令的玩家，关闭时置 null */
     private volatile UUID matchHudForcedPlayer = null;
     /** 清空 HUD 包（inGame=false，mapName 空、花名册空）：强制显示关闭时复位客户端 HUD */
-    private static final HudDataPayload IDLE_HUD_PAYLOAD = new HudDataPayload("", 0, 0, 0, false, 0, "[]");
+    private static final HudDataPayload IDLE_HUD_PAYLOAD = new HudDataPayload("", 0, 0, 0, false, 0, "[]", "{}");
     /** 无活跃对局时的调试预览 HUD（inGame=true 仅中央计分板：地图名"HUD 调试预览"+ 0:0 + 90 秒倒计时，
      *  保证强制显示在任何时刻都有可见反馈；花名册为空 → 不渲染两侧队伍卡片） */
-    private static final HudDataPayload DEMO_HUD_PAYLOAD = new HudDataPayload("HUD 调试预览", 0, 0, 90, true, 2, "[]");
+    private static final HudDataPayload DEMO_HUD_PAYLOAD = new HudDataPayload("HUD DEBUG", 0, 0, 90, true, 2, "[]", "{}");
 
     // 会话 ID -> 对局会话（含已结束、等待清理的会话）
     private final Map<String, MatchSession> activeSessions;
@@ -165,6 +165,12 @@ public class MatchManager implements MatchApi {
             return false;
         }
 
+        // 【作用】爆破图必须配置至少一个包点（C4 无处可安放则回合无法进行）
+        if (config.isBombMap() && config.getBombsites().isEmpty()) {
+            Cstmm.LOGGER.warn("[CSTMM - MatchManager] Bomb map {} has no bombsites, refusing to start match", mapId);
+            return false;
+        }
+
         // 【作用】检查地图冷却期：上一局结束未满配置冷却秒数时拒绝开局
         Long endTime = mapEndTime.get(mapId);
         if (endTime != null) {
@@ -243,7 +249,14 @@ public class MatchManager implements MatchApi {
         broadcastMatchStatus(session, MatchStatusPayload.StatusType.MATCH_STARTING,
                 "§6=== " + config.getDisplayName() + " 即将开始！准备倒计时 " + prepareTime + " 秒 ===");
 
-        prepareMatch(session);
+        if (config.isBombMap()) {
+            // 爆破图：回合状态机负责每回合初始化（阵营出生点/每回合装备/冻结/C4 指派），
+            // 不走普通对局的整场一次 setupPlayer
+            session.setBombMode(true);
+            BombRoundManager.getInstance().startFirstRound(session, config);
+        } else {
+            prepareMatch(session);
+        }
 
         Cstmm.LOGGER.info("[CSTMM - MatchManager] Started match on {} with {} players", mapId, session.getTotalPlayers());
         return true;
@@ -350,6 +363,11 @@ public class MatchManager implements MatchApi {
         UUID uuid = player.getUuid();
         MatchSession session = getPlayerSession(uuid);
         if (session != null && session.getPhase() != MatchSession.GamePhase.ENDED) {
+            if (session.isBombMode()) {
+                // 爆破对局：战斗中重生 = 旁观者；冻结阶段重生 = 恢复冒险模式（回合初始化负责其余）
+                BombRoundManager.getInstance().handleRespawn(player, session);
+                return;
+            }
             setupPlayer(session, player);
             return;
         }
@@ -408,10 +426,20 @@ public class MatchManager implements MatchApi {
             }
 
             // 【作用】按阶段推进对局，并向全体玩家推送最新 HUD 快照
-            switch (session.getPhase()) {
-                case PREPARING -> tickPreparing(session);
-                case FIGHTING -> tickFighting(session);
-                default -> {}
+            if (session.isBombMode()) {
+                // 爆破对局：回合状态机接管（多回合/攻防转换/重连宽限）
+                MapConfig bombConfig = ConfigManager.getInstance().getMap(session.getMapName());
+                if (bombConfig != null) {
+                    BombRoundManager.getInstance().tick(session, bombConfig);
+                    // 订阅制商店推送：购买窗口状态翻转瞬间向全员下发（替代客户端轮询）
+                    EconomyManager.getInstance().checkWindowFlip(session, bombConfig);
+                }
+            } else {
+                switch (session.getPhase()) {
+                    case PREPARING -> tickPreparing(session);
+                    case FIGHTING -> tickFighting(session);
+                    default -> {}
+                }
             }
 
             broadcastHudData(session);
@@ -539,6 +567,10 @@ public class MatchManager implements MatchApi {
 
         session.setPhase(MatchSession.GamePhase.ENDED);
         session.setStartTime(System.currentTimeMillis());
+        if (session.isBombMode()) {
+            // 爆破对局：清理回合状态机的挂起结算标记等
+            BombRoundManager.getInstance().onMatchEnd(session);
+        }
 
         for (UUID uuid : session.getAllPlayers()) {
             playerSessionMap.remove(uuid);
@@ -553,7 +585,7 @@ public class MatchManager implements MatchApi {
         // 发送 HUD 清除数据包（空快照与对局内快照必然不同，经 sendHudData 去重后必然实际发出）
         MinecraftServer server = Cstmm.getServer();
         if (server != null) {
-            HudDataPayload clearPayload = new HudDataPayload("", 0, 0, 0, false, 0, "[]");
+            HudDataPayload clearPayload = new HudDataPayload("", 0, 0, 0, false, 0, "[]", "{}");
             for (UUID uuid : session.getAllPlayers()) {
                 ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
                 if (player != null) {
@@ -674,6 +706,13 @@ public class MatchManager implements MatchApi {
             return;
         }
 
+        // 【作用】爆破对局断线：不立即结算，进入 3 分钟重连宽限（整队离线挂起等待），
+        //        与普通对局"单侧无人即判负"的规则不同
+        if (session.isBombMode()) {
+            BombRoundManager.getInstance().onDisconnect(session, playerUuid);
+            return;
+        }
+
         // 【作用】统计除断线玩家外双方仍在线的玩家
         boolean redOnline = false;
         boolean blueOnline = false;
@@ -760,7 +799,8 @@ public class MatchManager implements MatchApi {
                         ? session.getPrepCounter() : session.getRemainingSeconds(),
                 session.getPhase() != MatchSession.GamePhase.ENDED,
                 session.getPhase().ordinal(),
-                rosterJson
+                rosterJson,
+                buildHudExtraJson(session)
         );
 
         for (UUID uuid : session.getAllPlayers()) {
@@ -848,7 +888,8 @@ public class MatchManager implements MatchApi {
                         ? forced.getPrepCounter() : forced.getRemainingSeconds(),
                 forced.getPhase() != MatchSession.GamePhase.ENDED,
                 forced.getPhase().ordinal(),
-                rosterJson
+                rosterJson,
+                buildHudExtraJson(forced)
         );
 
         // 【作用】花名册引用的战队徽标分片先行下发（内容寻址去重，仅首次实际发包）
@@ -922,6 +963,13 @@ public class MatchManager implements MatchApi {
             o.addProperty("d", session.getPlayerDeaths(uuid));
             o.addProperty("lk", session.getLastLifeKills(uuid));
 
+            // 【作用】拆弹装备持有（爆破图 CT 专属，HUD 卡片拆弹器标记）：
+            // 持有状态 = 玩家 tag（cstmm_defuse_kit，非物品），实时读取；无 tag 省略字段（JSON 去重友好）
+            if (session.isBombMode() && !session.isTTeam(team) && online != null
+                    && online.getCommandTags().contains(BombInteractionManager.DEFUSE_KIT_TAG)) {
+                o.addProperty("kit", true);
+            }
+
             // 【作用】战队信息：缩写 + 徽标引用（URL 徽标下发完整 URL，base64 徽标下发内容寻址 id）
             Clan clan = clanManager.getClanByPlayer(uuid);
             if (clan != null) {
@@ -964,6 +1012,38 @@ public class MatchManager implements MatchApi {
             idx = end;
         }
         return ids;
+    }
+
+    /**
+     * 【作用】构建 HUD 扩展信息 JSON（HudDataPayload.extraJson）：普通对局为 "{}"，
+     *         爆破对局携带回合状态 {"bombMode","round","wins1","wins2","tTeam","ot","otRound",
+     *         "planted","bombTimer","buyTime","waiting","defusing"}——
+     *         客户端据此渲染回合比分、T/CT 阵营标签、C4 倒计时与状态行（C4 已安放/拆弹警告/
+     *         重连等待/购买窗口）；安放位置（包点名）不下发，CT 需自行寻找
+     *         （拆弹器所有权在花名册 per-player 的 "kit" 字段）。
+     * 【被谁使用】broadcastHudData / broadcastForcedHudData（每秒构建）。仅服务端。
+     */
+    private String buildHudExtraJson(MatchSession session) {
+        if (!session.isBombMode()) return "{}";
+        JsonObject o = new JsonObject();
+        o.addProperty("bombMode", true);
+        o.addProperty("round", session.getRoundNumber());
+        o.addProperty("wins1", session.getTeam1RoundWins());
+        o.addProperty("wins2", session.getTeam2RoundWins());
+        o.addProperty("tTeam", session.getTTeam());
+        o.addProperty("ot", session.isInOvertime());
+        o.addProperty("otRound", session.getOvertimeRoundInSet());
+        o.addProperty("planted", session.isBombPlanted());
+        o.addProperty("bombTimer", session.getBombTimerSeconds());
+        // 购买窗口：冻结时间 + 开局后 N 秒（与 EconomyManager 购买判定同源）
+        MapConfig hudMap = ConfigManager.getInstance().getMap(session.getMapName());
+        o.addProperty("buyTime", EconomyManager.getInstance().isBuyWindowOpen(session, hudMap));
+        // 整队离线等待重连（挂起对局推进中的提示）
+        o.addProperty("waiting", session.isWaitingReconnect());
+        // 拆弹进行中警告（精确进度由拆弹者 action bar 实时显示；带 kit/裸拆时长不同，
+        // 统一快照无法换算单一百分比，故不在此下发进度值）
+        o.addProperty("defusing", session.getDefusingPlayer() != null);
+        return o.toString();
     }
 
     /**

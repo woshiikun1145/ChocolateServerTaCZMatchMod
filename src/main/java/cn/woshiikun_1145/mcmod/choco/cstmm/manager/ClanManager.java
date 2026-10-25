@@ -42,10 +42,8 @@ public class ClanManager {
 
     public static final int MAX_NAME_LENGTH = 128;
     public static final int MAX_ABBR_LENGTH = 10;
-    /** 徽标解码后大小上限（48KiB）：防止超大徽标分片下发挤爆服务器带宽 */
+    /** 徽标解码后大小上限（48KiB）：防止超大徽标分片下发挤爆服务器带宽（仅对 base64 徽标生效；URL 徽标不限大小，由客户端自行下载，不占服务器带宽） */
     public static final int MAX_BADGE_BYTES = 48 * 1024;
-    /** 徽标 URL 长度上限（URL 徽标由客户端自行下载，不占服务器带宽，仅限字符串长度） */
-    public static final int MAX_BADGE_URL_LENGTH = 512;
     /** 徽标 base64 字符数上限 = 48KiB 解码后的 base64 长度（预过滤；精确校验见 validateBadge） */
     public static final int MAX_BADGE_LENGTH = ((MAX_BADGE_BYTES + 2) / 3) * 4;
     /** 随机展示的战队数量（队列/战队页列表） */
@@ -170,7 +168,7 @@ public class ClanManager {
     }
 
     /**
-     * 校验徽标内容：URL 仅限字符串长度；base64 解码后 ≤ MAX_BADGE_BYTES（48KiB）。
+     * 校验徽标内容：URL 不限大小（由各客户端自行下载）；base64 解码后 ≤ MAX_BADGE_BYTES（48KiB）。
      * 返回 null 表示通过，否则返回可直接发给玩家的错误消息（客户端对话框复用同一规则）。
      * 【被谁使用】服务端 create/edit 创建与编辑校验；客户端 ClanTabPanel（创建/编辑对话框提交前预校验，
      *           与服务端保持同一规则）。
@@ -178,9 +176,6 @@ public class ClanManager {
     public static String validateBadge(String badge) {
         if (badge == null || badge.isEmpty()) return null;
         if (isBadgeUrl(badge)) {
-            if (badge.length() > MAX_BADGE_URL_LENGTH) {
-                return "§c徽标 URL 过长（最多 " + MAX_BADGE_URL_LENGTH + " 字符）！";
-            }
             return null;
         }
         if (badge.length() > MAX_BADGE_LENGTH) {

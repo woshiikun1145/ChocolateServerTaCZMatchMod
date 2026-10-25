@@ -11,6 +11,9 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.manager.*;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.CommandHintCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.OpenConfigScreenPayload;
+import cn.woshiikun_1145.mcmod.choco.cstmm.sound.MatchSoundPlayer;
+import cn.woshiikun_1145.mcmod.choco.cstmm.sound.MatchSoundTimings;
+import cn.woshiikun_1145.mcmod.choco.cstmm.sound.ModSounds;
 import cn.woshiikun_1145.mcmod.choco.cstmm.util.BandwidthTracker;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.CommandDispatcher;
@@ -52,7 +55,7 @@ import java.util.concurrent.CompletableFuture;
  * /cstmm vote     kick &lt;玩家&gt; / kickyes / kickno
  * /cstmm config / reload                                             （OP≥2）
  * /cstmm data     get player|clan|map|global / edit player|clan|map|global / restore bags / delete player|clan|map   （OP≥2，支持离线玩家）
- * /cstmm debug    match_info_hud &lt;t|f&gt; / bandwidth start|stop|get|view             （OP≥2 调试）
+ * /cstmm debug    match_info_hud &lt;t|f&gt; / bandwidth start|stop|get|view / allow_c4 to_be_planted_freely &lt;t|f&gt; / test &lt;c4_defuse|c4_explosion|t_win|ct_win&gt;  （OP≥2 调试）
  * </pre>
  * 每个节点按 registerXxx 方法拆分注册，执行逻辑为独立静态方法，便于增删子命令。
  */
@@ -69,8 +72,11 @@ public class ModCommands {
             "minplayers", "cooldownseconds", "minredplayers", "minblueplayers", "preparetime",
             "boundarywarningtime", "boundarypenaltykills", "kickcooldownseconds",
             "reinforcementmode", "maxredplayers", "maxblueplayers", "reinforceable",
-            "dimension", "background", "shopitems"
+            "dimension", "background", "shopitems", "shopcolumns", "gametype", "bombsites", "bombsettings"
     };
+
+    /** 地图背景图字段（Base64）最大长度（字符），超过拒绝写入（配置界面同规则校验） */
+    private static final int MAX_BACKGROUND_LENGTH = 327680;
 
     // 默认装备合法槽位简写（EquipmentManager.applyToSlot 直接映射装备栏）
     private static final List<String> GEAR_SLOTS = List.of("head", "chest", "legs", "feet", "mainhand", "offhand");
@@ -170,7 +176,7 @@ public class ModCommands {
     private static void registerDebug(LiteralArgumentBuilder<ServerCommandSource> cstmm) {
         var debug = CommandManager.literal("debug")
                 .requires(source -> source.hasPermissionLevel(2))
-                .executes(usage("/cstmm debug match_info_hud <t|f> | bandwidth start|stop|get|view | exception_protect_test [confirm]"));
+                .executes(usage("/cstmm debug match_info_hud <t|f> | bandwidth start|stop|get|view | exception_protect_test [confirm] | test <c4_defuse|c4_explosion|t_win|ct_win>"));
 
         // ----- match_info_hud：强制显示/关闭比赛信息栏（仅作用于执行者自己的客户端） -----
         debug.then(CommandManager.literal("match_info_hud")
@@ -192,7 +198,135 @@ public class ModCommands {
                 .then(CommandManager.literal("confirm")
                         .executes(guard("debug.exception_protect_test.confirm", ctx -> exceptionProtectTest(ctx, true)))));
 
+        // ----- allow_c4：C4 安放限制开关（to_be_planted_freely = T 可在任意位置安放，不要求站在包点内） -----
+        debug.then(CommandManager.literal("allow_c4")
+                .executes(usage("/cstmm debug allow_c4 to_be_planted_freely <t|f>（允许 T 在任意位置安放 C4）"))
+                .then(CommandManager.literal("to_be_planted_freely")
+                        .then(CommandManager.argument("enabled", StringArgumentType.word())
+                                .suggests(ModCommands::suggestDebugToggle)
+                                .executes(guard("debug.allow_c4.to_be_planted_freely", ModCommands::debugAllowC4FreePlanting)))));
+
+        // ----- item_parse_test：物品字符串解析校验（等价 /give 格式），成功直接发放到执行者背包 -----
+        debug.then(CommandManager.literal("item_parse_test")
+                .then(CommandManager.argument("itemString", StringArgumentType.greedyString())
+                        .executes(guard("debug.item_parse_test", ModCommands::debugItemParseTest))));
+
+        // ----- test：模拟战局对应情形下的完整播报序列（非定位试听给执行者） -----
+        var test = CommandManager.literal("test")
+                .executes(usage("/cstmm debug test <c4_defuse|c4_explosion|t_win|ct_win>（模拟战局对应情形的完整播报序列）"));
+        test.then(CommandManager.literal("c4_defuse")
+                .executes(guard("debug.test.c4_defuse", ctx -> debugTestSound(ctx, "c4_defuse"))));
+        test.then(CommandManager.literal("c4_explosion")
+                .executes(guard("debug.test.c4_explosion", ctx -> debugTestSound(ctx, "c4_explosion"))));
+        test.then(CommandManager.literal("t_win")
+                .executes(guard("debug.test.t_win", ctx -> debugTestSound(ctx, "t_win"))));
+        test.then(CommandManager.literal("ct_win")
+                .executes(guard("debug.test.ct_win", ctx -> debugTestSound(ctx, "ct_win"))));
+        debug.then(test);
+
         cstmm.then(debug);
+    }
+
+    /**
+     * debug test <c4_defuse|c4_explosion|t_win|ct_win>：模拟战局对应情形下的完整播报序列，
+     * 按真实对局的触发时序非定位试听给执行者——
+     * c4_defuse    = 拆除成功：拆除确认音 + 语音播报同时响起，1 秒后 CT 回合胜利音；
+     * c4_explosion = C4 起爆：1.5 秒引信音 → 爆炸轰鸣，爆炸 1 秒后 T 回合胜利音；
+     * t_win        = T 全歼 CT 回合胜利音（立即）；
+     * ct_win       = CT 全歼 T/超时回合胜利音（立即）。
+     * 【被谁使用】registerDebug 的 test 分支。
+     */
+    private static int debugTestSound(CommandContext<ServerCommandSource> ctx, String which) {
+        if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity player)) {
+            ctx.getSource().sendMessage(Text.literal("§c该命令仅限游戏内玩家执行（需要试听音效）"));
+            return 0;
+        }
+        switch (which) {
+            case "c4_defuse" -> {
+                MatchSoundPlayer.playToPlayer(player, ModSounds.C4_DEFUSED.value(), 1.0f, 1.0f);
+                MatchSoundPlayer.playToPlayer(player, ModSounds.C4_DEFUSED_ANNOUNCE.value(), 1.0f, 1.0f);
+                MatchScheduler.scheduleDelayed(MatchSoundTimings.DEFUSED_WIN_DELAY_MILLIS, () ->
+                        MatchSoundPlayer.playToPlayer(player, ModSounds.CT_WIN.value(), 1.0f, 1.0f));
+            }
+            case "c4_explosion" -> {
+                MatchSoundPlayer.playToPlayer(player, ModSounds.C4_DETONATION.value(), 1.0f, 1.0f);
+                MatchScheduler.scheduleDelayed(MatchSoundTimings.DETONATION_LEAD_MILLIS, () ->
+                        MatchSoundPlayer.playToPlayer(player, ModSounds.C4_EXPLOSION.value(), 1.0f, 1.0f));
+                MatchScheduler.scheduleDelayed(
+                        MatchSoundTimings.DETONATION_LEAD_MILLIS + MatchSoundTimings.EXPLOSION_WIN_DELAY_MILLIS, () ->
+                        MatchSoundPlayer.playToPlayer(player, ModSounds.T_WIN.value(), 1.0f, 1.0f));
+            }
+            case "t_win" ->
+                    MatchSoundPlayer.playToPlayer(player, ModSounds.T_WIN.value(), 1.0f, 1.0f);
+            case "ct_win" ->
+                    MatchSoundPlayer.playToPlayer(player, ModSounds.CT_WIN.value(), 1.0f, 1.0f);
+            default -> {
+                player.sendMessage(Text.literal("§c未知播报: §f" + which
+                        + " §7（可选 c4_defuse / c4_explosion / t_win / ct_win）"), false);
+                return 0;
+            }
+        }
+        player.sendMessage(Text.literal("§a已模拟战局播报: §f" + which), false);
+        return 1;
+    }
+
+    /**
+     * debug item_parse_test <物品字符串>：按商店/默认装备同款解析规则（"物品ID 数量" / SNBT 组件，
+     * 与 /give 格式一致）校验物品字符串，解析成功直接发放到执行者背包并回显物品名/数量/注册 ID，
+     * 失败给出明确错误——用于验证配置界面"手持添加"导出的组件串与手填 itemId 是否有效。
+     * 【被谁使用】registerDebug 的 item_parse_test 分支。
+     */
+    private static int debugItemParseTest(CommandContext<ServerCommandSource> ctx) {
+        if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity player)) {
+            ctx.getSource().sendMessage(Text.literal("§c该命令仅限游戏内玩家执行（发放到背包验证）"));
+            return 0;
+        }
+        String itemString = StringArgumentType.getString(ctx, "itemString").trim();
+        if (itemString.isEmpty()) {
+            player.sendMessage(Text.literal("§c用法: /cstmm debug item_parse_test <物品ID [数量] 或 {id:...,components:...} SNBT>"), false);
+            return 0;
+        }
+        ItemStack stack = cn.woshiikun_1145.mcmod.choco.cstmm.manager.EquipmentManager.getInstance()
+                .parseAndBuild(player, itemString);
+        if (stack == null || stack.isEmpty()) {
+            player.sendMessage(Text.literal("§c解析失败：无法从 \"" + itemString + "\" 获取物品数据"
+                    + "（检查物品ID 是否存在、SNBT 是否合法）"), false);
+            return 0;
+        }
+        player.getInventory().offerOrDrop(stack);
+        player.sendMessage(Text.literal("§a解析成功并已发放: §f" + stack.getName().getString()
+                + " §7x" + stack.getCount() + " §7(" + net.minecraft.registry.Registries.ITEM.getId(stack.getItem()) + ")"), false);
+        return 1;
+    }
+
+    /**
+     * debug allow_c4 to_be_planted_freely <t|f>：允许/不允许 T 在任意位置安放 C4（不要求站在包点内）。
+     * 仅内存态开关（重启恢复默认"不允许"），对全部爆破对局生效。
+     * 【被谁使用】registerDebug 的 allow_c4 分支。
+     */
+    private static int debugAllowC4FreePlanting(CommandContext<ServerCommandSource> ctx) {
+        String arg = StringArgumentType.getString(ctx, "enabled").trim().toLowerCase();
+        Boolean enable = switch (arg) {
+            case "t", "true", "1", "开" -> true;
+            case "f", "false", "0", "关" -> false;
+            default -> null;
+        };
+        if (enable == null) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§c用法: /cstmm debug allow_c4 to_be_planted_freely <t|f>（true/false/1/0）"));
+            return 0;
+        }
+        BombInteractionManager.setFreePlantingAllowed(enable);
+        if (enable) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§aC4 自由安放已开启：任意玩家手持 C4 长按右键即可在任何情况下安放（无需包点/阵营/阶段限制）"));
+            ctx.getSource().sendMessage(Text.literal(
+                    "§7该开关为调试用途，服务器重启后恢复默认（关闭）；用 §fcstmm debug allow_c4 to_be_planted_freely f§7 关闭"));
+        } else {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§eC4 自由安放已关闭：恢复要求 T 方站在包点内安放"));
+        }
+        return 1;
     }
 
     /**
@@ -965,6 +1099,9 @@ public class ModCommands {
                 "§e红队出生点: §f" + spawnListText(map.getRedSpawns()) + "\n" +
                 "§e蓝队出生点: §f" + spawnListText(map.getBlueSpawns()) + "\n" +
                 "§e商店商品: §f" + shopListText(map.getShopItems()) + "\n" +
+                "§e商店分类列: §f" + shopColumnsText(map) + "\n" +
+                "§e地图类型: §f" + map.getGameType()
+                        + (map.isBombMap() ? " §e| 包点: §f" + mapFieldSingleValue(map, "bombsites") : "") + "\n" +
                 "§e背景图: §f" + (map.getBackgroundBase64().isEmpty()
                         ? "无" : "base64 共 " + map.getBackgroundBase64().length() + " 字符")));
         return 1;
@@ -1188,6 +1325,45 @@ public class ModCommands {
         return sb.toString();
     }
 
+    /**
+     * 商店分类列展示文本（购买页网格布局的列配置）：
+     * 普通图 = 通用 5 列；爆破图 = T 方（红队）与 CT 方（蓝队）两套列分开显示
+     * （未独立配置的队伍显示"回退通用列"）。列内商品过多时仅展示前 4 项摘要防聊天刷屏。
+     */
+    private static String shopColumnsText(MapConfig map) {
+        if (map.isBombMap()) {
+            boolean fallback = map.getShopColumnsT().isEmpty() && map.getShopColumnsCT().isEmpty();
+            return "\n§eT 方（红队）: §f" + (fallback
+                    ? "未单独配置（回退通用列） " + columnListText(map.getBombShopColumnsForTeam(true))
+                    : columnListText(map.getShopColumnsT()))
+                    + "\n§eCT 方（蓝队）: §f" + (fallback
+                    ? "未单独配置（回退通用列） " + columnListText(map.getBombShopColumnsForTeam(false))
+                    : columnListText(map.getShopColumnsCT()));
+        }
+        return columnListText(map.getShopColumns());
+    }
+
+    /** 单套分类列的摘要文本（每列列名 + 前 4 项商品/价格）。 */
+    private static String columnListText(List<MapConfig.ShopColumn> cols) {
+        if (cols.isEmpty()) {
+            return "空（购买页回退旧版平铺 shopItems）";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < cols.size(); i++) {
+            MapConfig.ShopColumn col = cols.get(i);
+            if (i > 0) sb.append("\n");
+            sb.append("§e列").append(i + 1).append(" §f").append(col.getName())
+              .append("§7（").append(col.getItems().size()).append(" 项）: ");
+            List<GlobalConfig.ShopItem> items = col.getItems();
+            for (int j = 0; j < Math.min(4, items.size()); j++) {
+                if (j > 0) sb.append("、");
+                sb.append(items.get(j).getItemId()).append("/$").append(items.get(j).getPrice());
+            }
+            if (items.size() > 4) sb.append(" …共 ").append(items.size()).append(" 项");
+        }
+        return sb.toString();
+    }
+
     /** 默认装备列表展示文本 */
     private static String gearListText(GlobalConfig global) {
         List<GlobalConfig.EquipSlot> gear = global.getDefaultGear();
@@ -1231,6 +1407,30 @@ public class ModCommands {
             case "background" -> map.getBackgroundBase64().isEmpty()
                     ? "无" : "base64 共 " + map.getBackgroundBase64().length() + " 字符";
             case "shopitems" -> shopListText(map.getShopItems());
+            case "shopcolumns" -> shopColumnsText(map);
+            case "gametype" -> map.getGameType();
+            case "bombsites" -> {
+                List<MapConfig.Bombsite> sites = map.getBombsites();
+                if (sites.isEmpty()) yield "无";
+                StringBuilder sb = new StringBuilder(sites.size() + " 个: ");
+                for (int i = 0; i < sites.size(); i++) {
+                    MapConfig.Bombsite b = sites.get(i);
+                    if (i > 0) sb.append("、");
+                    sb.append(b.getName()).append("(").append(b.getX()).append(",").append(b.getY())
+                            .append(",").append(b.getZ()).append(" r").append(b.getRadius()).append(")");
+                }
+                yield sb.toString();
+            }
+            case "bombsettings" -> {
+                MapConfig.BombSettings s = map.getBombSettings();
+                yield "回合限时 " + s.getRoundTimeSeconds() + "s | C4倒计时 " + s.getC4TimerSeconds()
+                        + "s | 安放 " + s.getPlantTimeSeconds() + "s | 裸拆 " + s.getDefuseSeconds()
+                        + "s | 带装备拆 " + s.getDefuseKitSeconds() + "s | 回合间歇 " + s.getRoundIntermissionSeconds()
+                        + "s | 爆音范围 " + s.getExplosionSoundRange()
+                        + " | m=" + s.getExplosionM() + " h=" + s.getExplosionH()
+                        + " lA=" + s.getExplosionLA() + " lB=" + s.getExplosionLB()
+                        + " dB=" + s.getExplosionBackDamage();
+            }
             default -> null;
         };
     }
@@ -1383,15 +1583,119 @@ public class ModCommands {
                     }
                 }
             }
+            case "shopcolumns" -> {
+                // 商店分类列（购买页网格布局）：命令侧仅支持 clear 清空（T/CT/通用三套全部清空，
+                // 清空后购买页回退旧版平铺 shopItems）；列名称/图标/商品的可视化编辑在配置界面
+                if (t.length == 1 && t[0].equalsIgnoreCase("clear")) {
+                    map.setShopColumns(new ArrayList<>());
+                    map.setShopColumnsT(new ArrayList<>());
+                    map.setShopColumnsCT(new ArrayList<>());
+                } else {
+                    return "§c商店分类列仅支持 clear 清空（T/CT 列配置请在配置界面可视化编辑，get 可查看当前列）";
+                }
+            }
             case "dimension" -> {
                 if (t.length != 1 || t[0].isBlank()) return "§c用法: dimension <维度ID>（如 minecraft:overworld）";
                 map.setDimension(t[0]);
+            }
+            case "gametype" -> {
+                if (t.length != 1) return "§c用法: gametype <NORMAL|BOMB>（NORMAL=普通图，BOMB=爆破图）";
+                String upper = t[0].toUpperCase();
+                if (!upper.equals("NORMAL") && !upper.equals("BOMB")) {
+                    return "§c地图类型只能是 NORMAL 或 BOMB";
+                }
+                map.setGameType(upper);
+            }
+            case "bombsites" -> {
+                // 包点编辑：add <名> <x> <y> <z> [半径] / remove <名|序号> / clear
+                //（爆破图专用；切回 NORMAL 时 setGameType 自动清空包点）
+                List<MapConfig.Bombsite> sites = new ArrayList<>(map.getBombsites());
+                if (t.length == 0) return "§c用法: add <名称> <x> <y> <z> [半径] / remove <名称|序号> / clear";
+                switch (t[0].toLowerCase()) {
+                    case "add" -> {
+                        if (t.length < 6 || t.length > 7) return "§c用法: add <名称> <x> <y> <z> [半径（默认 3）]";
+                        Integer x = parseIntOrNull(t[2]);
+                        Integer y = parseIntOrNull(t[3]);
+                        Integer z = parseIntOrNull(t[4]);
+                        if (x == null || y == null || z == null) return "§c坐标必须是整数";
+                        int radius = 3;
+                        if (t.length == 7) {
+                            Integer r = parseIntOrNull(t[6 - 1]);
+                            if (r == null || r <= 0) return "§c半径必须是正整数";
+                            radius = r;
+                        }
+                        sites.add(new MapConfig.Bombsite(t[1], x, y, z, radius));
+                        map.setBombsites(sites);
+                    }
+                    case "remove" -> {
+                        if (t.length != 2) return "§c用法: remove <名称> 或 <序号（从 0 开始）>";
+                        Integer idx = parseIntOrNull(t[1]);
+                        if (idx != null) {
+                            if (idx < 0 || idx >= sites.size()) return "§c序号无效（当前共 " + sites.size() + " 个包点）";
+                            sites.remove((int) idx);
+                        } else {
+                            boolean removed = sites.removeIf(b -> b.getName().equalsIgnoreCase(t[1]));
+                            if (!removed) return "§c未找到包点: " + t[1];
+                        }
+                        map.setBombsites(sites);
+                    }
+                    case "clear" -> map.setBombsites(new ArrayList<>());
+                    default -> {
+                        return "§c未知子操作: " + t[0] + "（可用: add remove clear）";
+                    }
+                }
+            }
+            case "bombsettings" -> {
+                // C4 参数编辑：<字段> <值>（getBombSettings 为 null 时返回兜底新对象，改完必须 setBombSettings 写回）
+                MapConfig.BombSettings s = map.getBombSettings();
+                if (t.length != 2) return "§c用法: bombsettings <字段> <值>（字段: roundtime c4timer planttime "
+                        + "defusetime defusekittime intermission soundrange m h la lb db）";
+                String f2 = t[0].toLowerCase();
+                switch (f2) {
+                    case "roundtime", "c4timer", "planttime", "defusetime", "defusekittime", "intermission", "soundrange" -> {
+                        Integer v = parseIntOrNull(t[1]);
+                        if (v == null) return "§c" + f2 + " 必须是整数";
+                        switch (f2) {
+                            case "roundtime" -> s.setRoundTimeSeconds(v);
+                            case "c4timer" -> s.setC4TimerSeconds(v);
+                            case "planttime" -> s.setPlantTimeSeconds(v);
+                            case "defusetime" -> s.setDefuseSeconds(v);
+                            case "defusekittime" -> s.setDefuseKitSeconds(v);
+                            case "intermission" -> s.setRoundIntermissionSeconds(v);
+                            default -> s.setExplosionSoundRange(v);
+                        }
+                    }
+                    case "m", "h", "la", "lb", "db" -> {
+                        Double v;
+                        try {
+                            v = Double.parseDouble(t[1]);
+                        } catch (NumberFormatException e) {
+                            return "§c" + f2 + " 必须是数字";
+                        }
+                        switch (f2) {
+                            case "m" -> s.setExplosionM(v);
+                            case "h" -> s.setExplosionH(v);
+                            case "la" -> s.setExplosionLA(v);
+                            case "lb" -> s.setExplosionLB(v);
+                            default -> s.setExplosionBackDamage(v);
+                        }
+                    }
+                    default -> {
+                        return "§c未知字段: " + f2;
+                    }
+                }
+                map.setBombSettings(s);
             }
             case "background" -> {
                 if (t.length == 1 && t[0].equalsIgnoreCase("clear")) {
                     map.setBackgroundBase64("");
                 } else {
-                    if (value.isEmpty()) return "§c用法: background <base64> 或 clear";
+                    if (value.isEmpty()) return "§c用法: background <base64 或 http(s)://图片URL> 或 clear";
+                    if (!value.startsWith("http://") && !value.startsWith("https://")
+                            && value.length() > MAX_BACKGROUND_LENGTH) {
+                        return "§c背景图 Base64 超长（" + value.length() + " > " + MAX_BACKGROUND_LENGTH
+                                + " 字符），请改用图片 URL（http/https 链接，无大小限制）";
+                    }
                     map.setBackgroundBase64(value);
                 }
             }

@@ -157,6 +157,8 @@ final class QuickMatchEngine {
 
         for (MapConfig config : maps) {
             if (!config.isEnabled()) continue;
+            // 【爆破】快速匹配不自动选爆破图（多回合赛制需玩家主动排队进入，休闲/竞技队列均可）
+            if (config.isBombMap()) continue;
             if (MatchManager.getInstance().isMapInCooldown(config.getId())) continue;
 
             boolean inUse = MatchManager.getInstance().getAllActiveSessions().stream()

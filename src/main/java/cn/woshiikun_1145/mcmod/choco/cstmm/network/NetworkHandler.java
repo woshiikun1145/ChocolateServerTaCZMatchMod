@@ -19,6 +19,7 @@ import com.google.gson.JsonObject;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
@@ -605,7 +606,7 @@ public class NetworkHandler {
 
     /** 战队对象：{name,abbr,badge?,leaderName,memberCount,limit,members:[{name,isLeader,online,matchState}]}；
      *  badge 字段：URL 徽标直接携带 URL（客户端自行下载，不占服务器带宽）；base64 徽标携带
-     *  内容寻址 id（16 字符 hex），完整 base64 由 BadgePayload 分片单独下发 */
+     *  内容寻址 id（8 字符小写 hex，MurmurHash3 32 位），完整 base64 由 BadgePayload 分片单独下发 */
     private static JsonObject buildClanObject(Clan clan, boolean withBadge) {
         JsonObject c = new JsonObject();
         c.addProperty("name", clan.getName());
@@ -741,36 +742,50 @@ public class NetworkHandler {
             case REQUEST_PROFILE -> PlayerDataManager.getInstance().syncProfileToPlayer(player);
             case REQUEST_LEADERBOARD -> sendLeaderboard(player);
             case BUY_ITEM -> {
-                // 资格校验：仅竞技模式对局中的玩家可购买（模式按会话判定，地图配置已无模式）
                 MatchSession buySession = MatchManager.getInstance().getPlayerSession(player.getUuid());
-                if (buySession == null || buySession.getPhase() == MatchSession.GamePhase.ENDED
-                        || !buySession.isCompetitive()) {
-                    player.sendMessage(Text.literal("§c仅竞技模式对局中可购买商品"), false);
+                if (buySession == null || buySession.getPhase() == MatchSession.GamePhase.ENDED) {
+                    player.sendMessage(Text.literal("§c仅对局中可购买商品"), false);
                     return;
                 }
                 try {
                     int itemIndex = Integer.parseInt(payload.mapName());
-                    boolean success = EquipmentManager.getInstance().givePurchasedItem(player, itemIndex);
-                    if (success) {
-                        player.sendMessage(Text.literal("§a购买成功！"), false);
+                    MapConfig buyMap = ConfigManager.getInstance().getMap(buySession.getMapName());
+                    boolean success;
+                    if (buyMap != null && buyMap.isBombMap()) {
+                        // 爆破图：走经济系统（购买窗口 + 余额扣费 + 拆弹器所有权）
+                        success = EconomyManager.getInstance().tryPurchase(player, buySession, buyMap, itemIndex);
+                    } else if (buySession.isCompetitive()) {
+                        // 普通竞技图：维持免费发放
+                        success = EquipmentManager.getInstance().givePurchasedItem(player, itemIndex);
+                        if (success) {
+                            player.sendMessage(Text.literal("§a购买成功！"), false);
+                        } else {
+                            player.sendMessage(Text.literal("§c购买失败，物品不存在或索引无效"), false);
+                        }
                     } else {
-                        player.sendMessage(Text.literal("§c购买失败，物品不存在或索引无效"), false);
+                        player.sendMessage(Text.literal("§c仅竞技模式对局中可购买商品"), false);
+                        return;
+                    }
+                    // 购买成功后重发商店数据（爆破图刷新余额；普通图无变化仅作兜底同步）
+                    if (success) {
+                        sendShopData(player, buySession);
                     }
                 } catch (NumberFormatException e) {
                     player.sendMessage(Text.literal("§c无效的物品索引"), false);
                 }
             }
             case REQUEST_SHOP -> {
-                // 按玩家所在地图下发商店数据：仅竞技模式活跃对局中的玩家有购买资格（按会话判定）
+                // 按玩家所在地图下发商店数据：普通图仅竞技模式可购；爆破图休闲/竞技均可（走经济系统）
                 MatchSession session = MatchManager.getInstance().getPlayerSession(player.getUuid());
-                MapConfig map = session != null
-                        ? ConfigManager.getInstance().getMap(session.getMapName()) : null;
-                boolean eligible = session != null && session.getPhase() != MatchSession.GamePhase.ENDED
-                        && session.isCompetitive() && map != null;
-                List<GlobalConfig.ShopItem> items = eligible && map != null
-                        ? map.getShopItems() : List.of();
-                ServerPlayNetworking.send(player, ShopDataS2CPayload.create(eligible, items));
+                if (session == null || session.getPhase() == MatchSession.GamePhase.ENDED) {
+                    ServerPlayNetworking.send(player, ShopDataS2CPayload.create(
+                            false, false, false, 0, false, 0, List.of()));
+                    return;
+                }
+                sendShopData(player, session);
             }
+            case PLANT_BOMB -> BombInteractionManager.getInstance().setPlanting(player, "start".equals(payload.target()));
+            case DEFUSE_BOMB -> BombInteractionManager.getInstance().setDefusing(player, "start".equals(payload.target()));
             case SELECT_TEAM -> {
                 int team = payload.team();
                 if (team == 1 || team == 2) {
@@ -778,6 +793,77 @@ public class NetworkHandler {
                 }
             }
             default -> Cstmm.LOGGER.debug("[CSTMM - Network] Unknown action: {} from {}", payload.action(), player.getName());
+        }
+    }
+
+    /**
+     * 【作用】向单玩家下发商店数据（REQUEST_SHOP 响应与 BUY_ITEM 成功后订阅制推送共用）：
+     *         爆破图组装 1+4 列（第 1 列固定"装备"列：CT 携带拆弹装备购买项、T 方空列，
+     *         第 2~5 列为分类列）；普通图组装 5 列分类网格（免费发放）。
+     *         分类列未配置时回退旧版平铺 shopItems 单列。仅服务端。
+     * 【被谁使用】handleMatchAction 的 REQUEST_SHOP/BUY_ITEM 分支、sendShopDataToTeam。
+     */
+    public static void sendShopData(ServerPlayerEntity player, MatchSession session) {
+        MapConfig map = ConfigManager.getInstance().getMap(session.getMapName());
+        boolean bombMap = map != null && map.isBombMap();
+        boolean eligible = bombMap ? session.isBombMode() : (session.isCompetitive() && map != null);
+        List<ShopDataS2CPayload.ColumnData> columns = new ArrayList<>();
+        boolean hasDefuser = false;
+        int defuserPrice = 0;
+
+        if (bombMap && map != null) {
+            // 第 1 列：装备列（仅 CT 显示拆弹装备购买项；T 方空列，购买走 EconomyManager index=-1）
+            boolean playerIsT = session.isTTeam(session.getPlayerTeam(player.getUuid()));
+            hasDefuser = !playerIsT;
+            defuserPrice = EconomyManager.getInstance().economy().getDefuserPrice();
+            columns.add(new ShopDataS2CPayload.ColumnData("装备", "", List.of()));
+            // 分类列按玩家队伍下发（T/红 与 CT/蓝 独立配置）
+            appendShopColumns(columns, map, 4, playerIsT);
+        } else if (eligible && map != null) {
+            // 普通图：5 列分类网格（全部生效，无队伍区分）
+            appendShopColumns(columns, map, 5, null);
+        }
+
+        boolean windowOpen = bombMap && EconomyManager.getInstance().isBuyWindowOpen(session, map);
+        int money = bombMap ? session.getPlayerMoney(player.getUuid()) : 0;
+        ServerPlayNetworking.send(player, ShopDataS2CPayload.create(
+                eligible, bombMap, hasDefuser, money, windowOpen, defuserPrice, columns));
+    }
+
+    /**
+     * 【作用】把地图的商店分类列追加上下发列表（上限 maxCols 列）：
+     *         tTeam=null 取普通图通用列 shopColumns；true/false 取爆破图 T/CT 队伍列
+     *         （未独立配置时 MapConfig 内部回退通用列）。
+     *         全部未配置但旧版平铺 shopItems 非空时回退单列"商品"。
+     */
+    private static void appendShopColumns(List<ShopDataS2CPayload.ColumnData> out, MapConfig map,
+                                          int maxCols, Boolean tTeam) {
+        List<MapConfig.ShopColumn> cols = tTeam == null
+                ? map.getShopColumns() : map.getBombShopColumnsForTeam(tTeam);
+        if (cols.isEmpty() && !map.getShopItems().isEmpty()) {
+            cols = List.of(new MapConfig.ShopColumn("商品", map.getShopItems()));
+        }
+        for (int i = 0; i < Math.min(maxCols, cols.size()); i++) {
+            MapConfig.ShopColumn col = cols.get(i);
+            out.add(new ShopDataS2CPayload.ColumnData(col.getName(), col.getIcon(),
+                    List.copyOf(col.getItems())));
+        }
+    }
+
+    /**
+     * 【作用】向对局全体在线成员下发商店数据（订阅制推送）：
+     *         购买窗口开启/关闭、回合结算改钱、开局重置等状态变化时调用，
+     *         客户端打开商店即可收到最新状态（不再依赖客户端定时轮询）。
+     * 【被谁使用】EconomyManager.checkWindowFlip（窗口翻转）、BombRoundManager（回合开始/结算）、
+     *           BombInteractionManager（安放/拆除奖励）。
+     */
+    public static void sendShopDataToTeam(MatchSession session) {
+        var pm = cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm.getServer().getPlayerManager();
+        for (UUID uuid : session.getAllPlayers()) {
+            ServerPlayerEntity p = pm.getPlayer(uuid);
+            if (p != null) {
+                sendShopData(p, session);
+            }
         }
     }
 
@@ -1087,6 +1173,25 @@ public class NetworkHandler {
             payload = new MatchStatusPayload(payload.type(), message, payload.redKills(), payload.blueKills());
         }
         ServerPlayNetworking.send(player, payload);
+    }
+
+    /**
+     * 【作用】向对局全员广播一条状态消息（MATCH_STARTING 通道，与 BombRoundManager 的
+     *         broadcastBomb 一致）：供 EconomyManager 等无会话广播通道的模块复用。
+     * 【被谁使用】EconomyManager#broadcastMoney（经济重置播报）。仅服务端。
+     */
+    public static void broadcastToMatch(MatchSession session, String message) {
+        MinecraftServer server = Cstmm.getServer();
+        if (server == null || session == null) return;
+        MatchStatusPayload payload = new MatchStatusPayload(
+                MatchStatusPayload.StatusType.MATCH_STARTING, message,
+                session.getRedKills(), session.getBlueKills());
+        for (UUID uuid : session.getAllPlayers()) {
+            ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
+            if (player != null) {
+                sendMatchStatus(player, payload);
+            }
+        }
     }
 
     /**

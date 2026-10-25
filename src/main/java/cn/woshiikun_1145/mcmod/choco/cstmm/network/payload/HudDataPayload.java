@@ -23,7 +23,8 @@ public record HudDataPayload(
         int remainingSeconds,
         boolean inGame,
         int phase,
-        String rosterJson
+        String rosterJson,
+        String extraJson
 ) implements CustomPayload {
 
     // 【作用】包类型标识（cstmm:hud_data），由 NetworkHandler 注册并由网络层路由
@@ -33,6 +34,8 @@ public record HudDataPayload(
 
     // 花名册 JSON 字节上限（与 clan_data 一致；服务端构建时已按此截断，此处仅为协议兜底）
     private static final int MAX_ROSTER_BYTES = 65536;
+    // 扩展信息 JSON 字节上限（爆破回合状态/经济字段，体量小）
+    private static final int MAX_EXTRA_BYTES = 4096;
 
     public static final PacketCodec<PacketByteBuf, HudDataPayload> CODEC = PacketCodec.of(
             (payload, buf) -> {
@@ -47,6 +50,9 @@ public record HudDataPayload(
                 // 花名册 JSON：发送前按字节截断兜底（正常构建时已远小于上限）
                 buf.writeString(NetworkHandler.truncateByUtf8Bytes(
                         payload.rosterJson() == null ? "[]" : payload.rosterJson(), MAX_ROSTER_BYTES), MAX_ROSTER_BYTES);
+                // 扩展信息 JSON（爆破回合状态等；普通对局为 "{}"）
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(
+                        payload.extraJson() == null ? "{}" : payload.extraJson(), MAX_EXTRA_BYTES), MAX_EXTRA_BYTES);
             },
             buf -> new HudDataPayload(
                     buf.readString(64),
@@ -55,7 +61,8 @@ public record HudDataPayload(
                     buf.readInt(),
                     buf.readBoolean(),
                     buf.readVarInt(),
-                    buf.readString(MAX_ROSTER_BYTES)
+                    buf.readString(MAX_ROSTER_BYTES),
+                    buf.readString(MAX_EXTRA_BYTES)
             )
     );
 

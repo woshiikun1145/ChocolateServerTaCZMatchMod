@@ -99,6 +99,35 @@ public class VoteManager implements VoteApi {
     }
 
     /**
+     * 【作用】发起爆破模式加时继续投票（加时 3:3 平时触发）：过半同意 → 开始下一场加时；
+     *         拒绝 → 比赛以平局结束。结果回调至 BombRoundManager.onOvertimeVoteResult。
+     * 【被谁使用】BombRoundManager（加时 3:3 时）。仅服务端。
+     */
+    public void startBombContinueVote(MatchSession session) {
+        if (session == null) return;
+        String sessionId = session.getSessionId();
+        if (activeVotes.containsKey(sessionId)) return;
+
+        Set<UUID> allPlayers = session.getAllPlayers();
+        int onlineCount = countOnlinePlayers(allPlayers);
+        if (onlineCount < 2) {
+            // 无人可投：直接按平局结束（与加时投票的最低人数规则一致）
+            BombRoundManager.getInstance().onOvertimeVoteResult(session, false);
+            return;
+        }
+
+        int requiredYes = (onlineCount / 2) + 1;
+        VoteSession vote = new VoteSession(VoteType.BOMB_OT, sessionId, null, requiredYes, 30);
+        activeVotes.put(sessionId, vote);
+
+        broadcastVoteMessage(session, "§6=== 加时赛 3:3 平！===\n"
+                + "§e是否继续下一场加时赛？拒绝则比赛以平局结束\n"
+                + "§a需要 " + requiredYes + " 票同意 (过半)\n"
+                + "§7按 §aF7 §7同意  |  按 §cF8 §7反对  |  剩余 30 秒");
+        Cstmm.LOGGER.info("[CSTMM - VoteManager] Started bomb OT continue vote for match {}", sessionId);
+    }
+
+    /**
      * 【作用】以 UUID 指定发起者与目标发起踢人投票（把 UUID 解析为在线玩家后委托）。
      * 【被谁使用】VoteApi 外部 API 入口（集成方持有 UUID 时调用）。
      */
@@ -273,6 +302,12 @@ public class VoteManager implements VoteApi {
     private void executeVoteResult(VoteSession vote, MatchSession session, boolean passed) {
         String resultMessage;
 
+        if (vote.type == VoteType.BOMB_OT) {
+            // 爆破加时继续投票：通过/拒绝均由 BombRoundManager 回调处理（含消息广播与回合推进）
+            BombRoundManager.getInstance().onOvertimeVoteResult(session, passed);
+            return;
+        }
+
         if (vote.type == VoteType.OVERTIME) {
             if (passed) {
                 session.setRemainingSeconds(30);
@@ -445,10 +480,11 @@ public class VoteManager implements VoteApi {
 
     // ==================== 内部类 ====================
 
-    /** 投票类型：加时赛 / 踢人（内部使用；对外经 VoteApi.VoteType 映射） */
+    /** 投票类型：加时赛 / 踢人 / 爆破加时继续（内部使用；对外经 VoteApi.VoteType 映射） */
     public enum VoteType {
         OVERTIME,
-        KICK
+        KICK,
+        BOMB_OT
     }
 
     /**

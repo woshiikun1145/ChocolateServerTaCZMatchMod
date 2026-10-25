@@ -1,6 +1,8 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm.listener;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
+import cn.woshiikun_1145.mcmod.choco.cstmm.manager.BombRoundManager;
+import cn.woshiikun_1145.mcmod.choco.cstmm.manager.EconomyManager;
 import cn.woshiikun_1145.mcmod.choco.cstmm.manager.InventoryManager;
 import cn.woshiikun_1145.mcmod.choco.cstmm.manager.MatchManager;
 import cn.woshiikun_1145.mcmod.choco.cstmm.manager.ModGuardian;
@@ -56,6 +58,19 @@ public class EventListener {
                 Cstmm.LOGGER.error("[CSTMM - EventListener] Failed to send player profile to {}", player.getName(), e);
             }
 
+            // 【作用】爆破对局内重连：3 分钟宽限自动归队（回合已开打按死亡旁观、冻结期直接回归），
+            //        不走下方通用背包恢复（断线前的背包随玩家数据持久化，无需快照恢复）
+            try {
+                MatchSession bombSession = MatchManager.getInstance().getPlayerSession(uuid);
+                if (bombSession != null && bombSession.isBombMode()
+                        && bombSession.getPhase() != MatchSession.GamePhase.ENDED) {
+                    BombRoundManager.getInstance().onRejoin(player, bombSession);
+                    return;
+                }
+            } catch (Exception e) {
+                Cstmm.LOGGER.error("[CSTMM - EventListener] Failed to handle bomb reconnect for {}", player.getName(), e);
+            }
+
             try {
                 // 有保存背包时区分三种情况：对局中断线重连仅提示；对局外恢复原点与背包；
                 // 仍在死亡界面（对局结束于其死亡期间，结算已跳过恢复）则待重生补恢复，
@@ -96,7 +111,8 @@ public class EventListener {
                 // 攻击者必须与受害者处于同一对局
                 if (MatchManager.getInstance().getPlayerSession(attacker.getUuid()) != session) return true;
 
-                if (session.isCompetitive()) return true;
+                // 【爆破】冻结阶段（购买时间）内取消一切伤害，防止未开局抢先手
+                if (session.isBombMode() && session.getPhase() == MatchSession.GamePhase.PREPARING) return false;
 
                 // 同队时取消伤害
                 return session.getPlayerTeam(victim.getUuid()) != session.getPlayerTeam(attacker.getUuid());
@@ -138,6 +154,10 @@ public class EventListener {
             if (killedSession != null && killedSession.isPlayerInGame(killed.getUuid())
                     && killedSession.getPhase() != MatchSession.GamePhase.ENDED) {
                 killedSession.recordDeath(killed.getUuid());
+                // 【爆破】标记本回合死亡 + 立即全歼判定（旁观者由 AFTER_RESPAWN 分支处理）
+                if (killedSession.isBombMode()) {
+                    BombRoundManager.getInstance().onPlayerDeath(killedSession, killed);
+                }
             }
 
             LivingEntity attacker = null;
@@ -181,6 +201,14 @@ public class EventListener {
 
             // 【作用】记击杀者个人击杀（本局累计 + 当前生命计数，HUD 花名册/徽章数据源）
             session.recordKill(killerUuid);
+
+            // 【爆破】击杀奖励：击杀者 +killReward（休闲减半，全局可配）；奖励到账即推送商店数据
+            if (session.isBombMode()) {
+                EconomyManager.getInstance().awardKill(session, killerUuid);
+                if (killer instanceof ServerPlayerEntity kp) {
+                    cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler.sendShopData(kp, session);
+                }
+            }
 
             // 更新击杀者/被击杀者的档案 K/D 统计（持久化由 PlayerDataManager 负责）
             PlayerDataManager.getInstance().addKill(killerUuid);

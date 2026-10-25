@@ -5,12 +5,11 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.GlobalConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.MatchSession;
 import net.minecraft.item.ItemStack;
-import net.minecraft.nbt.NbtCompound;
-import net.minecraft.nbt.NbtElement;
-import net.minecraft.nbt.NbtHelper;
 import net.minecraft.registry.RegistryWrapper;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
+
+import java.util.List;
 
 /**
  * 装备管理器 - 仅服务端
@@ -52,7 +51,25 @@ public class EquipmentManager {
             giveFallbackGear(player);
             return;
         }
+        giveGearList(player, gearList);
+    }
 
+    /**
+     * 【作用】按地图发放默认装备（爆破图回合重生用）：地图配置了 defaultGear 时优先使用，
+     *         未配置（空列表）回退全局默认装备——行为兼容旧地图，后续（阶段⑤）由配置界面
+     *         "手持添加"逐图写入并自动迁移落盘。
+     * 【被谁使用】BombRoundManager（回合重置给阵亡玩家发装备）。仅服务端。
+     */
+    public void giveDefaultGear(ServerPlayerEntity player, MapConfig map) {
+        if (map != null && !map.getDefaultGear().isEmpty()) {
+            giveGearList(player, map.getDefaultGear());
+            return;
+        }
+        giveDefaultGear(player);
+    }
+
+    /** 按 EquipSlot 列表逐槽发放装备（giveDefaultGear 两个重载共用）。 */
+    private void giveGearList(ServerPlayerEntity player, List<GlobalConfig.EquipSlot> gearList) {
         RegistryWrapper.WrapperLookup lookup = player.getWorld().getRegistryManager();
 
         for (GlobalConfig.EquipSlot equipSlot : gearList) {
@@ -121,57 +138,29 @@ public class EquipmentManager {
     }
 
     /**
-     * 解析物品字符串为 ItemStack
-     * 支持两种格式：
-     * 1. "物品ID 数量"（如 "minecraft:cooked_beef 64"）
-     * 2. SNBT 字符串（如 "{id:\"minecraft:diamond_sword\",count:1}"）
-     * 1.21.1 需要使用双参数 fromNbt，并处理 Optional
+     * 解析物品字符串为 ItemStack（统一委托 ItemStrings，与服务端/客户端预览同一套规则）。
+     * 支持格式：
+     * 1. /give 格式（主格式）："minecraft:netherite_sword[minecraft:enchantments={...}] 1"
+     * 2. 完整 SNBT："{id:\"minecraft:diamond_sword\",count:1,components:{...}}"（含 1.20 tag 迁移）
+     * 3. "物品ID 数量"（如 "minecraft:cooked_beef 64"）与纯物品ID
      */
     private ItemStack parseItemStack(String itemString, RegistryWrapper.WrapperLookup lookup) {
-        String nbtString = itemString.trim();
-        int count = 1;
-
-        // 支持 "物品ID 数量" 格式：末尾为纯数字时按数量处理（不影响以 } 结尾的 SNBT）
-        int spaceIdx = nbtString.lastIndexOf(' ');
-        if (spaceIdx > 0) {
-            try {
-                int parsedCount = Integer.parseInt(nbtString.substring(spaceIdx + 1));
-                if (parsedCount >= 1) {
-                    count = parsedCount;
-                    nbtString = nbtString.substring(0, spaceIdx).trim();
-                }
-            } catch (NumberFormatException ignored) {
-                // 末尾不是数字，按整体处理（可能是含空格的 SNBT）
-            }
-        }
-
-        try {
-            NbtElement parsed = NbtHelper.fromNbtProviderString(nbtString);
-            if (!(parsed instanceof NbtCompound compound)) {
-                return ItemStack.EMPTY;
-            }
-            // 1.21.1 正确签名：fromNbt(RegistryWrapper.WrapperLookup, NbtCompound) 返回 Optional<ItemStack>
-            return withCount(ItemStack.fromNbt(lookup, compound).orElse(ItemStack.EMPTY), count);
-        } catch (Exception e) {
-            // 尝试作为简单物品ID处理（不带NBT）
-            try {
-                var item = net.minecraft.registry.Registries.ITEM.get(
-                        net.minecraft.util.Identifier.tryParse(nbtString)
-                );
-                if (item != null) {
-                    return withCount(new ItemStack(item), count);
-                }
-            } catch (Exception ignored) {}
-            return ItemStack.EMPTY;
-        }
+        return cn.woshiikun_1145.mcmod.choco.cstmm.util.ItemStrings.toStack(itemString, lookup);
     }
 
-    /** 按解析出的数量设置物品堆数量（不超过最大堆叠上限） */
-    private ItemStack withCount(ItemStack stack, int count) {
-        if (!stack.isEmpty() && count > 1) {
-            stack.setCount(Math.min(count, stack.getMaxCount()));
+    /**
+     * 【作用】公开的物品字符串解析入口（parseItemStack 的对外包装）：
+     *         供 EconomyManager 商店扣费购买复用同一套解析规则（"物品ID 数量" / SNBT）。
+     * 【被谁使用】EconomyManager#tryPurchase。仅服务端。
+     */
+    public ItemStack parseAndBuild(ServerPlayerEntity player, String itemString) {
+        if (itemString == null || itemString.isBlank()) return ItemStack.EMPTY;
+        try {
+            return parseItemStack(itemString, player.getWorld().getRegistryManager());
+        } catch (Exception e) {
+            Cstmm.LOGGER.warn("[CSTMM - EquipmentManager] parseAndBuild failed: {}", e.getMessage());
+            return ItemStack.EMPTY;
         }
-        return stack;
     }
 
     /**
@@ -190,7 +179,8 @@ public class EquipmentManager {
             return false;
         }
 
-        var items = map.getShopItems();
+        // 商品取平铺分类列（与购买页下发顺序一致；未配置列时回退旧版平铺 shopItems）
+        var items = map.getFlatShopItems();
         if (items == null || itemIndex < 0 || itemIndex >= items.size()) {
             return false;
         }
