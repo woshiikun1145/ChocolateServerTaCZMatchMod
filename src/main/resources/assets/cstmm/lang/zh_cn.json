@@ -3,5 +3,9 @@
   "key.cstmm.open_menu": "打开/关闭匹配菜单",
   "key.cstmm.open_shop": "打开/关闭商店",
   "key.cstmm.vote_yes": "投票：同意",
-  "key.cstmm.vote_no": "投票：不同意"
+  "key.cstmm.vote_no": "投票：不同意",
+  "key.cstmm.plant_bomb": "安放 C4 炸弹",
+  "key.cstmm.defuse_bomb": "拆除 C4 炸弹",
+  "item.cstmm.c4": "C4 炸药",
+  "entity.cstmm.c4": "C4 炸药"
 }

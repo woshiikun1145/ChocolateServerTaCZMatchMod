@@ -7,6 +7,10 @@
     "ClientConnectionAccessor",
     "ServerCommonNetworkHandlerAccessor"
   ],
+  "client": [
+    "KeyBindingAccessor",
+    "KeyBindingMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   },

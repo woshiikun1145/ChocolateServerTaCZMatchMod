@@ -14,5 +14,93 @@
         "stream": false
       }
     ]
+  },
+  "c4_beep": {
+    "sounds": [
+      {
+        "name": "cstmm:c4_beep",
+        "stream": false
+      }
+    ]
+  },
+  "c4_explosion": {
+    "sounds": [
+      {
+        "name": "cstmm:c4_explosion",
+        "stream": false
+      }
+    ]
+  },
+  "c4_detonation": {
+    "sounds": [
+      {
+        "name": "cstmm:c4_detonation",
+        "stream": false
+      }
+    ]
+  },
+  "c4_plant": {
+    "sounds": [
+      {
+        "name": "cstmm:c4_plant",
+        "stream": false
+      }
+    ]
+  },
+  "c4_planting": {
+    "sounds": [
+      {
+        "name": "cstmm:c4_planting",
+        "stream": false
+      }
+    ]
+  },
+  "c4_defuse": {
+    "sounds": [
+      {
+        "name": "cstmm:c4_defuse",
+        "stream": false
+      }
+    ]
+  },
+  "c4_defused": {
+    "sounds": [
+      {
+        "name": "cstmm:c4_defused",
+        "stream": false
+      }
+    ]
+  },
+  "c4_defused_announce": {
+    "sounds": [
+      {
+        "name": "cstmm:c4_defused_announce",
+        "stream": false
+      }
+    ]
+  },
+  "t_win": {
+    "sounds": [
+      {
+        "name": "cstmm:t_win",
+        "stream": false
+      }
+    ]
+  },
+  "ct_win": {
+    "sounds": [
+      {
+        "name": "cstmm:ct_win",
+        "stream": false
+      }
+    ]
+  },
+  "round_draw": {
+    "sounds": [
+      {
+        "name": "cstmm:round_draw",
+        "stream": false
+      }
+    ]
   }
 }
