@@ -44,7 +44,12 @@
 | `VoteManager` | 踢人投票、加时投票（含冷却与超时静默清理） |
 | `ConfigManager` | 配置加载/校验/落盘（原子写盘）、保存后全服广播 |
 | `InventoryManager` | 竞技模式存包/清包/恢复快照 |
-| `EquipmentManager` | 竞技模式默认装备发放、购买物品发放（双校验） |
+| `EquipmentManager` | 竞技模式默认装备发放、购买物品发放（双校验）；物品字符串解析统一委托 `util.ItemStrings`（主格式 **/give 格式** `id[minecraft:组件={...}] 数量`，兼容旧完整 SNBT/"id 数量"/纯 ID，**旧版 1.20 tag NBT 自动迁移为 1.21 components**：附魔→levels 映射、Unbreakable、display→custom_name/lore）；`parseAndBuild` 供 EconomyManager 扣费购买复用 |
+| `BombRoundManager` | 爆破模式回合状态机（gameType=BOMB）：多回合赛制（休闲先到 8 分/竞技 MR12+加时 BO6）、攻防转换（第 13 回合/加时第 4 回合）、回合重置（复活/装备/传送/C4 指派/拆弹器发放）、胜负判定（全歼/爆炸/拆除/超时，安放后 T 全灭不结束）、3 分钟重连宽限与整队离线挂起、加时继续投票回调 |
+| `EconomyManager` | 爆破图经济系统（价格=匹配内货币非服务器货币，全局可配 `GlobalConfig.BombEconomy`）：起始金 $800/上限 $16000/击杀 $300（休闲减半）/胜利金 3250·3500/败金 1400+连败×500 封顶 3400/安放·拆除个人 $300/T 存活未下包战败 0 败金；购买窗口判定（冻结+开局 20 秒、安放后禁买）与扣费购买（拆弹器 CT 专属、C4 禁购）；补位玩家懒初始化起始金 |
+| `BombInteractionManager` | 爆破交互（每服务器 tick 推进）：安放（T 手持 c4 站包点内**长按右键/使用键**，plantTimeSeconds）与拆除（CT 2.5 格内长按右键，**持拆弹装备 tag `cstmm_defuse_kit` 用 defuseKitSeconds / 裸拆 defuseSeconds**）；条件校验/中断/进度 action bar；C4 实体生成与按 matchId 清理；`/cstmm debug allow_c4 to_be_planted_freely` 开启后跳过全部安放情境限制（任意位置/任意阵营/任意阶段/可重复安放，仅保留存活+手持 C4）；对局结束统一回收拆弹装备 tag |
+| `C4DamageCalculator`（util） | C4 爆炸伤害（《C4爆炸计算.md》模型，参数已 ÷5 到 MC 口径，全部在 `MapConfig.BombSettings` 可配）：双段线性距离衰减（dMax 51→dKill 20 @L1，→0 @L2）、脚/胸/头三采样点取最大、实心遮挡 0 伤/开口方块按 a0 泄漏穿透、背对减伤 dBack、向下取整；无破坏爆炸视觉 |
+| `item.ModItems` / `entity.ModEntities` | 自定义注册表（命名空间 `cstmm`，非 MOD_ID）：`cstmm:c4` 物品+实体（BombEntity：静止不可推、携带 matchId 隔离清理，挂在创造栏"战斗"；**对局内**由会话驱动倒计时，**对局外自由炸弹**归零先播 `c4_detonation` 引信音、播完 DETONATION_LEAD_MILLIS 后自爆——与对局内同口径，NBT 重载 fuseTicks=0 重置 1 tick 防卡死）。**拆弹装备不是物品**——持有状态 = 玩家 tag `cstmm_defuse_kit`（`BombInteractionManager.DEFUSE_KIT_TAG`） |
 | `PlayerDataManager` | 战绩记录（仅对局结束时记录一次）与档案持久化 |
 | `MatchScheduler` | 全局调度 tick，各 manager tick 用独立 try-catch 隔离异常 |
 | `EventListener` | 玩家加入（握手触发）、死亡重生（回出生点）、伤害（友伤判定）、断线清理 |
@@ -56,7 +61,7 @@
 
 | 模块 | 职责 |
 |---|---|
-| `CstmmClient` | 客户端入口，快捷键注册（; 菜单 / ' 商店 / F7 F8 投票） |
+| `CstmmClient` | 客户端入口，快捷键注册（; 菜单 / ' 商店 / F7 F8 投票）；爆破交互按键检测（每 tick：手持 c4+右键=安放、3 格内有 C4 实体+右键=拆除，状态翻转发 start/stop）；C4 实体渲染器注册 |
 | `ClientNetworkHandler` | S2C 包解码与分发 |
 | `ClientHandshakeState` | 握手状态机，全部功能的门禁 |
 | `ConfigDataCache` | 配置同步结果的客户端缓存（供界面渲染） |
@@ -69,9 +74,11 @@
 | `BadgeCache` | 战队徽标两级缓存（badge 包按 badgeId 重组，落盘 `config/cstmm/client/cache/badges/<id>.b64`；进服上报磁盘已有 id 服务端免重发；内存+磁盘均缺失时自动发 request_badge 补发；断线仅清内存，磁盘保留跨重连复用） |
 | `Base64ImageDecoder` | base64 图片 → GPU 纹理的健壮解码工具（data URI 前缀剥离/空白清理/MIME 降级/非 PNG 经 ImageIO 转换；地图卡片背景与战队徽标共用，`CardTexture` record 在此类中） |
 | `LastWordsScreen` + `WhyYouClickThis` | "千万别点"的遗言流程（不可取消：发送/算了/回车/ESC 均发送遗言；崩溃挂起为静态状态，由 CstmmClient 每 tick 抛出；屏幕被其他模组顶号/断线顶掉时 `removed()` 兜底同样触发；被反崩溃模组吞掉异常则改用 `scheduleStop()` 强制退出） |
-| `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新） |
-| `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存 |
-| `HudOverlay` | CS2 风格对局 HUD 渲染（顶部队伍栏：己方/敌方玩家卡片 + 中央计分板；淡入淡出动画，断线重置） |
+| `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新）：地图类型切换（NORMAL/BOMB）、爆破包点编辑（名称/坐标/半径=立方体半边长 + "在脚下添加"可视化取点，仅 BOMB 图显示）、商店分类列编辑器（普通图 5 列通用；爆破图 T/红 与 CT/蓝 两套独立配置各 4 列，共用 `addShopColumnEditor`，普通图额外含限购列；旧单套配置打开时自动复制为两队初始值）+ 购买页实时预览（`ShopPreviewWidget`，爆破图 CT/T 视角各一）、手持添加导出 **/give 格式**（`ItemStrings.fromStack`，含数据组件）、背景图（Base64 ≤327680 字符 / http(s) 图片 URL 无限制，保存时校验 + 物品ID 解析预警告）；`init()` 保留滚动偏移仅钳制（增删行不再跳回顶部），切换地图/重载时显式归零 |
+| `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存：普通图与爆破图统一 **5 列一页式网格**（列头编号+图标+名称；商品格=图标/名称/价格；列内超出鼠标滚轮逐列滚动）。爆破图第 1 列固定"装备"列（拆弹装备购买项仅 CT，T 方空列；分类列按玩家队伍下发 T/CT 独立配置），顶部余额+购买窗口信息栏，余额不足/窗口关闭置灰；普通图 5 列分类网格免费发放 |
+| `ShopPreviewWidget` | 配置界面的购买页实时预览（5 列网格，随编辑刷新；爆破图按 tTeam 参数分别渲染 CT 视角（含拆弹装备列）与 T 视角（第 1 列空列）），拆弹装备价格取编辑中的全局经济参数 |
+| `ItemStrings` | 物品串统一解析/导出工具（服务端发放与客户端预览共用）：主格式 **/give 格式** `id[minecraft:组件={...}] 数量`（组件键不带引号，与 /give 输出一致；括号匹配同时感知 [] 与 {} 嵌套，组件值内含列表如 SpawnPotentials:[] 不会截断；**组件值任意类型**经 `{"v":值}` 包装解析——`NbtHelper.fromNbtProviderString` 只接受复合根），兼容旧完整 SNBT（含 1.20 tag 迁移）与 `id 数量`；`fromStack` 把 ItemStack 导出为 /give 格式（手持添加用）；`isPlausible` 供保存前校验；解码失败记录 `ItemStrings` WARN 日志 |
+| `HudOverlay` | CS2 风格对局 HUD 渲染（顶部队伍栏：己方/敌方玩家卡片 + 中央计分板；淡入淡出动画，断线重置）。爆破对局：回合比分（T x : y CT）、C4 红色爆炸倒计时、计分板下方状态行（安放地点/拆弹警告/重连等待/购买窗口，`drawBombStatusLine`）、CT 拆弹装备卡片标记（roster `kit` 字段） |
 
 ### 2.3 关键设计约束
 
@@ -153,7 +160,7 @@
 
 **leaderboard**（S2C）：分片包（`varInt partIndex` + `varInt totalParts` + `string data(32767B)`，每片 ≤30000 字节），拼接后为 `{"players":[{"name","kills","deaths","matches","wins"},...]}`——全服档案的排行字段快照。排序（K/D、胜率、总击杀）由客户端本地完成；履历页打开时经 `REQUEST_LEADERBOARD` 触发，重新切页即更新。详见 NETWORK.md §5.2。
 
-**shop_data**（S2C）：`bool eligible` + `varInt itemCount` + 循环 `string itemId(256B)` + `varInt price` + `varInt maxPurchase`。数据流：客户端打开 ShopScreen 时在**构造器**发送 `REQUEST_SHOP`（放 init 会因界面刷新循环重复请求）→ 服务端校验（活跃对局 + isCompetitive）→ 回 `shop_data` → `ShopDataCache` 缓存并刷新界面。
+**shop_data**（S2C）：`bool eligible` + `bool bombMode` + `bool hasDefuser` + `varInt money` + `bool buyWindowOpen` + `varInt defuserPrice` + `varInt colCount` + 循环列 `{string name(64B) + string icon(32000B) + varInt itemCount + 循环商品 {itemId(256B)/price/maxPurchase/team(8B)/displayName(256B)/icon(32000B)}}`——每列自带商品列表（列内商品即购买页网格一列）。数据流：客户端打开 ShopScreen 时在**构造器**发送 `REQUEST_SHOP`（放 init 会因界面刷新循环重复请求）→ 服务端 `sendShopData` 组装列（爆破图 1+4 列含空装备列 + 按阵营的 hasDefuser；普通图 5 列；未配置分类列回退平铺 shopItems 单列）→ `ShopDataCache` 缓存并刷新界面；购买窗口翻转/结算/购买成功按订阅制重推。完整逐字节格式见 NETWORK.md §5.2。
 
 **open_config_screen**（S2C）：空包。**request_config_sync**（C2S）：`string clientHash`（客户端本地缓存的核心配置哈希，空载荷防御解码兼容旧版客户端）。服务端限频 **2 次/秒/玩家**，超限拒绝并提示；哈希一致仅回 `config_meta` 小包，不一致下发全量。
 
@@ -270,6 +277,7 @@
 | `/cstmm debug match_info_hud <t\|f>` | OP≥2 | 调试：强制显示/关闭比赛信息栏（屏幕顶部中央，淡入约 1 秒）。**仅作用于执行者自己的客户端**（信息栏为客户端显示，仅限游戏内玩家执行，不影响其他玩家）。开启后立即向执行者推送一次，此后每秒向其推送首个活跃对局的 HUD；无活跃对局时向执行者发调试预览计分板（地图名"HUD 调试预览"+ 0:0 + 90 秒倒计时，仅中央计分板无队伍卡片，验证显示链路）；关闭时立即向执行者发清空包（inGame=false）复位其 HUD |
 | `/cstmm debug bandwidth start\|stop\|get\|view` | OP≥2 | 调试：服务器带宽记录（Netty 管线最外侧字节计数器，统计每个连接加密压缩后的线路字节，含原版与模组全部流量；玩家 JOIN 时注入）。start=清零并开始逐秒采样；stop=停止并返回时长/总量/峰值汇总；get=当前最近 1 秒出/入站速率；view=总量/均值/峰值摘要 + 最近 15 条逐秒样本。采样线程为常驻 1Hz 守护线程 |
 | `/cstmm debug exception_protect_test [confirm]` | OP≥2 | 调试：全局异常保护链路测试（**危险操作，两步确认**）。不带参数=发起（发出警告并开启 30 秒确认窗口）；`confirm`=窗口内确认后从执行器抛出人为测试异常，经本命令的 guard 包装走与生产完全相同的保护链路（ModGuardian.engage → 控制台完整堆栈 → 全服警告广播 → 活跃对局强制结算 → 模组停用，服务器不崩）。保护已启用时被 guard 拦截并提示；重启服务器恢复 |
+| `/cstmm debug allow_c4 to_be_planted_freely <t\|f>` | OP≥2 | 调试：允许/不允许**任何情况下安放 C4**——对局内跳过全部情境限制（任意位置/任意阵营/任意阶段/可重复安放）；**对局外也可安放**（生成自由炸弹实体：matchId 为空、fuseTicks 自行倒计时、归零先播 c4_detonation 引信音、播完 DETONATION_LEAD_MILLIS 后自爆对附近全员结算伤害，可由任意玩家长按右键拆除，引信窗口内被拆则不爆）。仅内存态开关，重启恢复默认（关闭）；对局外安放/拆除进度存 BombInteractionManager 独立内存表，拆除时间同样按拆弹装备 tag 判定 |
 
 玩家可用命令见 [README.md](README.md) §五。
 
@@ -299,7 +307,10 @@
 | `boundary` | object | 全 0 | 公共边界 `minX..maxZ` 六个 int |
 | `redBoundary` / `blueBoundary` | object | 全 0 | 红/蓝队专属边界，全 0 时该队回退 `boundary` |
 | `redSpawns` / `blueSpawns` | 数组 | [] | 出生点 `{"x","y","z"}`（保存校验非空） |
-| `shopItems` | 数组 | [] | 本图商品 `{"itemId","price","maxPurchase"}`（ShopItem 类保留在 GlobalConfig） |
+| `shopItems` | 数组 | [] | 旧版平铺本图商品 `{"itemId","price","maxPurchase"}`（未配置 shopColumns 时回退；ShopItem 类保留在 GlobalConfig） |
+| `shopColumns` | 数组 | [] | 普通图商店分类列 `{"name","icon","items":[ShopItem]}`（购买页网格 5 列生效；爆破图未配置队伍列时回退；旧键 `bombShopColumns` 自动迁移） |
+| `shopColumnsT` / `shopColumnsCT` | 数组 | [] | 爆破图 T 方（红队）/ CT 方（蓝队）购买页分类列，各最多 4 列生效；按玩家队伍下发与购买（未配置回退 shopColumns） |
+| `bombsites` | 数组 | [] | 包点 `{"name","x","y","z","radius"}`：判定为**立方体**（三轴 \|坐标差\| ≤ radius，半径=半边长，≤0 按 3 兜底） |
 | `backgroundBase64` | string | "" | 卡片背景图（PNG 的 Base64） |
 
 `global.json`：`quickTimeout`（快速匹配超时秒数，唯一全局对局参数）、`defaultGear`（竞技默认装备 `{"slot","itemId"}`）。slot 与配置界面校验器同口径：`armor.head/chest/legs/feet/body` 或 `container.0~container.35`（`/item replace entity` 语法）；同时兼容简写 `head/chest/legs/feet/mainhand/offhand` 与 `weapon.mainhand/offhand`（`EquipmentManager.applyToSlot` 全部识别：armor.* 映射对应盔甲槽、weapon.* 映射主手/副手、container.N 替换主背包 N 号槽、armor.body 玩家无该槽位进背包/掉落、未知槽位塞背包或掉落；slot 为 null/空串的条目跳过）。

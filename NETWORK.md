@@ -161,11 +161,12 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 | `team` | int(4B) | — | JOIN_QUEUE：1 红/2 蓝/其他=自动（服务端把非 1/2 归一为 0，防客户端注入任意整数）；BUY_ITEM：忽略 |
 | `target` | string | 64B | JOIN_QUEUE / JOIN_QUICK：模式 `COMPETITIVE`/`CASUAL`（空/非法按竞技兜底）；其余动作空闲 |
 
-`ActionType` ordinal 表：`JOIN_QUEUE=0, LEAVE_QUEUE=1, VOTE_YES=2, VOTE_NO=3, VOTE_OVERTIME=4, SELECT_TEAM=5, BUY_ITEM=6, REQUEST_PROFILE=7, REQUEST_SHOP=8, JOIN_QUICK=9, REQUEST_LEADERBOARD=10`
+`ActionType` ordinal 表：`JOIN_QUEUE=0, LEAVE_QUEUE=1, VOTE_YES=2, VOTE_NO=3, VOTE_OVERTIME=4, SELECT_TEAM=5, BUY_ITEM=6, REQUEST_PROFILE=7, REQUEST_SHOP=8, JOIN_QUICK=9, REQUEST_LEADERBOARD=10, PLANT_BOMB=11, DEFUSE_BOMB=12`
 
 > 快速匹配走专用 `JOIN_QUICK` 动作，不再以 `"quick"` 伪地图 ID 复用 `JOIN_QUEUE`（否则真实地图 ID 恰为 `quick` 时会被劫持进快速队列）。
+> **爆破交互（PLANT_BOMB=11 / DEFUSE_BOMB=12，阶段③）**：客户端每 tick 检测按键状态（安放=手持 `cstmm:c4` + 右键（使用键）按住；拆除=3 格内有 `cstmm:c4` 实体 + 右键按住），**按住状态翻转时**才发 `target="start"/"stop"`（不刷包）。`mapName`/`team` 空闲。服务端 `BombInteractionManager` 校验对局/阵营/包点或炸弹范围/阶段后逐 tick 累计进度（进度与条件校验全在服务端，客户端仅上报按键状态翻转）。
 
-**`cstmm:hud_data`（S2C）**：`string mapName(64B，发送前 truncate)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame` + `varInt phase`（MatchSession.GamePhase ordinal，1=准备 2=战斗）+ `string rosterJson(65536B，发送前 truncate)`。`remainingSeconds` 在准备阶段携带准备倒计时、战斗阶段携带对局剩余秒数。`rosterJson` 为本局花名册紧凑 JSON 数组（元素字段：`u`=uuid、`n`=名字、`t`=队伍 1红/2蓝、`k`=本局个人击杀、`d`=本局死亡、`lk`=上一条命击杀、`c`=战队缩写（无战队省略）、`b`=徽标引用（base64 徽标为内容寻址 id，URL 徽标为完整 URL，客户端自行下载；无徽标省略）、`at`/`ai`=头像绑定平台/账号（未设置省略）），供客户端渲染 CS2 风格顶部队伍栏；徽标分片经 `ensureHudBadge` 保证先行下发。血量/存活/阵亡状态由客户端本地读取玩家实体，不入包。结束时发 `inGame=false` 清除包。
+**`cstmm:hud_data`（S2C）**：`string mapName(64B，发送前 truncate)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame` + `varInt phase`（MatchSession.GamePhase ordinal，1=准备 2=战斗）+ `string rosterJson(65536B，发送前 truncate)` + `string extraJson(65536B)`。`remainingSeconds` 在准备阶段携带准备倒计时、战斗阶段携带对局剩余秒数。`rosterJson` 为本局花名册紧凑 JSON 数组（元素字段：`u`=uuid、`n`=名字、`t`=队伍 1红/2蓝、`k`=本局个人击杀、`d`=本局死亡、`lk`=上一条命击杀、`c`=战队缩写（无战队省略）、`b`=徽标引用（base64 徽标为内容寻址 id，URL 徽标为完整 URL，客户端自行下载；无徽标省略）、`at`/`ai`=头像绑定平台/账号（未设置省略）、`kit`=true 爆破图 CT 持有拆弹装备（玩家 tag 判定，非物品；无省略）），供客户端渲染 CS2 风格顶部队伍栏；徽标分片经 `ensureHudBadge` 保证先行下发。血量/存活/阵亡状态由客户端本地读取玩家实体，不入包。结束时发 `inGame=false` 清除包。`extraJson` 普通对局为 `"{}"`；爆破对局携带回合状态 `{"bombMode":true,"round","wins1","wins2","tTeam"(1/2),"ot","otRound","planted","bombTimer","buyTime"(购买窗口=冻结时间+开局后 N 秒，与 EconomyManager 判定同源),"waiting"(整队离线等待重连),"defusing"(拆弹进行中)}`，客户端据此渲染回合比分、T/CT 标签、C4 红色倒计时与状态行（C4 已安放[不含包点位置]/拆弹警告/重连等待/购买窗口）。
 
 **`cstmm:match_status`（S2C）**：`enum StatusType（MATCH_STARTING/MATCH_ENDED/VOTE_STARTED/VOTE_RESULT/COUNTDOWN，ordinal）` + `string message(128B，发送链路统一截断)` + `int redKills` + `int blueKills`。
 
@@ -200,7 +201,7 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 
 **`cstmm:clan_hints`（S2C）**：`string json(32767B)`——`{"战队名":["成员1",...]}` 全服战队名+成员名快照，客户端写入 `CommandHintCache` 供 `/cstmm data get|edit|delete clan` 的 Tab 补全（建议 provider 在客户端执行，战队数据只在服务端）。触发时机：玩家 JOIN（单发）+ 战队任何变更（`ClanManager.save` 落盘点，全服广播）。损坏 JSON 客户端静默保留旧缓存；断线清空。
 
-**`cstmm:shop_data`（S2C）**：`bool eligible` + `varInt itemCount` + 循环 `{string itemId(256B) + varInt price + varInt maxPurchase}`。解码端 `count = max(0, readVarInt)` 防负数，`create` 静态工厂保证 itemCount 与列表长度一致。
+**`cstmm:shop_data`（S2C）**：`bool eligible` + `bool bombMode`（是否爆破图经济商店）+ `bool hasDefuser`（爆破图第 1 列是否显示拆弹装备购买项：CT=true，T=false 空列）+ `varInt money`（爆破图匹配内货币余额，普通图 0）+ `bool buyWindowOpen`（购买窗口状态）+ `varInt defuserPrice` + `varInt colCount` + 循环列 `{string name(64B) + string icon(32000B) + varInt itemCount + 循环商品 {string itemId(256B) + varInt price + varInt maxPurchase + string team(8B) + string displayName(256B) + string icon(32000B)}}`。列布局：爆破图 = 1+4 列（columns[0] 为空"装备"列，拆弹装备由 hasDefuser 单独渲染；1..4=分类列，**按接收玩家队伍取 T/CT 独立配置的列**），普通图 = 5 列分类网格；商品 icon/displayName/base64 列图标超长按 UTF-8 字节截断防断连。BUY_ITEM 购买成功后服务端重发本包刷新余额；购买窗口翻转/结算改钱时按订阅制主动推送。
 
 **`cstmm:handshake_s2c`**：`string serverVersion`。**`cstmm:handshake_c2s`**：`string clientVersion`。**`cstmm:open_config_screen`**：空包（codec 仅占位）；`cstmm:request_config_sync` 见 5.2（`string clientHash`）。
 
