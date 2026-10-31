@@ -337,11 +337,13 @@ public class VoteManager implements VoteApi {
                         MatchManager.getInstance().removePlayerFromSession(targetUuid);
                         resultMessage = "§c" + target.getName().getString() + " 被投票踢出游戏！";
 
-                        // 检查队伍是否为空，若空则判负
+                        // 检查队伍是否为空，若空则判负（爆破图按攻防身份 T/CT 称呼，普通图用红/蓝队）
                         if (session.getRedPlayers().isEmpty()) {
-                            MatchManager.getInstance().endMatch(session, "§9红队已无人在线，蓝队获胜！", 2);
+                            MatchManager.getInstance().endMatch(session,
+                                    "§9" + session.teamDisplayName(1) + "已无人在线，" + session.teamDisplayName(2) + "获胜！", 2);
                         } else if (session.getBluePlayers().isEmpty()) {
-                            MatchManager.getInstance().endMatch(session, "§c蓝队已无人在线，红队获胜！", 1);
+                            MatchManager.getInstance().endMatch(session,
+                                    "§c" + session.teamDisplayName(2) + "已无人在线，" + session.teamDisplayName(1) + "获胜！", 1);
                         }
                     } else {
                         resultMessage = "§e目标玩家已离线，投票取消";

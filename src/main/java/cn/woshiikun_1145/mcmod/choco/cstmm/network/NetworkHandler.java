@@ -816,7 +816,7 @@ public class NetworkHandler {
             boolean playerIsT = session.isTTeam(session.getPlayerTeam(player.getUuid()));
             hasDefuser = !playerIsT;
             defuserPrice = EconomyManager.getInstance().economy().getDefuserPrice();
-            columns.add(new ShopDataS2CPayload.ColumnData("装备", "", List.of()));
+            columns.add(new ShopDataS2CPayload.ColumnData("装备", List.of()));
             // 分类列按玩家队伍下发（T/红 与 CT/蓝 独立配置）
             appendShopColumns(columns, map, 4, playerIsT);
         } else if (eligible && map != null) {
@@ -845,7 +845,7 @@ public class NetworkHandler {
         }
         for (int i = 0; i < Math.min(maxCols, cols.size()); i++) {
             MapConfig.ShopColumn col = cols.get(i);
-            out.add(new ShopDataS2CPayload.ColumnData(col.getName(), col.getIcon(),
+            out.add(new ShopDataS2CPayload.ColumnData(col.getName(),
                     List.copyOf(col.getItems())));
         }
     }

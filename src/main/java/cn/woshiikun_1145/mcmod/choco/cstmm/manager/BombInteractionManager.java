@@ -9,12 +9,12 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.item.ModItems;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import cn.woshiikun_1145.mcmod.choco.cstmm.sound.ModSounds;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
-import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
@@ -30,7 +30,7 @@ import java.util.UUID;
  *         拆除——CT 方玩家靠近已安放 C4（2.5 格）长按右键发 DEFUSE_BOMB start/stop，
  *         满 defuseSeconds（带拆弹装备 defuseKitSeconds，以玩家 tag cstmm_defuse_kit 判定，非物品）
  *         后拆除成功 → CT 赢得回合 + 个人拆除奖励。
- *         中断条件：松键 / 死亡 / 离开包点或炸弹范围 / 切换手持 / 回合结束，进度清零。
+ *         中断条件：松键 / 自行移动（被他人推动不算）/ 死亡 / 离开包点或炸弹范围 / C4 离身 / 回合结束，进度清零。
  * 【被谁使用】MatchScheduler（每 tick 调 tick）、NetworkHandler（PLANT_BOMB/DEFUSE_BOMB 分支）、
  *           BombRoundManager（回合重置/爆炸/拆除清理实体复用 discardBombs）。仅服务端。
  */
@@ -64,6 +64,8 @@ public class BombInteractionManager {
     // 对局外自由安放/拆除进度（自由模式下无 MatchSession 承载，用独立内存表；uuid → 已累计 tick）
     private final java.util.Map<UUID, Integer> freePlantProgress = new java.util.HashMap<>();
     private final java.util.Map<UUID, Integer> freeDefuseProgress = new java.util.HashMap<>();
+    // 安放/拆除期间的"自行移动"中断由客户端判定：玩家按住移动/跳跃键时客户端发 stop 请求，
+    // 服务端不做位置锚点校验（因此被他人推动、击退等被动位移不会中断进度）
     // 对局内炸弹哔声节奏：sessionId → 下一声时间戳（millis；discardBombs 清除）
     private final java.util.Map<String, Long> beepNextAt = new java.util.HashMap<>();
 
@@ -156,7 +158,7 @@ public class BombInteractionManager {
         }
 
         MapConfig config = ConfigManager.getInstance().getMap(session.getMapName());
-        String reject = plantRejectReason(session, config, player);
+        String reject = plantRejectReason(session, config, player, true);
         if (reject != null) {
             player.sendMessage(Text.literal(reject), false);
             return;
@@ -241,7 +243,7 @@ public class BombInteractionManager {
         }
     }
 
-    /** 对局外自由安放推进：玩家需持续存活且手持 C4，满 plantTimeSeconds 生成自由炸弹实体。 */
+    /** 对局外自由安放推进：玩家需持续存活且 C4 仍在背包，满 plantTimeSeconds 生成自由炸弹实体。 */
     private void tickFreePlanting(MinecraftServer server) {
         if (freePlantProgress.isEmpty()) return;
         MapConfig.BombSettings settings = defaultBombSettings();
@@ -249,8 +251,8 @@ public class BombInteractionManager {
         for (var it = freePlantProgress.entrySet().iterator(); it.hasNext(); ) {
             var entry = it.next();
             ServerPlayerEntity player = server.getPlayerManager().getPlayer(entry.getKey());
-            // 玩家离线/死亡/切掉手持 C4 → 中断
-            if (player == null || player.isDead() || !player.getMainHandStack().isOf(ModItems.C4)) {
+            // 玩家离线/死亡/C4 离身（切手持不算）→ 中断
+            if (player == null || player.isDead() || !containsC4(player)) {
                 it.remove();
                 continue;
             }
@@ -317,7 +319,7 @@ public class BombInteractionManager {
         world.playSound(null, bomb.getX(), bomb.getY(), bomb.getZ(),
                 ModSounds.C4_PLANT.value(), net.minecraft.sound.SoundCategory.BLOCKS, 1.5f, 1.0f);
 
-        player.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+        consumeOneC4(player);
         player.sendMessage(Text.literal("§aC4 安放成功！" + settings.getC4TimerSeconds() + " 秒后爆炸"), true);
         Cstmm.LOGGER.info("[CSTMM - BombInteraction] Free C4 planted at {} by {}",
                 pos.toShortString(), player.getName());
@@ -336,7 +338,7 @@ public class BombInteractionManager {
         UUID uuid = session.getPlantingPlayer();
         if (uuid == null) return;
         ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
-        String reject = plantRejectReason(session, config, player);
+        String reject = plantRejectReason(session, config, player, false);
         if (reject != null) {
             cancelPlanting(session, player, reject);
             return;
@@ -397,10 +399,8 @@ public class BombInteractionManager {
         session.setPlantedPos(new int[]{pos.getX(), pos.getY(), pos.getZ()});
         session.setBombCarrier(null);
 
-        // 移除手中的 C4 物品（安放后实体接管可视化）
-        if (player.getMainHandStack().isOf(ModItems.C4)) {
-            player.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
-        }
+        // 移除背包中的 C4 物品（安放后实体接管可视化；进行中允许切换手持，故按背包查找扣除）
+        consumeOneC4(player);
 
         // 生成 C4 实体（绿色长方体，占位建模）挂接所属对局；
         // 自由安放模式允许重复安放——先清掉本局旧实体避免残留
@@ -454,13 +454,20 @@ public class BombInteractionManager {
 
     // ==================== 条件校验 ====================
 
-    /** 安放条件校验（start 请求与逐 tick 复用）：返回 null = 条件满足，否则返回拒绝/中断原因。 */
-    private String plantRejectReason(MatchSession session, MapConfig config, ServerPlayerEntity player) {
+    /**
+     * 安放条件校验（start 请求与逐 tick 复用）：返回 null = 条件满足，否则返回拒绝/中断原因。
+     * starting=true（开始安放）要求主手手持 C4；starting=false（进行中）只要求 C4 仍在背包内，
+     * 因此进行中切换手持不中断（C4 被丢弃/移出背包才中断）。
+     */
+    private String plantRejectReason(MatchSession session, MapConfig config, ServerPlayerEntity player,
+                                     boolean starting) {
         // debug 开关（/cstmm debug allow_c4 to_be_planted_freely t）开启时允许"任何情况下安放"：
         // 跳过阵营/包点/阶段/重复安放等全部情境限制，仅保留存活与手持 C4 两个操作前提
         if (freePlantingAllowed) {
             if (player == null || player.isDead()) return "§c安放中断";
-            if (!player.getMainHandStack().isOf(ModItems.C4)) return "§c需要手持 C4 才能安放";
+            if (starting ? !player.getMainHandStack().isOf(ModItems.C4) : !containsC4(player)) {
+                return "§c需要手持 C4 才能安放";
+            }
             return null;
         }
         if (player == null || player.isDead()
@@ -470,7 +477,9 @@ public class BombInteractionManager {
         }
         if (session.isBombPlanted()) return "§c炸弹已安放，无法重复安放";
         if (!session.isTTeam(session.getPlayerTeam(player.getUuid()))) return "§c只有 T 方能安放 C4";
-        if (!player.getMainHandStack().isOf(ModItems.C4)) return "§c需要手持 C4 才能安放";
+        if (starting ? !player.getMainHandStack().isOf(ModItems.C4) : !containsC4(player)) {
+            return "§c需要手持 C4 才能安放";
+        }
         if (findSiteIn(session, config, player) == null) return "§c安放中断（需站在包点内）";
         return null;
     }
@@ -558,5 +567,26 @@ public class BombInteractionManager {
     /** 玩家是否持有拆弹装备（tag 判定：cstmm_defuse_kit，非物品）。 */
     private boolean hasDefuseKitItem(ServerPlayerEntity player) {
         return player.getCommandTags().contains(DEFUSE_KIT_TAG);
+    }
+
+    /** 玩家背包（含主手/副手/盔甲槽）中是否仍有 C4：进行中允许切换手持，但 C4 不能离身。 */
+    private boolean containsC4(ServerPlayerEntity player) {
+        PlayerInventory inventory = player.getInventory();
+        for (int i = 0; i < inventory.size(); i++) {
+            if (inventory.getStack(i).isOf(ModItems.C4)) return true;
+        }
+        return false;
+    }
+
+    /** 安放完成：从背包任意槽位扣除一件 C4（进行中可能已把 C4 切到别的槽位）。 */
+    private void consumeOneC4(ServerPlayerEntity player) {
+        PlayerInventory inventory = player.getInventory();
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack stack = inventory.getStack(i);
+            if (stack.isOf(ModItems.C4)) {
+                stack.decrement(1);
+                return;
+            }
+        }
     }
 }

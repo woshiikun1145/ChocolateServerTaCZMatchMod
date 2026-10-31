@@ -290,6 +290,18 @@ public class MatchSession {
     /** 对方队伍编号（1↔2）。 */
     public int getOppositeTeam(int team) { return team == 1 ? 2 : 1; }
 
+    /**
+     * 【作用】队伍显示名：爆破对局按当前攻防身份返回“T 方”/“CT 方”（攻防会在竞技第 13 回合
+     *         与加时第 4 回合翻转，不能写死红/蓝队名）；普通对局返回“红队”/“蓝队”。
+     *         队伍编号 1=红队、2=蓝队。
+     * 【被谁使用】BombRoundManager、VoteManager、QuickMatchEngine、ModCommands 的玩家可见消息拼装。
+     */
+    public String teamDisplayName(int team) {
+        if (team != 1 && team != 2) return "未知队伍";
+        if (!bombMode) return team == 1 ? "红队" : "蓝队";
+        return team == tTeam ? "T 方" : "CT 方";
+    }
+
     public boolean isInOvertime() { return inOvertime; }
     public void setInOvertime(boolean inOvertime) { this.inOvertime = inOvertime; }
     public int getOvertimeRoundInSet() { return overtimeRoundInSet; }

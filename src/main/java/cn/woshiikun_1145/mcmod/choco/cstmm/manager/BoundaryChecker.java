@@ -74,7 +74,7 @@ final class BoundaryChecker {
                 // 【作用】首次出界立即警告，此后每 5 秒及临处决前再警告（文案相同，合并为一个分支）
                 if (warningTime == 1 || warningTime % 5 == 0 || warningTime >= warningTimeLimit) {
                     player.sendMessage(
-                            Text.literal("§c⚠ 警告：你已离开地图区域！剩余 " + (warningTimeLimit - warningTime) + " 秒"),
+                            Text.literal("§c⚠ 警告：你已离开地图区域！请在 " + (warningTimeLimit - warningTime) + " 秒内返回地图"),
                             false
                     );
                 }

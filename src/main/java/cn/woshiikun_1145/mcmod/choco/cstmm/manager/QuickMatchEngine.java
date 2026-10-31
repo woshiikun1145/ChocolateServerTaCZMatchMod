@@ -354,8 +354,9 @@ final class QuickMatchEngine {
 
             removeFromQuickQueues(uuid);
             qm.playerQueueMap.remove(uuid);
+            // 【作用】补位提示按对局类型称呼：爆破图用当前攻防身份 T/CT，普通图用红/蓝队
             player.sendMessage(Text.literal("§e快速匹配：补位加入 "
-                    + config.getDisplayName() + (toRed ? " 红队！" : " 蓝队！")), false);
+                    + config.getDisplayName() + " " + session.teamDisplayName(toRed ? 1 : 2) + "！"), false);
 
             if (toRed) redNeed--; else blueNeed--;
             assigned++;

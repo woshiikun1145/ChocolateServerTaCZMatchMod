@@ -175,7 +175,7 @@ public class EquipmentManager {
         // 资格按会话；map 仍需非空以取商品列表
         if (session == null || session.getPhase() == MatchSession.GamePhase.ENDED
                 || map == null || !session.isCompetitive()) {
-            player.sendMessage(Text.literal("§c仅竞技模式对局中可购买商品"), false);
+            player.sendMessage(Text.literal("§c仅竞技模式对局中才可购买商品！"), false);
             return false;
         }
 

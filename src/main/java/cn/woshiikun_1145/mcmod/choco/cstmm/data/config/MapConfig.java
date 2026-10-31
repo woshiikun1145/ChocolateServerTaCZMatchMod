@@ -283,15 +283,13 @@ public class MapConfig {
     }
 
     /**
-     * 【作用】商店分类列（购买页网格布局的一列）：列头名称与图标可配，列内商品在购买页上下滚动。
+     * 【作用】商店分类列（购买页网格布局的一列）：只保留列头名称，列内商品在购买页上下滚动。
      * 【被谁使用】NetworkHandler（购买页数据组装）、EconomyManager（拼接索引购买）、
      *           ConfigScreen（分类列编辑器）、ShopScreen（5 列网格渲染）。
      */
     public static class ShopColumn {
         /** 列头名称（如"步枪"） */
         private String name = "分类";
-        /** 列头图标：base64 / http(s) URL / 空（不显示图标） */
-        private String icon = "";
         /** 该列商品（物品串/价格/显示名/图标/队伍，购买按拼接索引定位） */
         private List<GlobalConfig.ShopItem> items = new ArrayList<>();
 
@@ -305,11 +303,9 @@ public class MapConfig {
         }
 
         public String getName() { return name == null || name.isBlank() ? "分类" : name; }
-        public String getIcon() { return icon == null ? "" : icon; }
         public List<GlobalConfig.ShopItem> getItems() { return items == null ? new ArrayList<>() : items; }
 
         public void setName(String name) { this.name = name; }
-        public void setIcon(String icon) { this.icon = icon; }
         public void setItems(List<GlobalConfig.ShopItem> items) { this.items = items; }
     }
 

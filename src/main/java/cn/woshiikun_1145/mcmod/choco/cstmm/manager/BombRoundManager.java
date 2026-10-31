@@ -141,10 +141,15 @@ public class BombRoundManager {
             boolean wasDead = previousDead.contains(uuid);
             if (wasDead && player.isDead()) {
                 // 服务端主动复活：走原版 onClientStatus(PERFORM_RESPAWN) 路径（同步触发
-                // AFTER_RESPAWN → handleBombRespawn PREPARING 分支仅恢复冒险模式）
+                // AFTER_RESPAWN → handleBombRespawn）
                 player.networkHandler.onClientStatus(new ClientStatusC2SPacket(ClientStatusC2SPacket.Mode.PERFORM_RESPAWN));
+                // 【作用】原版重生会用新实体替换旧实体（PlayerManager.playerMap 同步更新），
+                //         必须重新取一次：doImmediateRespawn=false 时玩家会停留在死亡界面直到本回合
+                //         开始才被动复活，此时旧实体已被丢弃，继续对旧实体治疗/传送/切冒险模式全部无效，
+                //         新实体会保留 AFTER_RESPAWN 在当前阶段（间歇仍属 FIGHTING）里设置的旁观者模式
+                player = server.getPlayerManager().getPlayer(uuid);
             }
-            if (player.isDead()) continue; // 复活失败（异常兜底）：跳过本回合
+            if (player == null || player.isDead()) continue; // 复活失败（异常兜底）：跳过本回合
 
             // 治疗：所有玩家每回合满血开局（存活者装备保留，死者装备在下方重发）
             player.setHealth(player.getMaxHealth());
@@ -202,7 +207,7 @@ public class BombRoundManager {
             ServerPlayerEntity carrierPlayer = server.getPlayerManager().getPlayer(carrier);
             if (carrierPlayer != null) {
                 carrierPlayer.getInventory().offerOrDrop(new ItemStack(ModItems.C4));
-                carrierPlayer.sendMessage(Text.literal("§e你是本回合 C4 携带者：进入包点后手持 C4 长按右键安放"), false);
+                carrierPlayer.sendMessage(Text.literal("§e你捡起了炸弹。"), false);
             }
         }
 
@@ -211,9 +216,11 @@ public class BombRoundManager {
         session.setPhase(MatchSession.GamePhase.PREPARING);
         session.setPrepCounter(Math.max(1, config.getPrepareTime()));
 
+        // 【作用】回合开始播报：爆破模式统一使用攻防身份 T/CT，不与红/蓝队名混用
         String tName = teamDisplayName(session, session.getTTeam());
-        broadcastBomb(session, "§6=== 第 " + session.getRoundNumber() + " 回合 === §e" + tName + " 进攻（T），"
-                + teamDisplayName(session, session.getOppositeTeam(session.getTTeam())) + " 防守（CT）");
+        String ctName = teamDisplayName(session, session.getOppositeTeam(session.getTTeam()));
+        broadcastBomb(session, "§6=== 第 " + session.getRoundNumber() + " 回合 === §e" + tName + "进攻，"
+                + ctName + "防守");
     }
 
     /** 清空玩家背包主背包与副手中的 C4 物品（回合开始重新指派前清理，防存活 T 残留多枚）。 */
@@ -280,7 +287,7 @@ public class BombRoundManager {
         } else if (prep <= 0) {
             session.setPhase(MatchSession.GamePhase.FIGHTING);
             clearFreeze(session, server);
-            broadcastBomb(session, "§a=== 回合开始！T 方突袭包点，CT 方严防死守 ===");
+            broadcastBomb(session, "§a=== 回合开始 ===");
         }
     }
 
@@ -333,7 +340,7 @@ public class BombRoundManager {
             session.setRemainingSeconds(Math.max(0, remaining));
             if (remaining <= 0) {
                 // 回合限时内未安放 → CT 胜本回合
-                endRound(session, config, session.getOppositeTeam(session.getTTeam()), "回合时间耗尽");
+                endRound(session, config, session.getOppositeTeam(session.getTTeam()), "时间耗尽");
                 return;
             }
         }
@@ -404,12 +411,11 @@ public class BombRoundManager {
             session.addOtWin(winnerTeam);
         }
 
-        String tName = teamDisplayName(session, session.getTTeam());
-        String ctName = teamDisplayName(session, session.getOppositeTeam(session.getTTeam()));
-        String winnerName = session.isTTeam(winnerTeam) ? "T 方（" + tName + "）" : "CT 方（" + ctName + "）";
+        // 【作用】回合结果播报：胜方按攻防身份 T/CT 称呼，比分同时标注 T/CT（不混用红/蓝队名）
+        String winnerName = teamDisplayName(session, winnerTeam);
         broadcastBomb(session, "§6=== " + winnerName + "赢得第 " + session.getRoundNumber()
-                + " 回合（" + reason + "）=== §7比分 §e" + teamRoundWinsOf(session, session.getTTeam())
-                + " : " + teamRoundWinsOf(session, session.getOppositeTeam(session.getTTeam())) + "§7 CT"
+                + " 回合（" + reason + "）=== §7比分 §eT " + teamRoundWinsOf(session, session.getTTeam())
+                + " : " + teamRoundWinsOf(session, session.getOppositeTeam(session.getTTeam())) + " CT"
                 + " §8| §7" + intermission + " 秒后开始下一回合");
 
         // 回合经济结算：胜方胜利金（爆炸/拆除 3500 档，全歼/超时 3250 档）、败方连败金、
@@ -449,7 +455,7 @@ public class BombRoundManager {
                     session.resetOvertimeWins();
                     // 进入加时：经济重置回起始金额（CS 规则）
                     EconomyManager.getInstance().resetForPhaseChange(session);
-                    broadcastBomb(session, "§6=== 12:12 平！进入加时赛（先到 4 分获胜）===");
+                    broadcastBomb(session, "§6=== 平局，正在进入加时赛……===");
                 }
             }
             session.setRoundPending(true);
@@ -486,10 +492,10 @@ public class BombRoundManager {
             MapConfig cfg = ConfigManager.getInstance().getMap(session.getMapName());
             String mapName = cfg != null ? cfg.getDisplayName() : session.getMapName();
             if (winner == 0) {
-                MatchManager.getInstance().endMatch(session, "§e" + mapName + " 比赛结束：双方平局！", 0);
+                MatchManager.getInstance().endMatch(session, "§e" + mapName + " 比赛结束：双方平局", 0);
             } else {
                 MatchManager.getInstance().endMatch(session,
-                        "§6" + mapName + " 比赛结束：" + teamDisplayName(session, winner) + " 获得胜利！", winner);
+                        "§6" + mapName + " 比赛结束：" + teamDisplayName(session, winner) + " 以最大的优势钳制了比赛。", winner);
             }
             return;
         }
@@ -516,7 +522,7 @@ public class BombRoundManager {
             session.setRoundPending(true);
             // 下一场加时：经济再次重置回起始金额（CS 规则）
             EconomyManager.getInstance().resetForPhaseChange(session);
-            broadcastBomb(session, "§a投票通过！开始下一场加时赛（再次先到 4 分获胜）");
+            broadcastBomb(session, "§a投票已通过，开始下一场加时赛");
             Cstmm.LOGGER.info("[CSTMM - BombRoundManager] OT continue vote passed for {}", session.getSessionId());
         } else {
             // 投票决定平局：先播平局音效，比赛以平局结束
@@ -638,7 +644,9 @@ public class BombRoundManager {
         // C4 携带者死亡：背包 C4 按原版死亡掉落，其他 T 可拾取（安放只认手持，不依赖携带者标记）
         if (killed.getUuid().equals(session.getBombCarrier())) {
             session.setBombCarrier(null);
+            /*
             broadcastBomb(session, "§eC4 已掉落！T 方捡起后即可安放");
+            */
         }
 
         MapConfig config = ConfigManager.getInstance().getMap(session.getMapName());
@@ -822,7 +830,7 @@ public class BombRoundManager {
             if (session.getRedPlayers().isEmpty() || session.getBluePlayers().isEmpty()) {
                 int winner = session.getRedPlayers().isEmpty()
                         ? session.getOppositeTeam(1) : session.getOppositeTeam(2);
-                MatchManager.getInstance().endMatch(session, "§c一方队伍已无人，比赛结束！", winner);
+                MatchManager.getInstance().endMatch(session, "§c有一方队伍没有在线玩家，比赛已结束。", winner);
                 return;
             }
             // 队伍被减员清空时立即做全歼判定（当前回合该队已无人可打）
@@ -849,9 +857,12 @@ public class BombRoundManager {
         return team == 1 ? session.getTeam1RoundWins() : session.getTeam2RoundWins();
     }
 
-    /** 队伍显示名（消息用）：1=红队 2=蓝队。 */
+    /**
+     * 队伍显示名（消息用）：爆破对局按当前攻防身份返回 T 方/CT 方；
+     * 委托 MatchSession.teamDisplayName，保证全项目口径一致。
+     */
     public String teamDisplayName(MatchSession session, int team) {
-        return team == 1 ? "红队" : "蓝队";
+        return session.teamDisplayName(team);
     }
 
     /** 玩家显示名（离线回退名字缓存，再兜底 UUID 前 8 位）。 */

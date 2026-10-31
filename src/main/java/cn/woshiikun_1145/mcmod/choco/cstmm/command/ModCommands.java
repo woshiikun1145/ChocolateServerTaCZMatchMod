@@ -1075,6 +1075,14 @@ public class ModCommands {
             ctx.getSource().sendMessage(Text.literal("§6[地图配置." + f + "] §f" + value));
             return 1;
         }
+        // 【作用】爆破图的队伍按 T/CT 方称呼（普通图按红/蓝队）；red/blue 字段语义在爆破图对应 T/CT 侧
+        boolean bomb = map.isBombMap();
+        String minLabel = bomb ? "最低人数 T/CT" : "最低人数 红/蓝";
+        String maxLabel = bomb ? "上限 T/CT" : "上限 红/蓝";
+        String redBoundaryLabel = bomb ? "T 方边界" : "红队边界";
+        String blueBoundaryLabel = bomb ? "CT 方边界" : "蓝队边界";
+        String redSpawnLabel = bomb ? "T 方出生点" : "红队出生点";
+        String blueSpawnLabel = bomb ? "CT 方出生点" : "蓝队出生点";
         // 全字段摘要
         ctx.getSource().sendMessage(Text.literal(
                 "§6=== 地图配置: " + map.getId() + "（" + map.getDisplayName() + "）===\n" +
@@ -1083,8 +1091,8 @@ public class ModCommands {
                         + " §7(目标 " + map.getTargetKills() + " 杀)"
                         + " §e| 时长: §f" + map.getMaxDuration() + " 秒"
                         + " §e| 平局: §f" + map.getTieRule().name() + "\n" +
-                "§e最低人数 红/蓝: §f" + map.getMinRedPlayers() + "/" + map.getMinBluePlayers()
-                        + " §e| 上限 红/蓝: §f" + (map.getMaxRedPlayers() == 0 ? "无上限" : map.getMaxRedPlayers())
+                "§e" + minLabel + ": §f" + map.getMinRedPlayers() + "/" + map.getMinBluePlayers()
+                        + " §e| " + maxLabel + ": §f" + (map.getMaxRedPlayers() == 0 ? "无上限" : map.getMaxRedPlayers())
                         + "/" + (map.getMaxBluePlayers() == 0 ? "无上限" : map.getMaxBluePlayers()) + "\n" +
                 "§e补位: §f" + map.getReinforcementMode() + (map.isReinforceable() ? "（允许补位）" : "（不允许补位）")
                         + " §e| 准备: §f" + map.getPrepareTime() + " 秒"
@@ -1094,14 +1102,14 @@ public class ModCommands {
                         + " §e| 惩罚击杀: §f" + map.getBoundaryPenaltyKills()
                         + " §e| 维度: §f" + map.getDimension() + "\n" +
                 "§e公共边界: §f" + boundaryText(map.getBoundary()) + "\n" +
-                "§e红队边界: §f" + boundaryText(map.getRedBoundary())
-                        + " §e| 蓝队边界: §f" + boundaryText(map.getBlueBoundary()) + "\n" +
-                "§e红队出生点: §f" + spawnListText(map.getRedSpawns()) + "\n" +
-                "§e蓝队出生点: §f" + spawnListText(map.getBlueSpawns()) + "\n" +
+                "§e" + redBoundaryLabel + ": §f" + boundaryText(map.getRedBoundary())
+                        + " §e| " + blueBoundaryLabel + ": §f" + boundaryText(map.getBlueBoundary()) + "\n" +
+                "§e" + redSpawnLabel + ": §f" + spawnListText(map.getRedSpawns()) + "\n" +
+                "§e" + blueSpawnLabel + ": §f" + spawnListText(map.getBlueSpawns()) + "\n" +
                 "§e商店商品: §f" + shopListText(map.getShopItems()) + "\n" +
                 "§e商店分类列: §f" + shopColumnsText(map) + "\n" +
                 "§e地图类型: §f" + map.getGameType()
-                        + (map.isBombMap() ? " §e| 包点: §f" + mapFieldSingleValue(map, "bombsites") : "") + "\n" +
+                        + (bomb ? " §e| 包点: §f" + mapFieldSingleValue(map, "bombsites") : "") + "\n" +
                 "§e背景图: §f" + (map.getBackgroundBase64().isEmpty()
                         ? "无" : "base64 共 " + map.getBackgroundBase64().length() + " 字符")));
         return 1;
@@ -1327,16 +1335,16 @@ public class ModCommands {
 
     /**
      * 商店分类列展示文本（购买页网格布局的列配置）：
-     * 普通图 = 通用 5 列；爆破图 = T 方（红队）与 CT 方（蓝队）两套列分开显示
+     * 普通图 = 通用 5 列；爆破图 = T 方与 CT 方两套列分开显示
      * （未独立配置的队伍显示"回退通用列"）。列内商品过多时仅展示前 4 项摘要防聊天刷屏。
      */
     private static String shopColumnsText(MapConfig map) {
         if (map.isBombMap()) {
             boolean fallback = map.getShopColumnsT().isEmpty() && map.getShopColumnsCT().isEmpty();
-            return "\n§eT 方（红队）: §f" + (fallback
+            return "\n§eT 方: §f" + (fallback
                     ? "未单独配置（回退通用列） " + columnListText(map.getBombShopColumnsForTeam(true))
                     : columnListText(map.getShopColumnsT()))
-                    + "\n§eCT 方（蓝队）: §f" + (fallback
+                    + "\n§eCT 方: §f" + (fallback
                     ? "未单独配置（回退通用列） " + columnListText(map.getBombShopColumnsForTeam(false))
                     : columnListText(map.getShopColumnsCT()));
         }
@@ -2244,7 +2252,8 @@ public class ModCommands {
         MatchSession session = MatchManager.getInstance().getPlayerSession(uuid);
 
         if (session != null) {
-            String team = session.getPlayerTeam(uuid) == 1 ? "红队" : "蓝队";
+            // 【作用】爆破图按当前攻防身份显示 T 方/CT 方，普通图显示红队/蓝队
+            String team = session.teamDisplayName(session.getPlayerTeam(uuid));
             String phase = switch (session.getPhase()) {
                 case PREPARING -> "准备中 (" + session.getPrepCounter() + "s)";
                 case FIGHTING -> "战斗中";
@@ -2291,10 +2300,16 @@ public class ModCommands {
                 case ENDED -> "§7已结束";
                 default -> "§7空闲";
             };
-            String line = String.format("§f%s §7| 红:§c%d §7蓝:§9%d §7| %s §7| ID: §f%s",
+            // 【作用】爆破图按攻防身份显示 T/CT 人数；普通图显示红/蓝人数
+            int team1Count = session.getRedPlayers().size();
+            int team2Count = session.getBluePlayers().size();
+            String counts = session.isBombMode()
+                    ? (session.isTTeam(1) ? "T:§e" + team1Count + " §7CT:§9" + team2Count
+                            : "T:§e" + team2Count + " §7CT:§9" + team1Count)
+                    : "红:§c" + team1Count + " §7蓝:§9" + team2Count;
+            String line = String.format("§f%s §7| %s §7| %s §7| ID: §f%s",
                     session.getMapName(),
-                    session.getRedPlayers().size(),
-                    session.getBluePlayers().size(),
+                    counts,
                     phase,
                     session.getSessionId().substring(0, 8)
             );
