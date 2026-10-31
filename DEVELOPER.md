@@ -74,8 +74,8 @@
 | `BadgeCache` | 战队徽标两级缓存（badge 包按 badgeId 重组，落盘 `config/cstmm/client/cache/badges/<id>.b64`；进服上报磁盘已有 id 服务端免重发；内存+磁盘均缺失时自动发 request_badge 补发；断线仅清内存，磁盘保留跨重连复用） |
 | `Base64ImageDecoder` | base64 图片 → GPU 纹理的健壮解码工具（data URI 前缀剥离/空白清理/MIME 降级/非 PNG 经 ImageIO 转换；地图卡片背景与战队徽标共用，`CardTexture` record 在此类中） |
 | `LastWordsScreen` + `WhyYouClickThis` | "千万别点"的遗言流程（不可取消：发送/算了/回车/ESC 均发送遗言；崩溃挂起为静态状态，由 CstmmClient 每 tick 抛出；屏幕被其他模组顶号/断线顶掉时 `removed()` 兜底同样触发；被反崩溃模组吞掉异常则改用 `scheduleStop()` 强制退出） |
-| `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新）：地图类型切换（NORMAL/BOMB）、爆破包点编辑（名称/坐标/半径=立方体半边长 + "在脚下添加"可视化取点，仅 BOMB 图显示）、商店分类列编辑器（普通图 5 列通用；爆破图 T/红 与 CT/蓝 两套独立配置各 4 列，共用 `addShopColumnEditor`，普通图额外含限购列；旧单套配置打开时自动复制为两队初始值）+ 购买页实时预览（`ShopPreviewWidget`，爆破图 CT/T 视角各一）、手持添加导出 **/give 格式**（`ItemStrings.fromStack`，含数据组件）、背景图（Base64 ≤327680 字符 / http(s) 图片 URL 无限制，保存时校验 + 物品ID 解析预警告）；`init()` 保留滚动偏移仅钳制（增删行不再跳回顶部），切换地图/重载时显式归零 |
-| `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存：普通图与爆破图统一 **5 列一页式网格**（列头编号+图标+名称；商品格=图标/名称/价格；列内超出鼠标滚轮逐列滚动）。爆破图第 1 列固定"装备"列（拆弹装备购买项仅 CT，T 方空列；分类列按玩家队伍下发 T/CT 独立配置），顶部余额+购买窗口信息栏，余额不足/窗口关闭置灰；普通图 5 列分类网格免费发放 |
+| `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新）：地图类型切换（NORMAL/BOMB）、爆破包点编辑（名称/坐标/半径=立方体半边长 + "在脚下添加"可视化取点，仅 BOMB 图显示）、商店分类列编辑器（普通图 5 列通用；爆破图 T 方与 CT 方两套独立配置各 4 列，共用 `addShopColumnEditor`，普通图额外含限购列；旧单套配置打开时自动复制为两队初始值）+ 购买页实时预览（`ShopPreviewWidget`，爆破图 CT/T 视角各一）、手持添加导出 **/give 格式**（`ItemStrings.fromStack`，含数据组件）、背景图（Base64 ≤327680 字符 / http(s) 图片 URL 无限制，保存时校验 + 物品ID 解析预警告）；`init()` 保留滚动偏移仅钳制（增删行不再跳回顶部），切换地图/重载时显式归零 |
+| `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存：普通图与爆破图统一 **5 列一页式网格**（列头编号+名称；商品格=图标/名称/价格；列内超出鼠标滚轮逐列滚动）。爆破图第 1 列固定"装备"列（拆弹装备购买项仅 CT，T 方空列；分类列按玩家队伍下发 T/CT 独立配置），顶部余额+购买窗口信息栏，余额不足/窗口关闭置灰；普通图 5 列分类网格免费发放 |
 | `ShopPreviewWidget` | 配置界面的购买页实时预览（5 列网格，随编辑刷新；爆破图按 tTeam 参数分别渲染 CT 视角（含拆弹装备列）与 T 视角（第 1 列空列）），拆弹装备价格取编辑中的全局经济参数 |
 | `ItemStrings` | 物品串统一解析/导出工具（服务端发放与客户端预览共用）：主格式 **/give 格式** `id[minecraft:组件={...}] 数量`（组件键不带引号，与 /give 输出一致；括号匹配同时感知 [] 与 {} 嵌套，组件值内含列表如 SpawnPotentials:[] 不会截断；**组件值任意类型**经 `{"v":值}` 包装解析——`NbtHelper.fromNbtProviderString` 只接受复合根），兼容旧完整 SNBT（含 1.20 tag 迁移）与 `id 数量`；`fromStack` 把 ItemStack 导出为 /give 格式（手持添加用）；`isPlausible` 供保存前校验；解码失败记录 `ItemStrings` WARN 日志 |
 | `HudOverlay` | CS2 风格对局 HUD 渲染（顶部队伍栏：己方/敌方玩家卡片 + 中央计分板；淡入淡出动画，断线重置）。爆破对局：回合比分（T x : y CT）、C4 红色爆炸倒计时、计分板下方状态行（安放地点/拆弹警告/重连等待/购买窗口，`drawBombStatusLine`）、CT 拆弹装备卡片标记（roster `kit` 字段） |
@@ -308,8 +308,8 @@
 | `redBoundary` / `blueBoundary` | object | 全 0 | 红/蓝队专属边界，全 0 时该队回退 `boundary` |
 | `redSpawns` / `blueSpawns` | 数组 | [] | 出生点 `{"x","y","z"}`（保存校验非空） |
 | `shopItems` | 数组 | [] | 旧版平铺本图商品 `{"itemId","price","maxPurchase"}`（未配置 shopColumns 时回退；ShopItem 类保留在 GlobalConfig） |
-| `shopColumns` | 数组 | [] | 普通图商店分类列 `{"name","icon","items":[ShopItem]}`（购买页网格 5 列生效；爆破图未配置队伍列时回退；旧键 `bombShopColumns` 自动迁移） |
-| `shopColumnsT` / `shopColumnsCT` | 数组 | [] | 爆破图 T 方（红队）/ CT 方（蓝队）购买页分类列，各最多 4 列生效；按玩家队伍下发与购买（未配置回退 shopColumns） |
+| `shopColumns` | 数组 | [] | 普通图商店分类列 `{"name","items":[ShopItem]}`（购买页网格 5 列生效；爆破图未配置队伍列时回退；旧键 `bombShopColumns` 自动迁移） |
+| `shopColumnsT` / `shopColumnsCT` | 数组 | [] | 爆破图 T 方 / CT 方购买页分类列，各最多 4 列生效；按玩家队伍下发与购买（未配置回退 shopColumns） |
 | `bombsites` | 数组 | [] | 包点 `{"name","x","y","z","radius"}`：判定为**立方体**（三轴 \|坐标差\| ≤ radius，半径=半边长，≤0 按 3 兜底） |
 | `backgroundBase64` | string | "" | 卡片背景图（PNG 的 Base64） |
 

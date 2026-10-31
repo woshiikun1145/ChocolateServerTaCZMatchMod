@@ -201,7 +201,7 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 
 **`cstmm:clan_hints`（S2C）**：`string json(32767B)`——`{"战队名":["成员1",...]}` 全服战队名+成员名快照，客户端写入 `CommandHintCache` 供 `/cstmm data get|edit|delete clan` 的 Tab 补全（建议 provider 在客户端执行，战队数据只在服务端）。触发时机：玩家 JOIN（单发）+ 战队任何变更（`ClanManager.save` 落盘点，全服广播）。损坏 JSON 客户端静默保留旧缓存；断线清空。
 
-**`cstmm:shop_data`（S2C）**：`bool eligible` + `bool bombMode`（是否爆破图经济商店）+ `bool hasDefuser`（爆破图第 1 列是否显示拆弹装备购买项：CT=true，T=false 空列）+ `varInt money`（爆破图匹配内货币余额，普通图 0）+ `bool buyWindowOpen`（购买窗口状态）+ `varInt defuserPrice` + `varInt colCount` + 循环列 `{string name(64B) + string icon(32000B) + varInt itemCount + 循环商品 {string itemId(256B) + varInt price + varInt maxPurchase + string team(8B) + string displayName(256B) + string icon(32000B)}}`。列布局：爆破图 = 1+4 列（columns[0] 为空"装备"列，拆弹装备由 hasDefuser 单独渲染；1..4=分类列，**按接收玩家队伍取 T/CT 独立配置的列**），普通图 = 5 列分类网格；商品 icon/displayName/base64 列图标超长按 UTF-8 字节截断防断连。BUY_ITEM 购买成功后服务端重发本包刷新余额；购买窗口翻转/结算改钱时按订阅制主动推送。
+**`cstmm:shop_data`（S2C）**：`bool eligible` + `bool bombMode`（是否爆破图经济商店）+ `bool hasDefuser`（爆破图第 1 列是否显示拆弹装备购买项：CT=true，T=false 空列）+ `varInt money`（爆破图匹配内货币余额，普通图 0）+ `bool buyWindowOpen`（购买窗口状态）+ `varInt defuserPrice` + `varInt colCount` + 循环列 `{string name(64B) + varInt itemCount + 循环商品 {string itemId(256B) + varInt price + varInt maxPurchase + string team(8B) + string displayName(256B) + string icon(32000B)}}`。列布局：爆破图 = 1+4 列（columns[0] 为空"装备"列，拆弹装备由 hasDefuser 单独渲染；1..4=分类列，**按接收玩家队伍取 T/CT 独立配置的列**），普通图 = 5 列分类网格；商品 icon/displayName 超长按 UTF-8 字节截断防断连。BUY_ITEM 购买成功后服务端重发本包刷新余额；购买窗口翻转/结算改钱时按订阅制主动推送。
 
 **`cstmm:handshake_s2c`**：`string serverVersion`。**`cstmm:handshake_c2s`**：`string clientVersion`。**`cstmm:open_config_screen`**：空包（codec 仅占位）；`cstmm:request_config_sync` 见 5.2（`string clientHash`）。
 
