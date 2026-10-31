@@ -19,11 +19,9 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 头像图片异步获取缓存：按服务端下发的头像绑定 (avatarType, avatarId) 自行获取图片纹理，
  * 与徽标 {@link UrlImageCache} 分开限长。
- * <ul>
- *   <li>QQ：直接拼接直链 https://q1.qlogo.cn/g?b=qq&amp;nk={id}&amp;s=640；</li>
- *   <li>B站：先经 uapis.cn 接口解析 face 字段得到直链（uid → 直链内存缓存，
- *       每会话每 UID 只请求一次，失败 60s 冷却），再下载图片。</li>
- * </ul>
+ *   QQ：直接拼接直链 https://q1.qlogo.cn/g?b=qq&amp;nk={id}&amp;s=640；
+ *   B站：先经 uapis.cn 接口解析 face 字段得到直链（uid → 直链内存缓存，
+ *       每会话每 UID 只请求一次，失败 60s 冷却），再下载图片。
  * 下载上限 2MiB；解码后超过 1024×1024 的头像等比压缩到该范围内（不再因过大拒绝加载），
  * 下载/解析失败 60s 冷却。纹理注册（GL 调用）经 MinecraftClient.execute 切回渲染线程。
  * 【被谁使用】PersonalizeTabPanel（头像预览）、ClanTabPanel（成员列表头像）、
@@ -200,7 +198,7 @@ public final class FaceImageCache {
     /**
      * 【作用】把超过 maxPixels 的图片等比压缩到该范围内（保持长宽比，双线性插值）；
      * 未超限的原样返回。压缩经 BufferedImage/Graphics2D 完成后逐像素转回 NativeImage（ARGB → ABGR）。
-     * 【被谁使用】仅被本类 download 调用（超大头像不再拒绝加载，压缩后正常注册纹理）。
+     * 【被谁使用】仅被本类 download 调用。
      */
     private static NativeImage downscaleToFit(NativeImage image, int maxPixels) {
         int w = image.getWidth(), h = image.getHeight();

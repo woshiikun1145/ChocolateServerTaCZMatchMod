@@ -108,7 +108,7 @@ public class LastWordsScreen extends Screen {
     /** 标记待触发崩溃（幂等：已挂起时不覆盖首次遗言） */
     private static void markCrash(String words) {
         if (pendingLastWords == null) {
-            pendingLastWords = words.isEmpty() ? "（一言不发，无话可说）" : words;
+            pendingLastWords = words.isEmpty() ? "（什么也没说）" : words;
         }
     }
 

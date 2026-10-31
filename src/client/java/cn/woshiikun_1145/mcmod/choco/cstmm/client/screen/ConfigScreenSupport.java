@@ -7,7 +7,10 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * 【作用】配置界面纯函数辅助（自 ConfigScreen 提取）：
@@ -64,7 +67,6 @@ final class ConfigScreenSupport {
         List<MapConfig.ShopColumn> out = new ArrayList<>();
         for (MapConfig.ShopColumn col : src) {
             MapConfig.ShopColumn copy = new MapConfig.ShopColumn(col.getName());
-            copy.setIcon(col.getIcon());
             for (GlobalConfig.ShopItem item : col.getItems()) {
                 copy.getItems().add(new GlobalConfig.ShopItem(item.getItemId(), item.getPrice(),
                         item.getMaxPurchase(), item.getTeam(), item.getDisplayName(), item.getIcon()));
@@ -98,6 +100,41 @@ final class ConfigScreenSupport {
                 if (id.equals(maps.get(j).getId())) {
                     return "第 " + (i + 1) + " 张与第 " + (j + 1) + " 张地图 ID 重复（\"" + id
                             + "\"），服务端会按 ID 覆盖，请修改后再保存！";
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 【作用】保存前校验爆破图包点配置（普通图跳过）：
+     *         ① 爆破图必须至少配置 1 个包点（否则 T 方无处安放 C4，对局无法进行）；
+     *         ② 每个包点数据不能为 null；
+     *         ③ 包点名称不能重复（空白名按 Bombsite.getName 回退为 "A"，同样参与查重）；
+     *         ④ 坐标不能停留在默认 0/0/0（视为未填写的占位包点）。
+     * 【被谁使用】ConfigScreen.saveConfig（保存前拦截并弹窗提示）。
+     * @return 错误信息，全部合法返回 null
+     */
+    static String validateBombsites(List<MapConfig> maps) {
+        for (MapConfig m : maps) {
+            if (m == null || !m.isBombMap()) continue;
+            String label = m.getId() == null ? "?" : m.getId();
+            List<MapConfig.Bombsite> sites = m.getBombsites();
+            if (sites == null || sites.isEmpty()) {
+                return "地图 §f" + label + "§r 是爆破图，但没有配置任何包点（至少需要 1 个，否则无法安放 C4）！";
+            }
+            Set<String> names = new HashSet<>();
+            for (int i = 0; i < sites.size(); i++) {
+                MapConfig.Bombsite site = sites.get(i);
+                if (site == null) {
+                    return "地图 §f" + label + "§r 的第 " + (i + 1) + " 个包点数据损坏（null），请删除后重新添加！";
+                }
+                String name = site.getName();
+                if (!names.add(name.toLowerCase(Locale.ROOT))) {
+                    return "地图 §f" + label + "§r 的包点名称 \"" + name + "\" 重复，请保证每个包点名称唯一！";
+                }
+                if (site.getX() == 0 && site.getY() == 0 && site.getZ() == 0) {
+                    return "地图 §f" + label + "§r 的包点 \"" + name + "\" 坐标仍为 0/0/0（未配置），请填写真实包点坐标！";
                 }
             }
         }

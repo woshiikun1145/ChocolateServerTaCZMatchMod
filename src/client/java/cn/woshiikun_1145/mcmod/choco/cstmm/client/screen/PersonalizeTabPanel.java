@@ -115,7 +115,7 @@ public class PersonalizeTabPanel {
         buttons.clear();
 
         // 页面标题跟随主题色（本页设置）
-        context.drawText(tr, "🎨 个性化", x + 20, y + 14, ClientConfig.getThemeColorArgb(), true);
+        context.drawText(tr, "个性化", x + 20, y + 14, ClientConfig.getThemeColorArgb(), true);
 
         // ===== 主题色 =====
         context.drawText(tr, "§7界面主题色", x + 20, y + 36, 0xAAAAAA, true);

@@ -46,8 +46,8 @@ public class ShopScreen extends Screen {
     private int colWidth = 0;
     private int colBodyTop = 0;
     private int colBodyBottom = 0;
-    // 列头数据（名称 + 图标），与 columns 一一对应
-    private final List<String[]> headers = new ArrayList<>();
+    // 列头名称，与 columns 一一对应
+    private final List<String> headers = new ArrayList<>();
 
     /**
      * 【作用】商品格数据：购买索引（爆破图第 1 列拆弹装备 = -1，其余为分类列拼接索引）、
@@ -83,7 +83,7 @@ public class ShopScreen extends Screen {
         }
     }
 
-    /** 构建网格数据：列头（名称/图标）与每列商品格（爆破图第 1 列 = 拆弹装备购买项）。 */
+    /** 构建网格数据：列头名称与每列商品格（爆破图第 1 列 = 拆弹装备购买项）。 */
     private void initGrid(ShopDataCache cache) {
         columns.clear();
         headers.clear();
@@ -97,7 +97,6 @@ public class ShopScreen extends Screen {
         for (int c = 0; c < SHOP_COLS; c++) {
             List<Cell> cells = new ArrayList<>();
             String headerName = "";
-            String headerIcon = "";
 
             if (bomb && c == 0) {
                 // 第 1 列：装备列（仅 CT 显示拆弹装备购买项；T 方空列）
@@ -114,7 +113,6 @@ public class ShopScreen extends Screen {
                 if (idx < serverCols.size()) {
                     ShopDataS2CPayload.ColumnData col = serverCols.get(idx);
                     headerName = col.name();
-                    headerIcon = col.icon();
                     int flatBase = flatIndexBase(serverCols, idx);
                     for (int r = 0; r < col.items().size(); r++) {
                         GlobalConfig.ShopItem item = col.items().get(r);
@@ -136,7 +134,7 @@ public class ShopScreen extends Screen {
                     }
                 }
             }
-            headers.add(new String[]{headerName, headerIcon});
+            headers.add(headerName);
             columns.add(cells);
         }
 
@@ -281,22 +279,10 @@ public class ShopScreen extends Screen {
             // 列背景
             context.fill(x, GRID_TOP, x + colWidth, colBodyBottom, 0x66000000);
 
-            // 列头：编号（金色）+ 图标 + 名称
-            String[] header = c < headers.size() ? headers.get(c) : new String[]{"", ""};
-            String headerName = header[0];
-            String headerIcon = header[1];
+            // 列头：编号（金色）+ 名称
+            String headerName = c < headers.size() ? headers.get(c) : "";
             context.drawText(textRenderer, String.valueOf(c + 1), x + 3, GRID_TOP + 4, 0xFFD700, true);
             int nameX = x + 12;
-            if (!headerIcon.isEmpty()) {
-                var tex = headerIcon.startsWith("http://") || headerIcon.startsWith("https://")
-                        ? UrlImageCache.get(headerIcon)
-                        : Base64ImageDecoder.decode(headerIcon);
-                if (tex != null) {
-                    context.drawTexture(tex.id(), x + 13, GRID_TOP + 2, 12, 12,
-                            0f, 0f, tex.width(), tex.height(), tex.width(), tex.height());
-                }
-                nameX = x + 27;
-            }
             context.drawText(textRenderer, textRenderer.trimToWidth(headerName, x + colWidth - nameX - 4),
                     nameX, GRID_TOP + 4, 0xFFFFFF, true);
 

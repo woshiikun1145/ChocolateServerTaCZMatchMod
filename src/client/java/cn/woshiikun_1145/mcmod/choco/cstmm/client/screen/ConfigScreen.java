@@ -216,7 +216,7 @@ public class ConfigScreen extends Screen {
 
         if (maps.isEmpty()) {
             ButtonWidget emptyBtn = ButtonWidget.builder(
-                    Text.literal("§e等待配置同步..."),
+                    Text.literal("§e正在等待配置同步..."),
                     b -> {}
             ).dimensions(listBtnX, listBtnY, listBtnWidth, listBtnHeight).build();
             leftButtons.add(emptyBtn);
@@ -281,6 +281,8 @@ public class ConfigScreen extends Screen {
         int fieldWidth = Math.max(100, contentWidth - 140);
 
         if (editingMap != null) {
+            // 【作用】爆破图的 redSpawns/blueSpawns 语义为 T/CT 出生点，界面按地图类型切换称呼
+            boolean bombMap = editingMap.isBombMap();
             // ---- 地图ID ----
             rightScrollables.add(new LabelWidget(editX, editY, Text.literal("地图ID:")));
             TextFieldWidget idField = new TextFieldWidget(textRenderer, editX + FIELD_OFFSET, editY, 120, 18, Text.literal(""));
@@ -328,7 +330,7 @@ public class ConfigScreen extends Screen {
             ).dimensions(editX + 100, editY, 130, 20).build();
             rightScrollables.add(gameTypeBtn);
             editY += ROW_GAP;
-            addHint(editX, editY, "地图类型：NORMAL=普通图；BOMB=爆破图（多回合 + C4 + 经济，切回 NORMAL 会清空包点）");
+            addHint(editX, editY, "地图类型：NORMAL=普通图；BOMB=爆破图（切回 NORMAL 会清空包点）");
             editY += 11;
 
             // ---- 结算方式 ----
@@ -396,12 +398,13 @@ public class ConfigScreen extends Screen {
                 ).dimensions(editX + FIELD_OFFSET, editY, 160, 20).build();
                 rightScrollables.add(tieRuleBtn);
                 editY += ROW_GAP;
-                addHint(editX, editY, "平局规则：OVERTIME=平局时发起加时投票（全票通过则延长对局）；DRAW=直接平局结束");
+                addHint(editX, editY, "平局规则：OVERTIME=平局时发起加时投票；DRAW=直接平局结束");
                 editY += 11;
             }
 
-            // ---- 红队/蓝队最低人数 ----
-            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("红队最低人数:"), 18));
+            // ---- 最低人数（爆破图按 T/CT 方称呼，普通图按红/蓝队） ----
+            rightScrollables.add(new LabelWidget(editX, editY,
+                    Text.literal(bombMap ? "T 方最低人数:" : "红队最低人数:"), 18));
             TextFieldWidget minRedField = new NumberTextField(editX + FIELD_OFFSET, editY, 50, 18, Text.literal(""));
             minRedField.setText(String.valueOf(editingMap.getMinRedPlayers()));
             minRedField.setChangedListener(s -> {
@@ -414,7 +417,8 @@ public class ConfigScreen extends Screen {
             });
             rightScrollables.add(minRedField);
 
-            rightScrollables.add(new LabelWidget(editX + FIELD_OFFSET + 60, editY, Text.literal("蓝队最低人数:"), 18));
+            rightScrollables.add(new LabelWidget(editX + FIELD_OFFSET + 60, editY,
+                    Text.literal(bombMap ? "CT 方最低人数:" : "蓝队最低人数:"), 18));
             TextFieldWidget minBlueField = new NumberTextField(editX + FIELD_OFFSET + 160, editY, 50, 18, Text.literal(""));
             minBlueField.setText(String.valueOf(editingMap.getMinBluePlayers()));
             minBlueField.setChangedListener(s -> {
@@ -430,8 +434,9 @@ public class ConfigScreen extends Screen {
             addHint(editX, editY, "最低人数 = 开局门槛（两队各达下限才可开局），也是 CONDITIONAL 补位模式的补位阈值");
             editY += 11;
 
-            // ---- 红队/蓝队最高人数（0 = 无上限） ----
-            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("红队最高人数:"), 18));
+            // ---- 最高人数（0 = 无上限；爆破图按 T/CT 方称呼） ----
+            rightScrollables.add(new LabelWidget(editX, editY,
+                    Text.literal(bombMap ? "T 方最高人数:" : "红队最高人数:"), 18));
             TextFieldWidget maxRedField = new NumberTextField(editX + FIELD_OFFSET, editY, 50, 18, Text.literal(""));
             maxRedField.setText(String.valueOf(editingMap.getMaxRedPlayers()));
             maxRedField.setChangedListener(s -> {
@@ -444,7 +449,8 @@ public class ConfigScreen extends Screen {
             });
             rightScrollables.add(maxRedField);
 
-            rightScrollables.add(new LabelWidget(editX + FIELD_OFFSET + 60, editY, Text.literal("蓝队最高人数:"), 18));
+            rightScrollables.add(new LabelWidget(editX + FIELD_OFFSET + 60, editY,
+                    Text.literal(bombMap ? "CT 方最高人数:" : "蓝队最高人数:"), 18));
             TextFieldWidget maxBlueField = new NumberTextField(editX + FIELD_OFFSET + 160, editY, 50, 18, Text.literal(""));
             maxBlueField.setText(String.valueOf(editingMap.getMaxBluePlayers()));
             maxBlueField.setChangedListener(s -> {
@@ -567,7 +573,7 @@ public class ConfigScreen extends Screen {
             ).dimensions(editX + FIELD_OFFSET, editY, 160, 20).build();
             rightScrollables.add(reinforceModeBtn);
             editY += ROW_GAP;
-            addHint(editX, editY, "补位模式：CONDITIONAL=各队只补到最低人数；ALWAYS=补到满员（最高人数 0=无上限时全部补入）。需地图允许补位");
+            addHint(editX, editY, "CONDITIONAL=补到最低人数；ALWAYS=补到满员（最高人数 0会全部补入）");
             editY += 11;
 
             // ---- 对局维度 ----
@@ -585,7 +591,7 @@ public class ConfigScreen extends Screen {
 
             // ---- 商店物品（购买页 5 列网格；爆破图分类列编辑器见爆破区） ----
             if (!editingMap.isBombMap()) {
-            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("商店物品（购买页 5 列网格布局）:"), 9));
+            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("商店物品:"), 9));
             editY += 18;
             editY = addShopColumnEditor(editX, editY, 5, true, false, false);
             editY = addShopPreview(editX, editY, false, false);
@@ -593,7 +599,7 @@ public class ConfigScreen extends Screen {
 
             // ---- 爆破图包点（仅 BOMB 图显示）----
             if (editingMap.isBombMap()) {
-                rightScrollables.add(new LabelWidget(editX, editY, Text.literal("爆破包点 (Bombsites):"), 9));
+                rightScrollables.add(new LabelWidget(editX, editY, Text.literal("包点:"), 9));
                 editY += 18;
 
                 List<MapConfig.Bombsite> sites = editingMap.getBombsites();
@@ -757,7 +763,7 @@ public class ConfigScreen extends Screen {
                 addHint(editX, editY, "伤害计算：d1=-m·l^2+h 减伤率 p 在 lA~lB 线性衰减到 0；eCR=碰撞箱未遮挡占比，eCR≥0.5 时 eCRB=1/eCR，否则 eCRB=0.5；最终伤害d=d1*p*eCRB-dB（向下取整，最小0）");
                 editY += 11;
 
-                // ---- 购买页分类列（T/红 与 CT/蓝 分开配置；各 4 列，第 1 列固定装备列）----
+                // ---- 购买页分类列（T 方与 CT 方分开配置；各 4 列，第 1 列固定装备列）----
                 // 旧配置兼容：T/CT 均未独立配置但存在通用列（旧版单套配置）时，
                 // 复制为两队初始配置（仅在编辑副本上生效，保存后才落盘）
                 if (editingMap.getShopColumnsT().isEmpty() && editingMap.getShopColumnsCT().isEmpty()
@@ -772,17 +778,22 @@ public class ConfigScreen extends Screen {
                 editY = addShopPreview(editX, editY, true, false);
             }
 
-            // ---- 边界坐标（公共 + 红队 + 蓝队，队伍边界全 0 = 使用公共边界） ----
+            // ---- 边界坐标（公共 + 队伍专属边界，队伍边界全 0 = 使用公共边界） ----
             // 位置调整：BOUNDARY_COL_SPACING（组间距）/ BOUNDARY_FIELD_OFFSET（输入框偏移）
-            int bY = addBoundaryGroup("公共边界（红蓝队专属边界未配置时生效）", editingMap.getBoundary(), editX, editY);
-            bY = addBoundaryGroup("红队边界（全 0 = 使用公共边界）", editingMap.getRedBoundary(), editX, bY);
-            bY = addBoundaryGroup("蓝队边界（全 0 = 使用公共边界）", editingMap.getBlueBoundary(), editX, bY);
+            // 爆破图按 T/CT 方称呼队伍，普通图按红/蓝队
+            int bY = addBoundaryGroup(bombMap ? "公共边界（T/CT 方专属边界未配置时生效）"
+                    : "公共边界（红蓝队专属边界未配置时生效）", editingMap.getBoundary(), editX, editY);
+            bY = addBoundaryGroup(bombMap ? "T 方边界（全 0 = 使用公共边界）"
+                    : "红队边界（全 0 = 使用公共边界）", editingMap.getRedBoundary(), editX, bY);
+            bY = addBoundaryGroup(bombMap ? "CT 方边界（全 0 = 使用公共边界）"
+                    : "蓝队边界（全 0 = 使用公共边界）", editingMap.getBlueBoundary(), editX, bY);
             editY = bY;
             addHint(editX, editY, "按所站方块判定，站在边界方块上不算出界；某维 Min 大于 Max 时自动交换，六个值须全部正确填写（含 Y）");
             editY += 11;
 
-            // ---- 红队出生点（X/Y/Z 三个输入框，数字输入框不支持空格） ----
-            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("红队出生点 (X / Y / Z)"), 9));
+            // ---- 红队出生点（爆破图= T 方出生点；X/Y/Z 三个输入框，数字输入框不支持空格） ----
+            rightScrollables.add(new LabelWidget(editX, editY,
+                    Text.literal((bombMap ? "T 方出生点" : "红队出生点") + " (X / Y / Z)"), 9));
             editY += 18;
             int coordFieldWidth = Math.min(80, (contentWidth - 70) / 3);
             for (int i = 0; i < editingMap.getRedSpawns().size(); i++) {
@@ -790,7 +801,7 @@ public class ConfigScreen extends Screen {
             }
             editY += Math.max(1, editingMap.getRedSpawns().size()) * 20 + 4;
             ButtonWidget addRedBtn = ButtonWidget.builder(
-                    Text.literal("+ 红队出生点"),
+                    Text.literal(bombMap ? "+ T 方出生点" : "+ 红队出生点"),
                     button -> {
                         editingMap.getRedSpawns().add(BlockPos.ORIGIN);
                         hasUnsavedChanges = true;
@@ -801,15 +812,16 @@ public class ConfigScreen extends Screen {
             rightScrollables.add(addRedBtn);
             editY += ROW_GAP;
 
-            // ---- 蓝队出生点（X/Y/Z 三个输入框） ----
-            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("蓝队出生点 (X / Y / Z)"), 9));
+            // ---- 蓝队出生点（爆破图= CT 方出生点；X/Y/Z 三个输入框） ----
+            rightScrollables.add(new LabelWidget(editX, editY,
+                    Text.literal((bombMap ? "CT 方出生点" : "蓝队出生点") + " (X / Y / Z)"), 9));
             editY += 18;
             for (int i = 0; i < editingMap.getBlueSpawns().size(); i++) {
                 addSpawnCoordFields(editingMap.getBlueSpawns(), i, editX, editY + i * 20, coordFieldWidth);
             }
             editY += Math.max(1, editingMap.getBlueSpawns().size()) * 20 + 4;
             ButtonWidget addBlueBtn = ButtonWidget.builder(
-                    Text.literal("+ 蓝队出生点"),
+                    Text.literal(bombMap ? "+ CT 方出生点" : "+ 蓝队出生点"),
                     button -> {
                         editingMap.getBlueSpawns().add(BlockPos.ORIGIN);
                         hasUnsavedChanges = true;
@@ -831,7 +843,7 @@ public class ConfigScreen extends Screen {
             });
             rightScrollables.add(backgroundField);
             editY += ROW_GAP;
-            addHint(editX, editY, "填 http(s):// 开头的图片 URL（无大小限制，客户端自行下载）或 Base64（上限 327680 字符）");
+            addHint(editX, editY, "填 http(s):// 开头的图片 URL或 Base64字符串（上限 327680 字符）");
             editY += 11;
         }
 
@@ -846,7 +858,7 @@ public class ConfigScreen extends Screen {
     private int buildGlobalSection(int editY) {
         // ----- 全局配置区域 -----
         int globalStartY = Math.max(editY + 10, contentTop + 10);
-        rightScrollables.add(new LabelWidget(contentLeft, globalStartY, Text.literal("⚙ 全局配置"), 9));
+        rightScrollables.add(new LabelWidget(contentLeft, globalStartY, Text.literal("全局配置"), 9));
         int tabX = contentLeft;
         int globalRowY = globalStartY + 18;
 
@@ -1002,17 +1014,17 @@ public class ConfigScreen extends Screen {
      * 【作用】商店分类列编辑器（购买页网格布局的列配置）：
      *         每列可配列头名称与列头图标，列内商品行 = 物品ID（/give 格式）| 价格 | (限购，仅普通图)
      *         | 显示名 | 图标 | 删除；支持逐列添加商品/手持添加（保留数据组件）与添加/删除列。
-     *         普通图 5 列通用；爆破图 T/红 与 CT/蓝 各自独立配置（tTeam 选择编辑哪支队伍），
+     *         普通图 5 列通用；爆破图 T 方与 CT 方各自独立配置（tTeam 选择编辑哪支队伍），
      *         各最多 4 列（购买页第 1 列固定为装备列：CT 拆弹装备、T 方空列）。
-     * @param tTeam 爆破图时 true=编辑 T 方（红队）列、false=编辑 CT 方（蓝队）列；普通图忽略
+     * @param tTeam 爆破图时 true=编辑 T 方列、false=编辑 CT 方列；普通图忽略
      * @return 推进后的 editY
      */
     private int addShopColumnEditor(int editX, int editY, int maxCols, boolean showMaxPurchase,
                                     boolean bombMode, boolean tTeam) {
         rightScrollables.add(new LabelWidget(editX, editY, Text.literal(bombMode
-                ? (tTeam ? "T 方（红队）购买页分类列（最多 " + maxCols
+                ? (tTeam ? "T 方购买页分类列（最多 " + maxCols
                         + " 列；第 1 列固定为装备列，T 方显示空列）:"
-                        : "CT 方（蓝队）购买页分类列（最多 " + maxCols
+                        : "CT 方购买页分类列（最多 " + maxCols
                         + " 列；第 1 列固定为拆弹装备，仅 CT 可见）:")
                 : "商店分类列（购买页 " + maxCols + " 列网格布局）:"), 9));
         editY += 18;
@@ -1028,14 +1040,19 @@ public class ConfigScreen extends Screen {
         writeShopColumns(shopCols, bombMode, tTeam);
 
         // 商品行布局：物品ID | 价格 | (限购) | 显示名 | 图标 | ×
-        int fixedRight = 45 + (showMaxPurchase ? 51 : 0) + 96 + 86 + 22; // 价格/限购/显示名/图标/删除 固定宽
-        int colItemNameW = Math.max(60, contentWidth - fixedRight - 60);
+        // 【作用】图标列固定 80px、删除列固定 16px，右侧所有固定列（含间距与 8px 留白）统一从
+        //         物品ID 可用宽度中扣除；原实现按 contentWidth-320 推导图标宽度，爆破图
+        //         （无限购列）会得到负宽度，导致图标输入框不可见、表头“图标/删除”互相重叠
+        int iconW = 80;
+        int delW = 16;
+        int fixedRight = 6 + 45 + (showMaxPurchase ? 6 + 45 : 0) + 6 + 90 + 6 + iconW + 6 + delW + 8;
+        int colItemNameW = Math.max(60, contentWidth - fixedRight - 14);
         int itemRowX = editX + 14;
         int priceX = itemRowX + colItemNameW + 6;
         int maxX = priceX + 45 + 6;
         int nameX = showMaxPurchase ? maxX + 45 + 6 : priceX + 45 + 6;
         int iconX = nameX + 90 + 6;
-        int delX = iconX + Math.min(80, contentWidth - 320 - colItemNameW) + 6;
+        int delX = iconX + iconW + 6;
 
         // 商品行表头（与下方商品行逐列对齐；有列时才显示）
         if (!shopCols.isEmpty()) {
@@ -1054,7 +1071,7 @@ public class ConfigScreen extends Screen {
             MapConfig.ShopColumn col = shopCols.get(c);
             final int colIdx = c;
 
-            // 列头行：序号 + 名称框 + 图标框 + 删除列（爆破图列号从 2 起：第 1 列固定为拆弹装备）
+            // 列头行：序号 + 名称框 + 删除列（爆破图列号从 2 起：第 1 列固定为拆弹装备）
             rightScrollables.add(new LabelWidget(editX, editY + 3,
                     Text.literal((bombMode ? "列 " + (c + 2) : "列 " + (c + 1)) + ":"), 9));
             TextFieldWidget colNameField = new TextFieldWidget(textRenderer, editX + 34, editY, 90, 18, Text.literal(""));
@@ -1066,23 +1083,13 @@ public class ConfigScreen extends Screen {
             });
             rightScrollables.add(colNameField);
 
-            TextFieldWidget colIconField = new TextFieldWidget(textRenderer, editX + 132, editY,
-                    Math.min(200, contentWidth - 320), 18, Text.literal(""));
-            colIconField.setMaxLength(32000);
-            colIconField.setText(col.getIcon());
-            colIconField.setChangedListener(s -> {
-                shopCols.get(colIdx).setIcon(s);
-                hasUnsavedChanges = true;
-            });
-            rightScrollables.add(colIconField);
-
             ButtonWidget delColBtn = ButtonWidget.builder(Text.literal("× 删除列"), button -> {
                 shopCols.remove(colIdx);
                 writeShopColumns(shopCols, bombMode, tTeam);
                 hasUnsavedChanges = true;
                 clearChildren();
                 init();
-            }).dimensions(editX + 140 + Math.min(200, contentWidth - 320), editY - 1, 64, 18).build();
+            }).dimensions(editX + 132, editY - 1, 64, 18).build();
             rightScrollables.add(delColBtn);
             editY += 22;
 
@@ -1141,7 +1148,7 @@ public class ConfigScreen extends Screen {
 
                 // 图标：base64（上限 32000 字符）/ http(s) URL / 留空 = 物品栏贴图
                 TextFieldWidget if_ = new TextFieldWidget(textRenderer, iconX, rowY,
-                        Math.min(80, contentWidth - 320 - colItemNameW), 18, Text.literal(""));
+                        iconW, 18, Text.literal(""));
                 if_.setMaxLength(32000);
                 if_.setText(item.getIcon());
                 if_.setChangedListener(s -> {
@@ -1201,8 +1208,8 @@ public class ConfigScreen extends Screen {
         // 字段说明（按模式区分：爆破图第 1 列为固定装备列且 T/CT 分开配置；普通图全 5 列可配且免费发放）
         addHint(editX, editY, bombMode
                 ? (tTeam
-                        ? "购买页第 1 列为装备列，T 方显示空列（无固定购买项）；本节配置仅对 T 方（红队）生效，列内商品超出可滚轮上下滚动"
-                        : "购买页第 1 列固定为拆弹装备（价格在全局经济参数 defuserPrice，仅 CT 可见）；本节配置仅对 CT 方（蓝队）生效")
+                        ? "购买页第 1 列为装备列，T 方显示空列（无固定购买项）；本节配置仅对 T 方生效，列内商品超出可滚轮上下滚动"
+                        : "购买页第 1 列固定为拆弹装备（价格在全局经济参数 defuserPrice，仅 CT 可见）；本节配置仅对 CT 方生效")
                 : "购买页为 " + maxCols + " 列网格布局（免费发放，按列展示）；列内商品超出可滚轮上下滚动");
         editY += 11;
         addHint(editX, editY, "物品串用 /give 格式：id[minecraft:组件={...}] 数量（手持添加自动生成）；图标可填 base64（≤32K）/图片 URL/留空（= 物品栏贴图）");
@@ -1212,7 +1219,7 @@ public class ConfigScreen extends Screen {
 
     /**
      * 【作用】把分类列列表写回编辑中地图的对应字段：普通图 → shopColumns；
-     *         爆破图 tTeam=true → shopColumnsT（红/T）、false → shopColumnsCT（蓝/CT）。
+     *         爆破图 tTeam=true → shopColumnsT（T 方）、false → shopColumnsCT（CT 方）。
      * 【被谁使用】addShopColumnEditor（初始化截断与增删列/商品后回写）。
      */
     private void writeShopColumns(List<MapConfig.ShopColumn> cols, boolean bombMode, boolean tTeam) {
@@ -1237,9 +1244,12 @@ public class ConfigScreen extends Screen {
                 : editingMap.getShopColumns();
         int maxRows = cols.stream().mapToInt(col -> col.getItems().size()).max().orElse(1);
         int previewH = 16 + Math.min(Math.max(1, maxRows), 5) * 24 + 4;
-        rightScrollables.add(new ShopPreviewWidget(editX, editY, contentWidth, previewH,
+        // 【作用】预览标题绘制在控件 y 坐标上方 14px，这里先预留标题高度，
+        //         避免标题压到上一行字段说明（提示文字）上
+        int titleGap = 14;
+        rightScrollables.add(new ShopPreviewWidget(editX, editY + titleGap, contentWidth, previewH,
                 () -> editingMap, () -> globalConfig.getBombEconomy().getDefuserPrice(), bomb, tTeam));
-        return editY + previewH + 14;
+        return editY + titleGap + previewH + 14;
     }
 
     /**
@@ -1383,6 +1393,13 @@ public class ConfigScreen extends Screen {
                 );
                 return;
             }
+        }
+
+        // 爆破图包点校验：至少 1 个、名称唯一、坐标不能停留在 0/0/0 占位
+        String bombsiteError = ConfigScreenSupport.validateBombsites(maps);
+        if (bombsiteError != null) {
+            confirmDialog.show(Text.literal("§c包点配置错误"), Text.literal(bombsiteError), null);
+            return;
         }
 
         // 背景图校验：Base64 上限 327680 字符；http/https URL 不限大小

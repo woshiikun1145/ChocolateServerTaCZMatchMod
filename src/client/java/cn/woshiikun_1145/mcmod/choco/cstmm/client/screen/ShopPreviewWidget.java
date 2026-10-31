@@ -27,7 +27,7 @@ final class ShopPreviewWidget implements Drawable {
     private final IntSupplier defuserPriceSupplier;
     // 是否爆破图预览（决定第 1 列是否为固定装备列）
     private final boolean bomb;
-    // 爆破图预览视角：true=T 方（红队，第 1 列空列）；false=CT 方（蓝队，第 1 列拆弹装备）
+    // 爆破图预览视角：true=T 方（第 1 列空列）；false=CT 方（第 1 列拆弹装备）
     private final boolean tTeam;
     private final int x;
     private final int y;
@@ -57,7 +57,7 @@ final class ShopPreviewWidget implements Drawable {
         var tr = MinecraftClient.getInstance().textRenderer;
         // 预览底板
         context.fill(x - 4, y - 4, x + width + 4, y + height + 4, 0x33000000);
-        String title = bomb ? (tTeam ? "§7购买页预览（T 方/红队视角）:" : "§7购买页预览（CT 方/蓝队视角）:")
+        String title = bomb ? (tTeam ? "§7购买页预览（T 方视角）:" : "§7购买页预览（CT 方视角）:")
                 : "§7购买页预览:";
         context.drawText(tr, title, x - 4, y - 14, 0x888888, true);
 
@@ -73,7 +73,6 @@ final class ShopPreviewWidget implements Drawable {
 
             // 列头：爆破图第 1 列固定装备列（CT 显示拆弹装备项，T 方空列）；其余取分类配置
             String name;
-            String icon = "";
             List<Row> items = List.of();
             if (bomb && c == 0) {
                 // T 方空列：列头仅标注提示；CT：列头"装备" + 拆弹装备项（价格取全局经济参数）
@@ -88,7 +87,6 @@ final class ShopPreviewWidget implements Drawable {
                     continue;
                 }
                 name = cols.get(idx).getName();
-                icon = cols.get(idx).getIcon();
                 items = cols.get(idx).getItems().stream()
                         .map(i -> {
                             ItemStack st = stackOf(i.getItemId());
@@ -105,16 +103,8 @@ final class ShopPreviewWidget implements Drawable {
                 context.drawText(tr, "§8（T 方空列）", cx + 4, bodyTop + 3, 0x666666, true);
             }
 
-            if (!icon.isEmpty()) {
-                var tex = icon.startsWith("http://") || icon.startsWith("https://")
-                        ? UrlImageCache.get(icon) : Base64ImageDecoder.decode(icon);
-                if (tex != null) {
-                    context.drawTexture(tex.id(), cx + 2, bodyTop + 1, 12, 12,
-                            0f, 0f, tex.width(), tex.height(), tex.width(), tex.height());
-                }
-            }
-            context.drawText(tr, tr.trimToWidth(name, colWidth - (icon.isEmpty() ? 8 : 22)),
-                    cx + (icon.isEmpty() ? 4 : 17), bodyTop + 3, 0xFFFFFF, true);
+            context.drawText(tr, tr.trimToWidth(name, colWidth - 8),
+                    cx + 4, bodyTop + 3, 0xFFFFFF, true);
 
             // 商品格（可容纳几行画几行）
             int rowTop = bodyTop + 16;

@@ -36,14 +36,11 @@ import java.util.concurrent.ThreadLocalRandom;
 /**
  * 【作用】主匹配菜单界面（客户端）：欢迎 / 匹配 / 队列 / 战队 / 履历 / 关于 六个标签页。
  * 【被谁使用】CstmmClient（keyOpenMenu 快捷键打开）；ClientNetworkHandler（配置同步回调 refreshMaps、服务端弹窗调 showPopup）。
- * <p>
  * 网络去向（C2S）：
- * <ul>
- *   <li>JOIN_QUEUE / JOIN_QUICK / LEAVE_QUEUE → 服务端 NetworkHandler.handleMatchAction → QueueManager（入队/退队）</li>
- *   <li>REQUEST_PROFILE / REQUEST_LEADERBOARD → 服务端回发自己的战绩（PlayerProfilePayload）与全服履历排行
- *       （LeaderboardPayload 分片），由履历页 ProfileTabPanel 展示</li>
- *   <li>RequestQueueStatusPayload(subscribe) → 服务端队列状态推送订阅/退订（匹配页"取消匹配"按钮与队列页共用快照）</li>
- * </ul>
+ *   JOIN_QUEUE / JOIN_QUICK / LEAVE_QUEUE → 服务端 NetworkHandler.handleMatchAction → QueueManager（入队/退队）
+ *   REQUEST_PROFILE / REQUEST_LEADERBOARD → 服务端回发自己的战绩（PlayerProfilePayload）与全服履历排行
+ *       （LeaderboardPayload 分片），由履历页 ProfileTabPanel 展示
+ *   RequestQueueStatusPayload(subscribe) → 服务端队列状态推送订阅/退订（匹配页"取消匹配"按钮与队列页共用快照）
  * 入站数据来源（S2C，均由 ClientNetworkHandler 接收）：
  * 地图卡片 ← ConfigDataCache（服务端配置同步，变更时回调 refreshMaps）；
  * 服务端弹窗 ← showPopup；队列快照 ← QueueStatusCache；履历 ← PlayerProfileCache + LeaderboardCache（ProfileTabPanel 读取）。
@@ -390,7 +387,7 @@ public class MatchMenuScreen extends Screen {
     private void drawMatchCards(DrawContext context, int x, int y, int width, int height,
                                 int mouseX, int mouseY, float delta) {
         if (mapCards.isEmpty()) {
-            String hint = ConfigDataCache.getInstance().isLoaded() ? "§e暂无可用地图" : "§e配置同步中，请稍候...";
+            String hint = ConfigDataCache.getInstance().isLoaded() ? "§e暂无可用地图" : "§e配置同步中...";
             context.drawText(textRenderer, hint, x + 20, y + 20, 0xFFFFAA, true);
             return;
         }
@@ -543,7 +540,7 @@ public class MatchMenuScreen extends Screen {
         if (MinecraftClient.getInstance().player == null) return;
         // #28 配置缓存未同步（握手未完成）时禁止发起匹配
         if (!ConfigDataCache.getInstance().isLoaded()) {
-            MinecraftClient.getInstance().player.sendMessage(Text.literal("§e配置同步中，请稍候..."), false);
+            MinecraftClient.getInstance().player.sendMessage(Text.literal("§e配置同步中..."), false);
             return;
         }
         // 第 4 个字段携带匹配模式（COMPETITIVE/CASUAL），服务端按模式分队列
@@ -569,7 +566,6 @@ public class MatchMenuScreen extends Screen {
         context.drawText(textRenderer, "§7Chocolate Server TaCZ Match Mod", x + 20, y + 50, 0xAAAAAA, true);
         context.drawText(textRenderer, "§7版本: " + ClientHandshakeState.getClientVersion(), x + 20, y + 70, 0xAAAAAA, true);
         context.drawText(textRenderer, "§7作者: woshiikun_1145", x + 20, y + 90, 0xAAAAAA, true);
-        context.drawText(textRenderer, "§f匹配 · 战队 · 商店 · 履历 · 个性化，一站式 TaCZ PvP 对战体验。", x + 20, y + 110, 0xAAAAAA, true);
 
         // 按钮位于文字下方（见 init 中 aboutBtnX/y 布局）
     }
