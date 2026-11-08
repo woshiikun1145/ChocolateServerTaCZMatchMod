@@ -21,9 +21,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 【作用】商店界面（一页式网格布局，参考 CS 购买页）：普通图与爆破图统一 5 列网格——
+ * 【作用】商店界面（一页式网格布局，参考 CS 购买页）：死亡竞赛图与爆破图统一 5 列网格——
  *         爆破图第 1 列固定"装备"列（仅 CT 显示拆弹装备购买项，T 方空列），第 2~5 列为
- *         配置的分类列；普通图 5 列全部为配置的分类列（免费发放）。列内商品超出列体时
+ *         配置的分类列；死亡竞赛图 5 列全部为配置的分类列（免费发放）。列内商品超出列体时
  *         鼠标滚轮逐列上下滚动。商品格显示图标（base64/URL/空=物品栏贴图）、名称与价格；
  *         爆破图顶部信息栏显示余额与购买窗口状态，余额不足或窗口关闭的商品置灰。
  * 【被谁使用】CstmmClient（keyOpenShop 快捷键打开）；ClientNetworkHandler 收到商店数据包后调 refresh()。
@@ -107,7 +107,7 @@ public class ShopScreen extends Screen {
                     cells.add(new Cell(-1, "拆弹装备", "$" + price, "", ItemStack.EMPTY, affordable));
                 }
             } else {
-                // 服务端下发的列：爆破图 [0]=装备列（空商品），1..4=分类列；普通图 0..4=分类列。
+                // 服务端下发的列：爆破图 [0]=装备列（空商品），1..4=分类列；死亡竞赛图 0..4=分类列。
                 // 两种模式分类列下标都与网格列号一致（爆破图第 1 列在上分支单独处理）
                 int idx = c;
                 if (idx < serverCols.size()) {
@@ -149,7 +149,7 @@ public class ShopScreen extends Screen {
     /**
      * 【作用】计算某分类列首商品的平铺购买索引（与客户端渲染列顺序、服务端平铺列表一致）：
      *         逐列累加前列商品数。爆破图 columns[0] 为空"装备列"（不占索引，拆弹装备走
-     *         index=-1），普通图从 columns[0] 起——空装备列贡献 0，两种模式统一按此计算。
+     *         index=-1），死亡竞赛图从 columns[0] 起——空装备列贡献 0，两种模式统一按此计算。
      */
     private int flatIndexBase(List<ShopDataS2CPayload.ColumnData> serverCols, int colIdx) {
         int base = 0;
@@ -171,7 +171,7 @@ public class ShopScreen extends Screen {
 
     /**
      * 【作用】购买物品：爆破图 index=-1 = 拆弹装备（第 1 列），其余为分类列拼接索引；
-     *         普通图为分类列拼接索引（免费发放）。条件校验、扣费与限购全部在服务端；
+     *         死亡竞赛图为分类列拼接索引（免费发放）。条件校验、扣费与限购全部在服务端；
      *         购买成功后服务端重发数据刷新余额/状态。
      */
     private void buyItem(int index) {

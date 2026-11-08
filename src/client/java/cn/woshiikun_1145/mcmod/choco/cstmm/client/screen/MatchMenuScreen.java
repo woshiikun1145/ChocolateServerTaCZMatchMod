@@ -4,6 +4,7 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.CstmmClient;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.Base64ImageDecoder;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.Base64ImageDecoder.CardTexture;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.ToastManager;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ConfigDataCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.QueueStatusCache;
@@ -71,6 +72,11 @@ public class MatchMenuScreen extends Screen {
 
     // 匹配页卡片网格纵向滚动偏移（像素）：mouseScrolled 更新，渲染与点击命中共用
     private int scrollOffset = 0;
+
+    // 侧边栏标签栏滚动偏移（像素）：小窗口高度不足时悬停侧边栏滚轮滚动标签（渲染时逐帧重定位控件）
+    private int sidebarScrollOffset = 0;
+    private int sidebarMaxScroll = 0;
+    private final List<ButtonWidget> sidebarTabWidgets = new ArrayList<>();
 
     /** 玩家加入队列时携带的匹配模式：COMPETITIVE（竞技）/ CASUAL（休闲），默认休闲 */
     private String selectedMode = "CASUAL";
@@ -147,9 +153,10 @@ public class MatchMenuScreen extends Screen {
         super.init();
 
         int btnY = HEADER_HEIGHT + 10;
+        sidebarTabWidgets.clear();
         for (SidebarButton btn : sidebarButtons) {
             final int tabId = btn.id;
-            this.addDrawableChild(ButtonWidget.builder(
+            ButtonWidget tabWidget = this.addDrawableChild(ButtonWidget.builder(
                     Text.literal(btn.label),
                     button -> {
                         selectedTab = tabId;
@@ -163,6 +170,7 @@ public class MatchMenuScreen extends Screen {
                         switch (tabId) {
                             case 3 -> clanPanel.onShow();
                             case 4 -> profilePanel.onShow();
+                            case 6 -> personalizePanel.onShow();
                         }
                         // 队列状态订阅为整个菜单生命周期（init 订阅 / removed 退订），
                         // 匹配页的"取消匹配"按钮与队列页共用同一份推送快照，无需按页切换
@@ -171,6 +179,7 @@ public class MatchMenuScreen extends Screen {
                         }
                     }
             ).dimensions(10, btnY, SIDEBAR_WIDTH - 20, 28).build());
+            sidebarTabWidgets.add(tabWidget);
             btnY += 34;
         }
 
@@ -193,8 +202,8 @@ public class MatchMenuScreen extends Screen {
         casualModeBtn.visible = selectedTab == 1;
         competitiveModeBtn.visible = selectedTab == 1;
 
-        // 关于页面按钮：位于文字介绍下方（drawAbout 文字止于 contentY + 110 = 170）
-        int aboutBtnX = SIDEBAR_WIDTH + 20 + 20;
+        // 关于页面按钮：位于文字介绍下方，在内容区内水平居中（窄窗口不溢出右边缘）
+        int aboutBtnX = SIDEBAR_WIDTH + 20 + Math.max(0, (this.width - SIDEBAR_WIDTH - 40 - 190) / 2);
         repoBtn = this.addDrawableChild(ButtonWidget.builder(
                 Text.literal("§9模组仓库"),
                 button -> openUrl("https://github.com/woshiikun1145/ChocolateServerTaCZMatchMod")
@@ -218,13 +227,13 @@ public class MatchMenuScreen extends Screen {
         // 个性化页文本控件（ID 输入框 / HEX 输入框）
         personalizePanel.initWidgets();
 
-        // 匹配页左下角"取消匹配"按钮：仅当玩家在任一匹配队列时显示（每帧按推送快照刷新可见性），
-        // 点击发 LEAVE_QUEUE，与 /cstmm queue leave 走同一服务端入口
+        // 匹配页"取消匹配"按钮：与休闲/竞技模式按钮同排（标题栏右侧最左），仅匹配页且在队列时显示
+        // （每帧按推送快照刷新可见性），点击发 LEAVE_QUEUE，与 /cstmm queue leave 走同一服务端入口
         cancelMatchBtn = this.addDrawableChild(ButtonWidget.builder(
                 Text.literal("§c取消匹配"),
                 button -> ClientPlayNetworking.send(new MatchActionPayload(
                         MatchActionPayload.ActionType.LEAVE_QUEUE, "", 0, ""))
-        ).dimensions(SIDEBAR_WIDTH + 12, this.height - 30, 100, 20).build());
+        ).dimensions(this.width - 294, 16, 90, 18).build());
         cancelMatchBtn.visible = false;
 
         // 打开主菜单即订阅队列状态推送（退出菜单在 removed() 退订）——
@@ -274,8 +283,10 @@ public class MatchMenuScreen extends Screen {
             personalizePanel.hideWidgets();
         }
 
-        // 匹配页"取消匹配"按钮：按最新推送快照每帧刷新可见性（处于匹配页且玩家在任一队列时显示）
-        cancelMatchBtn.visible = selectedTab == 1 && QueueStatusCache.getInstance().get().own.inQueue;
+        // 匹配页"取消匹配"按钮：按最新推送快照每帧刷新可见性（处于匹配页且玩家在任一队列时显示）；
+        // 极窄窗口下按钮会压到侧边栏，此时隐藏（/cstmm queue leave 仍可用）
+        cancelMatchBtn.visible = selectedTab == 1 && QueueStatusCache.getInstance().get().own.inQueue
+                && this.width >= 440;
 
         // 服务端弹窗打开时完全不渲染下层内容（遮罩下文字穿透修复），弹窗即全部
         if (popupMessage != null) {
@@ -294,19 +305,35 @@ public class MatchMenuScreen extends Screen {
         int accent = ClientConfig.getThemeColorArgb();
 
         // 标题栏
+        // 标题栏（窄窗口用短标题，避免与右侧模式/取消匹配按钮重叠）
         context.fill(0, 0, screenWidth, HEADER_HEIGHT, 0xCC222222);
-        Text title = Text.literal("Chocolate Server TaCZ Match Mod");
+        Text title = Text.literal(screenWidth >= 560 ? "Chocolate Server TaCZ Match Mod" : "CSTMM");
         context.drawText(textRenderer, title, 20, 16, accent, true);
 
         // 侧边栏
         context.fill(0, HEADER_HEIGHT, SIDEBAR_WIDTH, screenHeight, 0xCC1A1A1A);
         context.fill(SIDEBAR_WIDTH, HEADER_HEIGHT, SIDEBAR_WIDTH + 1, screenHeight, 0x44FFFFFF);
 
+        // 侧边栏标签滚动：高度不足时按偏移逐帧重定位标签按钮（滚出可视区的按钮隐藏，防画到标题栏上）
+        int sidebarContentH = sidebarTabWidgets.size() * 34 - 6;
+        int sidebarVisibleH = screenHeight - HEADER_HEIGHT - 10;
+        sidebarMaxScroll = Math.max(0, sidebarContentH - sidebarVisibleH);
+        if (sidebarScrollOffset > sidebarMaxScroll) sidebarScrollOffset = sidebarMaxScroll;
+        if (sidebarScrollOffset < 0) sidebarScrollOffset = 0;
+        for (int i = 0; i < sidebarTabWidgets.size(); i++) {
+            ButtonWidget tabWidget = sidebarTabWidgets.get(i);
+            int tabY = HEADER_HEIGHT + 10 + i * 34 - sidebarScrollOffset;
+            tabWidget.setY(tabY);
+            tabWidget.visible = tabY >= HEADER_HEIGHT && tabY < screenHeight;
+        }
+
         // 侧边栏主题色标记：按按钮实际索引定位（修复"关于"页黄条错位：tab id 4 ≠ 按钮索引 3），
-        // 切换时向目标位置滑动而非直接跳变
-        float markerTarget = markerTargetY();
+        // 切换时向目标位置滑动而非直接跳变；随标签栏滚动同步偏移
+        float markerTarget = markerTargetY() - sidebarScrollOffset;
         markerY += (markerTarget - markerY) * Math.min(1f, delta * 0.25f);
         int markerTop = Math.round(markerY);
+        // 选中标签被滚出视野时标记钉在侧边栏上下边缘，不越界画到标题栏/窗口外
+        markerTop = Math.max(HEADER_HEIGHT, Math.min(markerTop, screenHeight - 28));
         context.fill(2, markerTop, 6, markerTop + 28, accent);
 
         int contentX = SIDEBAR_WIDTH + 20;
@@ -322,6 +349,9 @@ public class MatchMenuScreen extends Screen {
 
         // 调用 super.render 绘制按钮（不绘制背景）
         super.render(context, mouseX, mouseY, delta);
+
+        // 右窗口上侧 Toast 提示栏（运行时通知，如资源缓存失败；最后绘制保证浮于内容与控件之上）
+        ToastManager.renderToasts(context, textRenderer, screenWidth - 10, HEADER_HEIGHT + 12, accent, screenWidth / 3);
     }
 
     /** 服务端弹窗：居中对话框 + 确定按钮；打开期间吞掉全部鼠标点击 */
@@ -367,20 +397,35 @@ public class MatchMenuScreen extends Screen {
 
     /** 欢迎页：纯本地绘制，无网络交互；按键提示实时读键位绑定，地图数量来自 ConfigDataCache */
     private void drawWelcome(DrawContext context, int x, int y, int width, int height) {
-        // 页面标题跟随主题色（个性化页设置）
-        context.drawText(textRenderer, "欢迎使用 Chocolate Server TaCZ Match Mod", x + 20, y + 30,
-                ClientConfig.getThemeColorArgb(), true);
-        context.drawText(textRenderer, "§7这是一个为 Chocolate Server TaCZ Subserver设计的 PvP 对战系统", x + 20, y + 60, 0xAAAAAA, true);
+        // 页面标题跟随主题色（个性化页设置）；长行自动换行（窄窗口不溢出右边缘）
+        int wy = y + 30;
+        wy = drawWrapped(context, "欢迎使用 Chocolate Server TaCZ Match Mod", x + 20, wy,
+                ClientConfig.getThemeColorArgb(), width) + 14;
+        wy = drawWrapped(context, "§7这是一个为 Chocolate Server TaCZ Subserver设计的 PvP 对战系统",
+                x + 20, wy, 0xAAAAAA, width) + 14;
         // 按键提示实时读取当前键位绑定（玩家改键后提示随之变化，不再硬编码 ; 和 '）
         String menuKey = CstmmClient.keyOpenMenu.getBoundKeyLocalizedText().getString();
         String shopKey = CstmmClient.keyOpenShop.getBoundKeyLocalizedText().getString();
-        context.drawText(textRenderer, "§7使用 §e" + menuKey + " §7打开菜单，§e" + shopKey + " §7打开商店", x + 20, y + 80, 0xAAAAAA, true);
+        wy = drawWrapped(context, "§7使用 §e" + menuKey + " §7打开菜单，§e" + shopKey + " §7打开商店",
+                x + 20, wy, 0xAAAAAA, width) + 14;
         // 快速匹配入口只是队列，不计入地图数量
         int enabledMaps = 0;
         for (MapConfig m : ConfigDataCache.getInstance().getMaps()) {
             if (m.isEnabled()) enabledMaps++;
         }
-        context.drawText(textRenderer, "§a当前可用地图: §f" + enabledMaps + " 张", x + 20, y + 110, 0xFFFFFF, true);
+        drawWrapped(context, "§a当前可用地图: §f" + enabledMaps + " 张", x + 20, wy, 0xFFFFFF, width);
+    }
+
+    /**
+     * 绘制自动换行的文字（窄窗口长行换行而非截断）。
+     * @return 绘制结束的 Y（最后一行底部 + 行高）
+     */
+    private int drawWrapped(DrawContext context, String text, int x, int y, int color, int width) {
+        for (net.minecraft.text.OrderedText line : textRenderer.wrapLines(Text.literal(text), Math.max(20, width - 40))) {
+            context.drawText(textRenderer, line, x, y, color, true);
+            y += 10;
+        }
+        return y;
     }
 
     /** 匹配页：绘制地图卡片网格（数据源 loadMaps）；滚动偏移仅影响渲染起点，点击命中检测见 mouseClicked（与渲染共用布局常量） */
@@ -395,23 +440,24 @@ public class MatchMenuScreen extends Screen {
         int cardsPerRow = getCardsPerRow();
         int startX = CARDS_START_X;
         int startY = CARDS_START_Y - scrollOffset;
+        int cardW = cardWidth();
 
         // 裁剪到卡片内容区，防止卡片画出内容区底部
         context.enableScissor(x, y, x + width, y + height);
         for (int i = 0; i < mapCards.size(); i++) {
             int row = i / cardsPerRow;
             int col = i % cardsPerRow;
-            int cardX = startX + col * (CARD_WIDTH + CARD_SPACING);
+            int cardX = startX + col * (cardW + CARD_SPACING);
             int cardY = startY + row * (CARD_HEIGHT + CARD_SPACING);
 
             MapCardData card = mapCards.get(i);
             int bgColor = 0xCC2A2A2A;
-            context.fill(cardX, cardY, cardX + CARD_WIDTH, cardY + CARD_HEIGHT, bgColor);
-            context.drawBorder(cardX, cardY, CARD_WIDTH, CARD_HEIGHT, 0x44FFFFFF);
+            context.fill(cardX, cardY, cardX + cardW, cardY + CARD_HEIGHT, bgColor);
+            context.drawBorder(cardX, cardY, cardW, CARD_HEIGHT, 0x44FFFFFF);
 
             // 卡片背景：等比裁剪铺满（cover）；快速匹配用内置 quick.png，其余用配置的 Base64/URL 图，均无则纯色兜底
             int bgX = cardX + 2, bgY = cardY + 2;
-            int bgW = CARD_WIDTH - 4, bgH = CARD_HEIGHT - 4;
+            int bgW = cardW - 4, bgH = CARD_HEIGHT - 4;
             CardTexture tex = QUICK_CARD_ID.equals(card.id) ? getQuickCardTexture()
                     : cn.woshiikun_1145.mcmod.choco.cstmm.client.util.UrlImageCache.resolveBackgroundTexture(card.backgroundBase64);
             if (tex != null) {
@@ -434,7 +480,7 @@ public class MatchMenuScreen extends Screen {
             }
 
             // 90% 不透明度灰色遮罩：压暗背景图，保证文字可读（层级：背景图 < 遮罩 < 文字）
-            context.fill(cardX, cardY, cardX + CARD_WIDTH, cardY + CARD_HEIGHT, 0xE6808080);
+            context.fill(cardX, cardY, cardX + cardW, cardY + CARD_HEIGHT, 0xE6808080);
 
             // 卡片名跟随主题色（个性化页设置）
             Text nameText = Text.literal(card.displayName);
@@ -451,11 +497,11 @@ public class MatchMenuScreen extends Screen {
                     cardY + CARD_HEIGHT / 2 + 10,
                     0xAAAAAA, true);
 
-            boolean hovered = mouseX >= cardX && mouseX <= cardX + CARD_WIDTH &&
+            boolean hovered = mouseX >= cardX && mouseX <= cardX + cardW &&
                     mouseY >= cardY && mouseY <= cardY + CARD_HEIGHT;
             if (hovered) {
-                context.fill(cardX, cardY, cardX + CARD_WIDTH, cardY + CARD_HEIGHT, 0x22FFFFFF);
-                context.drawText(textRenderer, "§e点击加入", cardX + CARD_WIDTH - 60, cardY + 8, 0xFFFFAA, true);
+                context.fill(cardX, cardY, cardX + cardW, cardY + CARD_HEIGHT, 0x22FFFFFF);
+                context.drawText(textRenderer, "§e点击加入", cardX + cardW - 60, cardY + 8, 0xFFFFAA, true);
             }
         }
         context.disableScissor();
@@ -463,7 +509,12 @@ public class MatchMenuScreen extends Screen {
 
     /** 卡片每行数量（渲染、点击、滚动共用同一公式，避免三处不一致） */
     private int getCardsPerRow() {
-        return Math.max(1, (this.width - SIDEBAR_WIDTH - 50) / (CARD_WIDTH + CARD_SPACING));
+        return Math.max(1, (this.width - SIDEBAR_WIDTH - 50) / (cardWidth() + CARD_SPACING));
+    }
+
+    /** 卡片自适应宽度：窄内容区压缩卡片（背景 cover 裁剪任意比例不失真），渲染/点击/滚动共用 */
+    private int cardWidth() {
+        return Math.max(140, Math.min(CARD_WIDTH, this.width - SIDEBAR_WIDTH - 50));
     }
 
     @Override
@@ -507,6 +558,7 @@ public class MatchMenuScreen extends Screen {
             int x = CARDS_START_X;
             int y = CARDS_START_Y - scrollOffset;
             int cardsPerRow = getCardsPerRow();
+            int cardW = cardWidth();
             // 与渲染裁剪区一致的内容区边界（contentY = HEADER_HEIGHT + 10，bottom = height - 10）
             int clipLeft = SIDEBAR_WIDTH + 20;
             int clipRight = this.width - 10;
@@ -516,11 +568,11 @@ public class MatchMenuScreen extends Screen {
             for (int i = 0; i < mapCards.size(); i++) {
                 int row = i / cardsPerRow;
                 int col = i % cardsPerRow;
-                int cardX = x + col * (CARD_WIDTH + CARD_SPACING);
+                int cardX = x + col * (cardW + CARD_SPACING);
                 int cardY = y + row * (CARD_HEIGHT + CARD_SPACING);
                 // 只对内容区内可见的部分做命中检测，避免点到已被滚出裁剪区的卡片
                 int visLeft = Math.max(cardX, clipLeft);
-                int visRight = Math.min(cardX + CARD_WIDTH, clipRight);
+                int visRight = Math.min(cardX + cardW, clipRight);
                 int visTop = Math.max(cardY, clipTop);
                 int visBottom = Math.min(cardY + CARD_HEIGHT, clipBottom);
                 if (visRight <= visLeft || visBottom <= visTop) continue;
@@ -554,18 +606,23 @@ public class MatchMenuScreen extends Screen {
                 selectedMode
         );
         ClientPlayNetworking.send(payload);
-        close();
+        // 已在队列/游戏中时再次加入：保持界面打开（服务端会回发 Toast 提示，不再弹窗打断）；
+        // 空闲时正常加入 → 关闭界面等待结果
+        if (!QueueStatusCache.getInstance().get().own.inQueue) {
+            close();
+        }
         // 不在客户端发"已加入"提示：入队结果以服务端回复为准（服务端成功入队会发确认，
         // 已在队列/对局中被拒也会发原因），避免客户端乐观提示与服务端拒绝消息自相矛盾
     }
 
-    /** 关于页渲染：纯静态文字，交互按钮（仓库/报告问题/彩蛋）在 init 中创建 */
+    /** 关于页渲染：纯静态文字（自动换行），交互按钮（仓库/报告问题/彩蛋）在 init 中创建 */
     private void drawAbout(DrawContext context, int x, int y, int width, int height) {
-        // 页面标题跟随主题色（个性化页设置）
-        context.drawText(textRenderer, "ℹ 关于", x + 20, y + 20, ClientConfig.getThemeColorArgb(), true);
-        context.drawText(textRenderer, "§7Chocolate Server TaCZ Match Mod", x + 20, y + 50, 0xAAAAAA, true);
-        context.drawText(textRenderer, "§7版本: " + ClientHandshakeState.getClientVersion(), x + 20, y + 70, 0xAAAAAA, true);
-        context.drawText(textRenderer, "§7作者: woshiikun_1145", x + 20, y + 90, 0xAAAAAA, true);
+        // 页面标题跟随主题色（个性化页设置）；长行自动换行
+        int ay = y + 20;
+        ay = drawWrapped(context, "ℹ 关于", x + 20, ay, ClientConfig.getThemeColorArgb(), width) + 16;
+        ay = drawWrapped(context, "§7Chocolate Server TaCZ Match Mod", x + 20, ay, 0xAAAAAA, width) + 4;
+        ay = drawWrapped(context, "§7版本: " + ClientHandshakeState.getClientVersion(), x + 20, ay, 0xAAAAAA, width) + 4;
+        drawWrapped(context, "§7作者: woshiikun_1145", x + 20, ay, 0xAAAAAA, width);
 
         // 按钮位于文字下方（见 init 中 aboutBtnX/y 布局）
     }
@@ -664,8 +721,25 @@ public class MatchMenuScreen extends Screen {
         this.remove(field);
     }
 
+    /** 面板桥接：添加滑块等通用控件（Screen.addDrawableChild 是 protected） */
+    public net.minecraft.client.gui.widget.ClickableWidget addPanelWidget(
+            net.minecraft.client.gui.widget.ClickableWidget widget) {
+        return this.addDrawableChild(widget);
+    }
+
+    /** 面板桥接：物理摘除滑块等通用控件 */
+    public void removePanelWidget(net.minecraft.client.gui.widget.ClickableWidget widget) {
+        this.remove(widget);
+    }
+
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        // 悬停侧边栏时优先滚动标签栏（小窗口高度不足时上下滚动标签）
+        if (mouseX <= SIDEBAR_WIDTH && mouseY >= HEADER_HEIGHT && sidebarMaxScroll > 0) {
+            sidebarScrollOffset = (int) Math.max(0,
+                    Math.min(sidebarScrollOffset - verticalAmount * 20, sidebarMaxScroll));
+            return true;
+        }
         if (selectedTab == 2) {
             queuePanel.scroll(verticalAmount);
             return true;
@@ -676,6 +750,10 @@ public class MatchMenuScreen extends Screen {
         }
         if (selectedTab == 4) {
             profilePanel.scroll(verticalAmount);
+            return true;
+        }
+        if (selectedTab == 6) {
+            personalizePanel.scroll(verticalAmount);
             return true;
         }
         if (selectedTab == 1) {

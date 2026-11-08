@@ -226,9 +226,13 @@ public class ProfileTabPanel {
         context.drawText(tr, "§7#", innerL, headY, 0xFFFFFF, true);
         context.drawText(tr, "§7玩家", c.nameStart, headY, 0xFFFFFF, true);
         context.drawText(tr, "§7击杀", c.kilX - tr.getWidth("击杀"), headY, 0xFFFFFF, true);
-        context.drawText(tr, "§7死亡", c.dthX - tr.getWidth("死亡"), headY, 0xFFFFFF, true);
+        if (c.showDeaths) {
+            context.drawText(tr, "§7死亡", c.dthX - tr.getWidth("死亡"), headY, 0xFFFFFF, true);
+        }
         context.drawText(tr, "§7K/D", c.kdX - tr.getWidth("K/D"), headY, 0xFFFFFF, true);
-        context.drawText(tr, "§7场次", c.matX - tr.getWidth("场次"), headY, 0xFFFFFF, true);
+        if (c.showMatches) {
+            context.drawText(tr, "§7场次", c.matX - tr.getWidth("场次"), headY, 0xFFFFFF, true);
+        }
         context.drawText(tr, "§7胜率", c.winX - tr.getWidth("胜率"), headY, 0xFFFFFF, true);
         context.fill(innerL, headY + 12, innerR, headY + 13, BORDER);
 
@@ -284,12 +288,16 @@ public class ProfileTabPanel {
                     c.nameStart, rowY + 4, 0xFFFFFF, true);
             context.drawText(tr, "§f" + row.kills(), c.kilX - tr.getWidth(String.valueOf(row.kills())),
                     rowY + 4, 0xFFFFFF, true);
-            context.drawText(tr, "§f" + row.deaths(), c.dthX - tr.getWidth(String.valueOf(row.deaths())),
-                    rowY + 4, 0xFFFFFF, true);
+            if (c.showDeaths) {
+                context.drawText(tr, "§f" + row.deaths(), c.dthX - tr.getWidth(String.valueOf(row.deaths())),
+                        rowY + 4, 0xFFFFFF, true);
+            }
             context.drawText(tr, "§e" + String.format("%.2f", row.kd()),
                     c.kdX - tr.getWidth(String.format("%.2f", row.kd())), rowY + 4, 0xFFFFFF, true);
-            context.drawText(tr, "§f" + row.matches(), c.matX - tr.getWidth(String.valueOf(row.matches())),
-                    rowY + 4, 0xFFFFFF, true);
+            if (c.showMatches) {
+                context.drawText(tr, "§f" + row.matches(), c.matX - tr.getWidth(String.valueOf(row.matches())),
+                        rowY + 4, 0xFFFFFF, true);
+            }
             context.drawText(tr, "§b" + String.format("%.1f", row.winRate()) + "%",
                     c.winX - tr.getWidth(String.format("%.1f", row.winRate()) + "%"),
                     rowY + 4, 0xFFFFFF, true);
@@ -330,8 +338,13 @@ public class ProfileTabPanel {
         }
     }
 
-    /** 排行列右对齐锚点：由内容区右缘向左依次为 胜率/场次/K/D/死亡/击杀，玩家名占剩余宽度 */
+    /**
+     * 排行列右对齐锚点：由内容区右缘向左依次为 胜率/场次/K/D/死亡/击杀，玩家名占剩余宽度；
+     * 窄内容区依次隐藏 场次/死亡 列，保证剩余列不越过左缘被裁
+     */
     private static final class Cols {
+        final boolean showDeaths;
+        final boolean showMatches;
         final int winX;
         final int matX;
         final int kdX;
@@ -341,13 +354,21 @@ public class ProfileTabPanel {
         final int nameEnd;
 
         Cols(int innerL, int innerR) {
-            this.winX = innerR;
-            this.matX = winX - 60;
-            this.kdX = matX - 58;
-            this.dthX = kdX - 62;
-            this.kilX = dthX - 60;
-            this.nameStart = innerL + 34;
-            this.nameEnd = Math.max(nameStart + 40, kilX - 66);
+            int avail = innerR - innerL;
+            this.showDeaths = avail >= 350;
+            this.showMatches = avail >= 400;
+            int cursor = innerR;
+            this.winX = cursor;
+            cursor -= 44;
+            this.matX = cursor;
+            if (showMatches) cursor -= 50;
+            this.kdX = cursor;
+            cursor -= 48;
+            this.dthX = cursor;
+            if (showDeaths) cursor -= 54;
+            this.kilX = cursor;
+            this.nameStart = innerL + 30;
+            this.nameEnd = Math.max(nameStart + 40, kilX - 50);
         }
     }
 }

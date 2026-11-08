@@ -1,12 +1,12 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm.client;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.ToastManager;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.text.Text;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.HandshakeC2SPayload;
 
 /**
@@ -49,6 +49,7 @@ public class ClientHandshakeState {
         timeoutNotified = false;
         handshakeMessageShown = false;
         joinTime = System.currentTimeMillis();
+        ToastManager.show("§e[CSTMM] 正在握手...", 8000);
     }
 
     /**
@@ -84,16 +85,14 @@ public class ClientHandshakeState {
         // 去重：服务端重试握手会重复触发本回调，结果提示只发一次
         if (handshakeMessageShown) return;
 
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null) return;
-
+        // 结果提示替换"正在握手..."进行中提示
+        ToastManager.dismiss("§e[CSTMM] 正在握手...");
         if (compatible) {
             handshakeMessageShown = true;
-            client.player.sendMessage(Text.literal("§a[CSTMM] 与服务端握手成功（版本" + serverVersion + "），功能已启用"), false);
+            ToastManager.show("§a[CSTMM] 与服务端握手成功（版本" + serverVersion + "），功能已启用");
         } else {
             handshakeMessageShown = true;
-            client.player.sendMessage(Text.literal(
-                    "§c[CSTMM] 与服务端握手失败：版本不匹配（服务端 v" + serverVersion + "），功能已禁用"), false);
+            ToastManager.show("§c[CSTMM] 与服务端握手失败：版本不匹配（服务端 v" + serverVersion + "），功能已禁用", 8000);
         }
     }
 
@@ -107,8 +106,7 @@ public class ClientHandshakeState {
 
         if (System.currentTimeMillis() - joinTime > TIMEOUT_MS) {
             timeoutNotified = true;
-            client.player.sendMessage(Text.literal(
-                    "§c[CSTMM] 未与服务端握手成功，功能已禁用（服务端可能未安装本模组或版本不匹配）"), false);
+            ToastManager.show("§c[CSTMM] 未与服务端握手成功，功能已禁用（服务端可能未安装本模组或版本不匹配）", 8000);
         }
     }
 

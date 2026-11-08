@@ -21,6 +21,8 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.data.PlayerProfile;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.CommandHintCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import cn.woshiikun_1145.mcmod.choco.cstmm.network.payload.*;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.music.MvpMusicIndex;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.ToastManager;
 import cn.woshiikun_1145.mcmod.choco.cstmm.util.BlockPosAdapter;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -164,6 +166,7 @@ public class ClientNetworkHandler {
             }
             // 哈希不一致/无缓存：清掉脏的配置本体（保留刚更新的 inUseMaps），请求全量
             cache.clearConfigBody();
+            ToastManager.show("§e[CSTMM] 正在同步配置...", 8000);
             ClientPlayNetworking.send(new RequestConfigSyncPayload(""));
         }));
 
@@ -171,6 +174,7 @@ public class ClientNetworkHandler {
         ClientPlayNetworking.registerGlobalReceiver(OpenConfigScreenPayload.ID, (payload, context) -> context.client().execute(() -> {
             MinecraftClient client = context.client();
             if (!(client.currentScreen instanceof ConfigScreen)) {
+                ToastManager.show("§a正在打开配置界面...");
                 client.setScreen(new ConfigScreen());
             }
         }));
@@ -233,6 +237,8 @@ public class ClientNetworkHandler {
             ConfigDiskCache.onJoin(serverKey);
             // 切换徽标磁盘缓存子目录（badges/<host_port>，按服务器隔离）后再上报已有徽标
             BadgeCache.onServer(serverKey);
+            // 切换 MVP 音乐缓存子目录（mvp_music/<host_port>/{music,cover}，按服务器隔离）
+            cn.woshiikun_1145.mcmod.choco.cstmm.client.music.MvpMusicCache.onServer(serverKey);
             // 徽标磁盘缓存上报：告知服务端本机已有的徽标 id，服务端跳过分片重发（省带宽）
             List<String> knownBadges = BadgeCache.diskBadgeIds();
             if (!knownBadges.isEmpty()) {
@@ -259,6 +265,25 @@ public class ClientNetworkHandler {
         // ========== 弹窗通知接收（匹配菜单/配置界面内嵌弹窗，其他情况全局弹窗界面承载） ==========
         ClientPlayNetworking.registerGlobalReceiver(PopupPayload.ID, (payload, context) -> context.client().execute(() -> {
             MinecraftClient client = context.client();
+            // 服务端 "TOAST:" 前缀消息 → 顶部提示栏（离队提示等；前缀在此剥离）
+            if (payload.message() != null && payload.message().startsWith("TOAST:")) {
+                ToastManager.show(payload.message().substring(6));
+                return;
+            }
+            // 服务端 "HUDTEST:" 调试通道 → HUD 横幅调试开关（/cstmm debug hud_test，仅影响本客户端）
+            if (payload.message() != null && payload.message().startsWith("HUDTEST:")) {
+                String[] parts = payload.message().substring(8).split(":");
+                if (parts.length == 2) {
+                    boolean enable = parts[1].equalsIgnoreCase("t") || parts[1].equalsIgnoreCase("true");
+                    HudOverlay.setDebugBanner(parts[0], enable);
+                }
+                return;
+            }
+            // 队列重复加入提示改走 Toast（不打断操作；配合客户端"已在队列时再次加入不关闭界面"）
+            if (payload.message() != null && payload.message().contains("你已在队列或游戏中")) {
+                ToastManager.show(payload.message());
+                return;
+            }
             if (client.currentScreen instanceof MatchMenuScreen screen) {
                 screen.showPopup(payload.message());
             } else if (client.currentScreen instanceof ConfigScreen screen) {
@@ -273,6 +298,12 @@ public class ClientNetworkHandler {
         // ========== 队列状态接收 ==========
         ClientPlayNetworking.registerGlobalReceiver(QueueStatusPayload.ID, (payload, context) -> context.client().execute(() ->
                 QueueStatusCache.getInstance().update(payload.json())));
+
+        // ========== MVP 音乐通知接收 ==========
+        // 【作用】收到本回合/本场 MVP 与其选择的音乐名：延迟后加载曲目清单、展示提示并播放
+        ClientPlayNetworking.registerGlobalReceiver(MvpMusicPayload.ID, (payload, context) -> context.client().execute(() ->
+                cn.woshiikun_1145.mcmod.choco.cstmm.client.music.MvpMusicClientHandler.onPayload(
+                        payload.mvpName(), payload.musicName(), payload.delayMs(), payload.bombMode())));
 
         // ========== 战队名提示（Tab 补全数据源） ==========
         // /cstmm data get|edit|delete clan 的建议 provider 在客户端执行，战队数据只在服务端，
@@ -312,6 +343,8 @@ public class ClientNetworkHandler {
             CommandHintCache.clear();
             cn.woshiikun_1145.mcmod.choco.cstmm.client.util.UrlImageCache.clear();
             cn.woshiikun_1145.mcmod.choco.cstmm.client.util.FaceImageCache.clear();
+            // 停止 MVP 音乐、清除 HUD 提示并清空曲目清单（磁盘缓存保留，下次连接按需加载）
+            cn.woshiikun_1145.mcmod.choco.cstmm.client.music.MvpMusicClientHandler.onDisconnect();
         });
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> ClientHandshakeState.tick(client));
@@ -361,6 +394,14 @@ public class ClientNetworkHandler {
             }
 
             Cstmm.LOGGER.debug("[CSTMM - ClientNetwork] Config synced: {} maps", maps.size());
+
+            // 同步完成提示（替换"正在同步配置..."进行中提示）
+            ToastManager.dismiss("§e[CSTMM] 正在同步配置...");
+            ToastManager.show("§a配置同步成功。");
+
+            // 配置就绪即预拉取 MVP 音乐清单（清单加载完成后自动预下载全部曲目资源），
+            // 不等主菜单打开/玩家点击——ensureLoaded 对同 URL 去重，配置更新换 URL 时自动重拉
+            MvpMusicIndex.ensureLoaded(global.getMvpMusicUrl());
 
             // 刷新匹配菜单
             if (MinecraftClient.getInstance().currentScreen instanceof MatchMenuScreen screen) {

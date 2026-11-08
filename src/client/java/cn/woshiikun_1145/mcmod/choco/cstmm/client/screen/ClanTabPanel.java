@@ -422,7 +422,8 @@ public class ClanTabPanel {
         TextRenderer tr = menu.font();
         // 遮罩
         context.fill(x, y, x + width, y + height, 0xC8000000);
-        int dw = 300, dh = 200;
+        // 对话框宽度自适应：窄内容区按剩余空间压缩（输入框等宽铺满随之收窄），不再溢出左右边缘
+        int dw = Math.min(300, width - 20), dh = 200;
         int dx = x + (width - dw) / 2;
         int dy = y + (height - dh) / 2;
         context.fill(dx, dy, dx + dw, dy + dh, 0xFF212121);

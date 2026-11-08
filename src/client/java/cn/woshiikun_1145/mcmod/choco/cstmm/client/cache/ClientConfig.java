@@ -29,6 +29,9 @@ public final class ClientConfig {
     /** 默认主题色（模组标志性橙色，6 位 hex RGB） */
     public static final String DEFAULT_THEME_COLOR = "FFAA00";
 
+    /** 模组声音命名空间（模组音效音量倍率只缩放该命名空间的 MC 音效） */
+    public static final String MOD_SOUND_NAMESPACE = "cstmm";
+
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     // 单例工具类，禁止实例化
@@ -37,6 +40,13 @@ public final class ClientConfig {
     // 内存态（懒加载后与磁盘一致）
     private static boolean loaded = false;
     private static String themeColor = DEFAULT_THEME_COLOR;
+    // MVP 音乐开关与音量（独立于游戏音量；0~4，1=100%）
+    private static boolean mvpMusicEnabled = true;
+    private static float mvpMusicVolume = 0.7f;
+    // 模组音效音量倍率（作用于全部 cstmm 命名空间 MC 音效，经 SoundSystemMixin 缩放；0~4，1=100%）
+    private static float soundEffectsVolume = 1.0f;
+    // MVP 资源下载线程数（1~32，默认 3；可在个性化页"控制"区调整）
+    private static int downloadThreads = 3;
 
     // 磁盘文件：<config>/cstmm/client/config.json
     private static Path file() {
@@ -53,6 +63,10 @@ public final class ClientConfig {
             Data d = GSON.fromJson(Files.readString(f, StandardCharsets.UTF_8), Data.class);
             if (d == null) return;
             themeColor = validHex(d.themeColor) ? d.themeColor.toUpperCase() : DEFAULT_THEME_COLOR;
+            if (d.mvpMusicEnabled != null) mvpMusicEnabled = d.mvpMusicEnabled;
+            if (d.mvpMusicVolume != null) mvpMusicVolume = clampVolume(d.mvpMusicVolume);
+            if (d.soundEffectsVolume != null) soundEffectsVolume = clampVolume(d.soundEffectsVolume);
+            if (d.downloadThreads != null) downloadThreads = clampThreads(d.downloadThreads);
         } catch (Exception e) {
             Cstmm.LOGGER.warn("[CSTMM - ClientConfig] Failed to load client config, using defaults: {}", e.toString());
         }
@@ -84,6 +98,68 @@ public final class ClientConfig {
     // 序列化载体（字段名即 JSON 键）
     private static class Data {
         String themeColor = ClientConfig.themeColor;
+        Boolean mvpMusicEnabled = ClientConfig.mvpMusicEnabled;
+        Float mvpMusicVolume = ClientConfig.mvpMusicVolume;
+        Float soundEffectsVolume = ClientConfig.soundEffectsVolume;
+        Integer downloadThreads = ClientConfig.downloadThreads;
+    }
+
+    // 音量钳制在 0~4（100%=1，最高 400%）
+    private static float clampVolume(float v) {
+        return v < 0 ? 0 : v > 4 ? 4 : v;
+    }
+
+    /** MVP 音乐是否启用（关闭后收到 MVP 通知也不播放） */
+    public static boolean isMvpMusicEnabled() {
+        loadIfNeed();
+        return mvpMusicEnabled;
+    }
+
+    public static void setMvpMusicEnabled(boolean enabled) {
+        loadIfNeed();
+        mvpMusicEnabled = enabled;
+        save();
+    }
+
+    /** MVP 音乐音量倍率（0~4，1=100%，独立于游戏音量） */
+    public static float getMvpMusicVolume() {
+        loadIfNeed();
+        return mvpMusicVolume;
+    }
+
+    public static void setMvpMusicVolume(float volume) {
+        loadIfNeed();
+        mvpMusicVolume = clampVolume(volume);
+        save();
+    }
+
+    /** 模组音效音量倍率（0~4，1=100%；缩放全部 cstmm 命名空间 MC 音效） */
+    public static float getSoundEffectsVolume() {
+        loadIfNeed();
+        return soundEffectsVolume;
+    }
+
+    public static void setSoundEffectsVolume(float volume) {
+        loadIfNeed();
+        soundEffectsVolume = clampVolume(volume);
+        save();
+    }
+
+    // 下载线程数钳制在 1~32
+    private static int clampThreads(int n) {
+        return n < 1 ? 1 : n > 32 ? 32 : n;
+    }
+
+    /** MVP 资源下载线程数（1~32，默认 3） */
+    public static int getDownloadThreads() {
+        loadIfNeed();
+        return downloadThreads;
+    }
+
+    public static void setDownloadThreads(int threads) {
+        loadIfNeed();
+        downloadThreads = clampThreads(threads);
+        save();
     }
 
     /**

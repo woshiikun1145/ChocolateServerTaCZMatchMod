@@ -107,11 +107,11 @@ final class ConfigScreenSupport {
     }
 
     /**
-     * 【作用】保存前校验爆破图包点配置（普通图跳过）：
+     * 【作用】保存前校验爆破图包点配置（死亡竞赛图跳过）：
      *         ① 爆破图必须至少配置 1 个包点（否则 T 方无处安放 C4，对局无法进行）；
      *         ② 每个包点数据不能为 null；
      *         ③ 包点名称不能重复（空白名按 Bombsite.getName 回退为 "A"，同样参与查重）；
-     *         ④ 坐标不能停留在默认 0/0/0（视为未填写的占位包点）。
+     *         ④ 两角点均为空值（未填写）才报错；仅填一角点不拦截。
      * 【被谁使用】ConfigScreen.saveConfig（保存前拦截并弹窗提示）。
      * @return 错误信息，全部合法返回 null
      */
@@ -133,8 +133,8 @@ final class ConfigScreenSupport {
                 if (!names.add(name.toLowerCase(Locale.ROOT))) {
                     return "地图 §f" + label + "§r 的包点名称 \"" + name + "\" 重复，请保证每个包点名称唯一！";
                 }
-                if (site.getX() == 0 && site.getY() == 0 && site.getZ() == 0) {
-                    return "地图 §f" + label + "§r 的包点 \"" + name + "\" 坐标仍为 0/0/0（未配置），请填写真实包点坐标！";
+                if (site.isUnconfigured()) {
+                    return "地图 §f" + label + "§r 的包点 \"" + name + "\" 两角点均为空值（未配置），请填写包点角点坐标！";
                 }
             }
         }

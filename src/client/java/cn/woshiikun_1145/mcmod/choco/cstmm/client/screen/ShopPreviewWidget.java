@@ -16,9 +16,9 @@ import java.util.function.Supplier;
 /**
  * 【作用】购买页实时预览控件（配置界面 → 商店分类列下方）：
  *         按当前编辑中的地图配置即时绘制 5 列网格——爆破图按队伍分开预览：CT 视角第 1 列显示
- *         拆弹装备购买项，T 视角第 1 列为空列（与购买页一致）；普通图为 5 列分类网格。
+ *         拆弹装备购买项，T 视角第 1 列为空列（与购买页一致）；死亡竞赛图为 5 列分类网格。
  *         列头名称/图标与商品格"名称 + 价格"随编辑实时刷新。
- * 【被谁使用】ConfigScreen（普通图分类列编辑器、爆破图 T/CT 分类列编辑器末尾加入滚动区）。
+ * 【被谁使用】ConfigScreen（死亡竞赛图分类列编辑器、爆破图 T/CT 分类列编辑器末尾加入滚动区）。
  */
 final class ShopPreviewWidget implements Drawable {
     // 每帧从编辑中的 MapConfig 取配置（闭包引用，保证实时性）
@@ -63,7 +63,7 @@ final class ShopPreviewWidget implements Drawable {
 
         int bodyTop = y;
         int bodyBottom = y + height;
-        // 爆破图按预览视角的队伍取列（与购买页下发一致）；普通图取通用分类列
+        // 爆破图按预览视角的队伍取列（与购买页下发一致）；死亡竞赛图取通用分类列
         List<MapConfig.ShopColumn> cols = bomb
                 ? map.getBombShopColumnsForTeam(tTeam) : map.getShopColumns();
 

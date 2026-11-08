@@ -11,7 +11,7 @@ import java.util.List;
  * 商店数据缓存
  * 保存最近一次 ShopDataS2CPayload 下发的数据（购买资格 + 购买页网格布局 + 爆破经济信息），
  * 供 ShopScreen 读取。列结构：爆破图 columns[0] = "装备"列（拆弹装备购买项由 hasDefuser 决定，
- * T 方空列），columns[1..4] = 分类列；普通图 columns[0..4] = 分类列。
+ * T 方空列），columns[1..4] = 分类列；死亡竞赛图 columns[0..4] = 分类列。
  * 【被谁使用】ClientNetworkHandler 的 ShopDataS2CPayload 接收器写入、DISCONNECT 回调清空；
  *             ShopScreen#init/render 读取渲染商城界面（5 列网格布局/余额/购买窗口）。
  */

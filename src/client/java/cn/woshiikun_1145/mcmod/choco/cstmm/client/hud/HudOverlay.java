@@ -2,6 +2,8 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.client.hud;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.ClientHandshakeState;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.BadgeCache;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.music.MvpMusicCache;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.music.MvpMusicIndex;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.Base64ImageDecoder;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.FaceImageCache;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.UrlImageCache;
@@ -57,7 +59,7 @@ public class HudOverlay implements HudRenderCallback {
     // 本局花名册（解析自 hud_data.rosterJson，按服务端顺序：红队在前蓝队在后）
     private static volatile List<RosterEntry> roster = List.of();
 
-    // ==================== 爆破回合状态（解析自 hud_data.extraJson，普通对局全为默认） ====================
+    // ==================== 爆破回合状态（解析自 hud_data.extraJson，死亡竞赛对局全为默认） ====================
     // 是否爆破对局
     private static volatile boolean bombMode = false;
     // 队伍回合胜场（1=红队 2=蓝队，跟随队伍不随攻防转换）
@@ -75,24 +77,52 @@ public class HudOverlay implements HudRenderCallback {
     // 拆弹进行中（CT 正在拆除炸弹的警告）
     private static volatile boolean defuseInProgress = false;
 
+    // ==================== 胜利横幅 / MVP 音乐横幅（顶部 HUD 下方，CS2 风格） ====================
+    // 胜利横幅：归属队伍(1/2, 0=无)/标题/副标题/截止时间戳（解析自 hud_data.extraJson）
+    private static volatile int bannerTeam = 0;
+    private static volatile String bannerText = "";
+    private static volatile String bannerSub = "";
+    private static volatile long bannerUntil = 0;
+    // MVP 音乐横幅：MVP 名字 / 音乐行（作者 - 曲名）/ 所选曲目（头像角标绘制其封面图标）/ 截止时间戳
+    private static volatile String mvpName = "";
+    private static volatile String mvpMusicLine = "";
+    private static volatile MvpMusicIndex.Track mvpTrack = null;
+    private static volatile long mvpHintUntil = 0;
+
+    // ==================== HUD 调试（/cstmm debug hud_test） ====================
+    // 非对局时显示横幅演示数据的调试开关（true=显示；经 PopupPayload 的 HUDTEST: 通道由服务端命令切换）
+    private static volatile boolean debugMvpBanner = false;
+    private static volatile boolean debugVictoryBanner = false;
+
+    /** 【作用】切换非对局横幅调试显示（/cstmm debug hud_test <mvp_banner|victory_banner> <t|f>）。仅客户端。 */
+    public static void setDebugBanner(String target, boolean enable) {
+        switch (target) {
+            case "mvp_banner" -> debugMvpBanner = enable;
+            case "victory_banner" -> debugVictoryBanner = enable;
+        }
+    }
+
     /**
      * 花名册单个玩家条目（解析自服务端 rosterJson）：
-     * uuid/名字/队伍(1红2蓝)/本局击杀/本局死亡/上一条命击杀/战队缩写/徽标引用/头像绑定/
+     * uuid/名字/队伍(1红2蓝)/本局击杀/本局死亡/上一条命击杀/战队缩写/战队全名/徽标引用/头像绑定/
      * 拆弹装备持有（爆破图 CT 专属，true=卡片显示拆弹器标记）。
      */
     private record RosterEntry(UUID uuid, String name, int team, int kills, int deaths,
-                               int lastLifeKills, String clanAbbr, String badge,
+                               int lastLifeKills, String clanAbbr, String clanName, String badge,
                                String avatarType, String avatarId, boolean defuseKit) {}
 
     // ==================== 布局常量（GUI 缩放坐标） ====================
     // 名字条高度
-    private static final int NAME_H = 11;
-    // 头像边长
-    private static final int AV = 40;
+    private static final int NAME_H = 8;
+    // 头像边长（原 40 的 2/3）
+    private static final int AV = 26;
     // 卡片宽（头像两侧各留 2px）
     private static final int CARD_W = AV + 4;
     // 卡片高（名字条 + 头像）
     private static final int CARD_H = NAME_H + AV;
+    // 中央计分板高度（与卡片高度解耦：卡片缩小为 2/3 后计分板保持原尺寸，
+    // 内部行坐标（比分 +33 / 存活 +44）按本高度布框，防止内容溢出背景）
+    private static final int SCOREBOARD_H = 52;
     // 卡片间距
     private static final int GAP = 3;
     // 中央计分板宽度
@@ -134,6 +164,16 @@ public class HudOverlay implements HudRenderCallback {
         MinecraftClient client = MinecraftClient.getInstance();
         // 【作用】按是否在对局中逐帧调整透明度，实现 HUD 淡入/淡出
         if (client.player == null || !inGame) {
+            // 【作用】非对局横幅调试（/cstmm debug hud_test t）：不淡出，仅绘制测试横幅（不画计分板/卡片）
+            if (client.player != null && (debugMvpBanner || debugVictoryBanner)) {
+                fadeAlpha = 1.0f;
+                TextRenderer debugTr = client.textRenderer;
+                int debugCenterX = client.getWindow().getScaledWidth() / 2;
+                int debugY = TOP_Y + SCOREBOARD_H + 2;
+                debugY = drawVictoryBanner(context, debugTr, debugCenterX, debugY);
+                drawMvpBanner(context, debugTr, debugCenterX, debugY);
+                return;
+            }
             // 不在游戏中，淡出
             if (fadeAlpha > 0) {
                 fadeAlpha = Math.max(0, fadeAlpha - 0.02f);
@@ -175,7 +215,7 @@ public class HudOverlay implements HudRenderCallback {
     private static void drawScoreboard(DrawContext context, TextRenderer tr, int centerX, boolean preparing) {
         // 背景板（半透明黑，与卡片同高，贴顶）
         int bgTop = TOP_Y - 1;
-        int bgBottom = TOP_Y + CARD_H + 1;
+        int bgBottom = TOP_Y + SCOREBOARD_H;
         context.fill(centerX - CENTER_W / 2, bgTop, centerX + CENTER_W / 2, bgBottom, applyFade(0xA6000000));
         context.drawBorder(centerX - CENTER_W / 2, bgTop, CENTER_W, bgBottom - bgTop, applyFade(0x55FFFFFF));
 
@@ -185,7 +225,7 @@ public class HudOverlay implements HudRenderCallback {
             drawScaledText(context, tr, mapDisplay, centerX, TOP_Y + 1, 0.75f, 0xFFAA00, true);
         }
 
-        // 第二行：倒计时（大数字；普通对局 >60s 白 → ≤60s 金 → ≤30s 红；
+        // 第二行：倒计时（大数字；死亡竞赛对局 >60s 白 → ≤60s 金 → ≤30s 红；
         //         爆破对局 C4 安放后切换为红色 C4 爆炸倒计时）
         if (remainingSeconds > 0 || preparing || (bombMode && bombPlanted)) {
             int t;
@@ -201,7 +241,7 @@ public class HudOverlay implements HudRenderCallback {
                     centerX, TOP_Y + 10, 1.5f, timeColor, true);
         }
 
-        // 第三行：比分——爆破对局显示回合比分（T 黄 / CT 蓝），普通对局显示击杀比分（领先亮色/落后暗色）
+        // 第三行：比分——爆破对局显示回合比分（T 黄 / CT 蓝），死亡竞赛对局显示击杀比分（领先亮色/落后暗色）
         String scoreText;
         if (bombMode) {
             int tWins = tTeam == 1 ? wins1 : wins2;
@@ -220,10 +260,103 @@ public class HudOverlay implements HudRenderCallback {
 
         // 第五行（计分板下方）：爆破状态提示（C4 已安放/拆弹警告/重连等待/购买窗口）
         drawBombStatusLine(context, tr, centerX);
+
+        // 第六行：胜利横幅（回合/整场结束限时显示）+ MVP 音乐横幅（CS2 风格，顶部 HUD 下方）
+        int bannerY = TOP_Y + SCOREBOARD_H + 2;
+        bannerY = drawVictoryBanner(context, tr, centerX, bannerY);
+        drawMvpBanner(context, tr, centerX, bannerY);
     }
 
     /**
-     * 【作用】爆破对局状态行（计分板下方居中，普通对局不显示）：
+     * 【作用】胜利横幅（回合/整场结束，CS2 风格）：深色底条 + "» 标题 «" + 副标题；
+     *         T 方金色调 / CT 方蓝色调（bannerTeam=0 时中性灰金）。
+     * @return 横幅底边 Y（供 MVP 横幅下移堆叠；未绘制时原样返回）
+     */
+    private static int drawVictoryBanner(DrawContext context, TextRenderer tr, int centerX, int y) {
+        // 调试模式（/cstmm debug hud_test victory_banner t）：真实横幅缺失/过期时显示演示数据
+        int team = bannerTeam;
+        String text = bannerText;
+        String sub = bannerSub;
+        if (team == 0 || text.isEmpty() || System.currentTimeMillis() > bannerUntil) {
+            if (!debugVictoryBanner) return y;
+            team = 1;
+            text = "T 胜利";
+            sub = "回合结束（演示）";
+        }
+        boolean tSide = team == tTeam;
+        int accent = applyFade(team == 0 ? 0xFFCCCCCC : tSide ? 0xFFFFD700 : 0xFF66AAFF);
+        int bg = applyFade(team == 0 ? 0x99222222 : tSide ? 0x99211506 : 0x990B1A2E);
+        int w = 170, h = 24;
+        int x = centerX - w / 2;
+        context.fill(x, y, x + w, y + h, bg);
+        context.drawBorder(x, y, w, h, applyFade(0x44FFFFFF));
+        drawScaledText(context, tr, "» §l" + text + "«", centerX, y + 2, 1.0f, accent, true);
+        drawScaledText(context, tr, "§8" + sub, centerX, y + 14, 0.75f, 0xFFFFFF, true);
+        return y + h + 2;
+    }
+
+    /**
+     * 【作用】MVP 音乐横幅（CS2 风格）：左侧 22px 头像（队色边框）+ 金色 MVP 徽章 +
+     *         MVP 名字 + 音乐行（♪ 作者 - 曲名）；MVP 不在花名册（离线/观战）时按 T 方金色调绘制。
+     * 【被谁使用】drawScoreboard（每帧）；内容由 showMvpHint 设置。
+     */
+    private static void drawMvpBanner(DrawContext context, TextRenderer tr, int centerX, int y) {
+        // 调试模式（/cstmm debug hud_test mvp_banner t）：真实横幅缺失/过期时显示演示数据；
+        // 演示无真实曲目时从曲目清单取第一首带封面的曲目，让角标展示真实封面效果
+        String name = mvpName;
+        String musicLine = mvpMusicLine;
+        MvpMusicIndex.Track track = mvpTrack;
+        if (name.isEmpty() || System.currentTimeMillis() > mvpHintUntil) {
+            if (!debugMvpBanner) return;
+            name = "Steve";
+            musicLine = "Demo Artist - Demo Track";
+            if (track == null) {
+                for (MvpMusicIndex.Track t : MvpMusicIndex.getTracks()) {
+                    if (t.iconUrl() != null && !t.iconUrl().isBlank()) {
+                        track = t;
+                        break;
+                    }
+                }
+            }
+        }
+        RosterEntry e = findRosterByName(name);
+        boolean tSide = e == null || e.team() == tTeam;
+        int accent = applyFade(tSide ? 0xFFFFD700 : 0xFF66AAFF);
+        int bg = applyFade(tSide ? 0xB3211506 : 0xB30B1A2E);
+        int w = 150, h = 26;
+        int x = centerX - w / 2;
+        context.fill(x, y, x + w, y + h, bg);
+        context.drawBorder(x, y, w, h, applyFade(0x44FFFFFF));
+        // 左侧头像 22x22（未就绪/未绑定显示名字首字占位）
+        int ax = x + 2, ay = y + 2;
+        context.fill(ax, ay, ax + 22, ay + 22, applyFade(0xFF161616));
+        Base64ImageDecoder.CardTexture face = e == null ? null : FaceImageCache.getTexture(e.avatarType(), e.avatarId());
+        if (face != null) {
+            context.drawTexture(face.id(), ax, ay, 22, 22, 0f, 0f, face.width(), face.height(), face.width(), face.height());
+        } else {
+            drawScaledText(context, tr, "§8" + name.substring(0, 1), ax + 11, ay + 7, 1.0f, 0xFFFFFF, true);
+        }
+        context.drawBorder(ax, ay, 22, 22, accent);
+        // 头像右下角音乐盒图标（头像 1/5 大小）：优先绘制所选曲目封面（MvpMusicCache 异步加载），
+        // 未加载/无图标/调试演示时回退白色音符占位
+        int noteSize = Math.max(4, 22 / 5);
+        Base64ImageDecoder.CardTexture cover = track == null ? null : MvpMusicCache.iconTexture(track);
+        if (cover != null) {
+            context.fill(ax + 22 - noteSize - 1, ay + 22 - noteSize - 1, ax + 22, ay + 22, applyFade(0xE6000000));
+            context.drawTexture(cover.id(), ax + 22 - noteSize, ay + 22 - noteSize, noteSize, noteSize,
+                    0f, 0f, cover.width(), cover.height(), cover.width(), cover.height());
+        } else {
+            context.fill(ax + 22 - noteSize - 1, ay + 22 - noteSize - 1, ax + 22, ay + 22, applyFade(0xE6000000));
+            drawMusicIcon(context, ax + 22 - noteSize, ay + 22 - noteSize, applyFade(0xFFFFFFFF));
+        }
+        // 右侧：MVP 徽章 + 名字 + 音乐行
+        drawScaledText(context, tr, "§6MVP", ax + 26, y + 3, 0.75f, 0xFFFFFF, false);
+        drawScaledText(context, tr, "§f" + name, ax + 26, y + 9, 0.9f, 0xFFFFFF, false);
+        drawScaledText(context, tr, "§7♪ " + musicLine, ax + 26, y + 17, 0.75f, 0xFFFFFF, false);
+    }
+
+    /**
+     * 【作用】爆破对局状态行（计分板下方居中，死亡竞赛对局不显示）：
      *         优先级 C4 已安放（红色，不显示包点位置，CT 需自行寻找）→ 拆弹警告（蓝色）
      *         → 整队离线等待重连（黄色）→ 购买窗口开启（绿色，附商店按键提示）。最多显示一行。
      * 【被谁使用】drawScoreboard（每帧）。
@@ -246,7 +379,7 @@ public class HudOverlay implements HudRenderCallback {
             color = applyFade(0xFF55FF55);
         }
         if (line == null) return;
-        int y = TOP_Y + CARD_H + 4;
+        int y = TOP_Y + SCOREBOARD_H + 4;
         int w = tr.getWidth(Text.literal(line));
         // 文字底衬（半透明黑横条），保证浅色地图背景下可读
         context.fill(centerX - w / 2 - 3, y - 2, centerX + w / 2 + 3, y + 9, applyFade(0x88000000));
@@ -302,7 +435,7 @@ public class HudOverlay implements HudRenderCallback {
     private static int fitCardWidth(int count, int availHalf) {
         if (count <= 0) return CARD_W;
         int w = (availHalf - (count - 1) * GAP) / count;
-        return Math.max(30, Math.min(CARD_W, w));
+        return Math.max(24, Math.min(CARD_W, w));
     }
 
     /**
@@ -322,15 +455,11 @@ public class HudOverlay implements HudRenderCallback {
         context.fill(x, y, x + cardW, y + CARD_H, applyFade(0x88000000));
         context.drawBorder(x, y, cardW, CARD_H, applyFade(self ? SELF_FRAME : 0x44000000));
 
-        // ---- 名字条：[战队缩写][队伍]{玩家名}，阵亡置灰（爆破对局队伍标签为 T/CT）----
-        String abbr = e.clanAbbr() == null ? "" : e.clanAbbr();
-        String teamTag = bombMode
-                ? (e.team() == tTeam ? "T" : "CT")
-                : (e.team() == 1 ? "红" : "蓝");
+        // ---- 名字条：[战队名]玩家名（无战队直接玩家名），阵亡置灰 ----
+        String clanName = e.clanName() == null || e.clanName().isEmpty() ? e.clanAbbr() : e.clanName();
         String cCode = alive ? "§7" : "§8";
-        String tCode = alive ? (e.team() == 1 ? "§c" : "§9") : "§8";
         String nCode = alive ? "§f" : "§8";
-        drawNameStrip(context, tr, abbr, cCode, tCode, teamTag, nCode, e.name(), x + 2, y + 1, cardW - 4);
+        drawNameStrip(context, tr, clanName == null ? "" : clanName, cCode, nCode, e.name(), x + 2, y + 1, cardW - 4);
 
         // ---- 头像：深色底 + 绑定头像（QQ/B站，未设置显示深色占位） ----
         context.fill(avX, avY, avX + AV, avY + AV, applyFade(0xFF161616));
@@ -349,8 +478,8 @@ public class HudOverlay implements HudRenderCallback {
         // 队色头像边框（自己的卡片用金色）
         context.drawBorder(avX, avY, AV, AV, applyFade(self ? SELF_FRAME : (e.team() == 1 ? RED_FRAME : BLUE_FRAME)));
 
-        // ---- 头像右下角战队徽标（没有设置徽标则不显示） ----
-        drawClanBadge(context, e.badge(), avX + AV - 13, avY + AV - 13, 13);
+        // ---- 头像右下角战队徽标（没有设置徽标则不显示；徽标尺寸随卡片缩小为 9） ----
+        drawClanBadge(context, e.badge(), avX + AV - 9, avY + AV - 9, 9);
 
         // ---- 拆弹装备标记（爆破图 CT 且持有时，卡片右上角绿色小钳图标） ----
         if (e.defuseKit()) {
@@ -432,12 +561,11 @@ public class HudOverlay implements HudRenderCallback {
      *         最多循环 名字长度-1 次，即使缩到 1 字符仍超宽也按原注释语义整体接受。
      * 【被谁使用】drawCard（每帧）。
      */
-    private static void drawNameStrip(DrawContext context, TextRenderer tr, String abbr, String cCode,
-                                      String tCode, String teamTag, String nCode, String name,
-                                      int x, int y, int maxW) {
+    private static void drawNameStrip(DrawContext context, TextRenderer tr, String clanName, String cCode,
+                                      String nCode, String name, int x, int y, int maxW) {
         double scale = 0.75;
-        String abbrSeg = abbr.isEmpty() ? "" : cCode + "[" + abbr + "]";
-        String head = abbrSeg + tCode + "[" + teamTag + "]" + nCode;
+        String clanSeg = clanName.isEmpty() ? "" : cCode + "[" + clanName + "]";
+        String head = clanSeg + nCode;
         String shownName = name;
         String text = head + shownName;
         // 【作用】名字超宽时逐字符截断为 …；有界循环（最多 name.length()-1 次），缩到 1 字符仍超宽则整体接受
@@ -478,6 +606,12 @@ public class HudOverlay implements HudRenderCallback {
         context.fill(x + 2, y + 4, x + 5, y + 5, color);
         context.fill(x + 2, y + 2, x + 3, y + 3, 0xFF1A1A1A);
         context.fill(x + 4, y + 2, x + 5, y + 3, 0xFF1A1A1A);
+    }
+
+    /** 【作用】绘制金色音符小图标（符干 + 符头，4x4 像素），MVP 横幅头像角标用。仅 HUD 内部使用。 */
+    private static void drawMusicIcon(DrawContext context, int x, int y, int color) {
+        context.fill(x + 3, y, x + 4, y + 3, color);      // 符干（右侧竖线）
+        context.fill(x + 1, y + 2, x + 3, y + 4, color);  // 符头（左下 2x2）
     }
 
     /** 【作用】将颜色的 alpha 通道按 fadeAlpha 缩放，使背景/边框/文字同步淡入淡出。 */
@@ -573,7 +707,7 @@ public class HudOverlay implements HudRenderCallback {
     /**
      * 【作用】整体覆盖写入服务端推送的 HUD 数据（地图名/比分/倒计时/阶段/花名册 JSON/扩展信息 JSON），
      *         花名册在此解析为条目列表（单包 ≤64KiB，解析失败保留上一次花名册并告警）；
-     *         extraJson 为爆破回合状态（普通对局为 "{}"），解析进 bomb* 静态字段。
+     *         extraJson 为爆破回合状态（死亡竞赛对局为 "{}"），解析进 bomb* 静态字段。
      * 【被谁使用】仅被 ClientNetworkHandler 的 HudDataPayload 接收器调用。
      */
     public static void updateData(String name, int red, int blue, int time, boolean game, int phaseOrdinal, String rosterJson, String extraJson) {
@@ -597,6 +731,11 @@ public class HudOverlay implements HudRenderCallback {
         try {
             JsonObject o = JsonParser.parseString(extraJson).getAsJsonObject();
             bombMode = o.has("bombMode") && o.get("bombMode").isJsonPrimitive() && o.get("bombMode").getAsBoolean();
+            // 胜利横幅（回合/整场结束）：字段缺失（未设置/已过期）时自动清除
+            bannerTeam = optInt(o, "bannerTeam");
+            bannerText = optString(o, "bannerText");
+            bannerSub = optString(o, "bannerSub");
+            bannerUntil = optLong(o, "bannerUntil");
             if (!bombMode) {
                 buyWindowOpen = false;
                 waitingReconnect = false;
@@ -645,6 +784,7 @@ public class HudOverlay implements HudRenderCallback {
                     optInt(o, "d"),
                     optInt(o, "lk"),
                     optString(o, "c"),
+                    optString(o, "cn"),
                     optString(o, "b"),
                     optString(o, "at"),
                     optString(o, "ai"),
@@ -664,9 +804,22 @@ public class HudOverlay implements HudRenderCallback {
         return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : "";
     }
 
-    /** 【作用】读取 JSON 对象整数字段（缺失/null 返回 0）。仅 parseRoster 使用。 */
+    /** 【作用】读取 JSON 对象整数字段（缺失/null 返回 0）。仅 parseRoster/parseExtra 使用。 */
     private static int optInt(JsonObject o, String key) {
         return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsInt() : 0;
+    }
+
+    /** 【作用】读取 JSON 对象长整数字段（缺失/null 返回 0）。仅 parseExtra 使用。 */
+    private static long optLong(JsonObject o, String key) {
+        return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsLong() : 0;
+    }
+
+    /** 【作用】按名字查找花名册条目（胜利/MVP 横幅取头像与队伍用），无则返回 null。 */
+    private static RosterEntry findRosterByName(String name) {
+        for (RosterEntry e : roster) {
+            if (e.name().equals(name)) return e;
+        }
+        return null;
     }
 
     /**
@@ -690,7 +843,28 @@ public class HudOverlay implements HudRenderCallback {
         buyWindowOpen = false;
         waitingReconnect = false;
         defuseInProgress = false;
+        bannerTeam = 0;
+        bannerText = "";
+        bannerSub = "";
+        bannerUntil = 0;
+        clearMvpHint();
         fadeAlpha = 0;
+    }
+
+    /** 【作用】显示 MVP 音乐横幅（限时；track 供头像角标绘制所选曲目封面，可为 null）。仅客户端。 */
+    public static void showMvpHint(String name, String musicLine, MvpMusicIndex.Track track, long durationMs) {
+        mvpName = name == null ? "" : name;
+        mvpMusicLine = musicLine == null ? "" : musicLine;
+        mvpTrack = track;
+        mvpHintUntil = System.currentTimeMillis() + Math.max(0, durationMs);
+    }
+
+    /** 【作用】清除 MVP 音乐横幅（断线/新对局时调用）。仅客户端。 */
+    public static void clearMvpHint() {
+        mvpName = "";
+        mvpMusicLine = "";
+        mvpTrack = null;
+        mvpHintUntil = 0;
     }
 
     // 是否处于对局中（当前无调用方，预留查询接口）

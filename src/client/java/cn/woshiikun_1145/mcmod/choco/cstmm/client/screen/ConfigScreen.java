@@ -7,6 +7,7 @@ import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.GlobalConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.MapConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.util.BlockPosAdapter;
 import cn.woshiikun_1145.mcmod.choco.cstmm.util.ItemStrings;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.ToastManager;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.api.EnvType;
@@ -30,9 +31,9 @@ import java.util.List;
 import java.util.function.IntConsumer;
 
 /**
- * 【作用】服务端配置编辑界面（管理员用）：左侧地图列表（增删/切换），右侧地图编辑器
- * （ID/名称/结算/人数/边界/出生点/商店物品等）与全局配置区（默认装备/快速超时），
- * 保存时经 Gson 序列化并分包发 C2S；内置未保存修改确认对话框。
+ * 【作用】服务端配置编辑界面（管理员用）：左侧地图列表（增删/切换），右侧为两个独立标签页——
+ * 地图配置页（ID/名称/结算/人数/边界/出生点/商店物品等）与全局配置页（默认装备/快速超时/MVP音乐），
+ * 两页各自独立滚动；保存时经 Gson 序列化并分包发 C2S；内置未保存修改确认对话框。
  * 【被谁使用】ClientNetworkHandler（收到 S2C OpenConfigScreenPayload 时打开，/cstmm config 命令触发）；
  * 辅助类 ConfigScreenSupport/ConfirmDialog/NumberTextField/LabelWidget 仅被本类使用。
  */
@@ -53,6 +54,8 @@ public class ConfigScreen extends Screen {
     private static final int BOUNDARY_FIELD_OFFSET = 33;
     /** 右侧编辑区行距（地图编辑器与全局配置区共用） */
     private static final int ROW_GAP = 26;
+    /** 右侧标签栏高度：标签按钮 (20px) + 下方留白，滚动内容从 contentTop + 本值开始 */
+    private static final int TAB_BAR_HEIGHT = 28;
 
     // 布局尺寸
     private int sidebarWidth;
@@ -63,8 +66,9 @@ public class ConfigScreen extends Screen {
     private int contentWidth;
     private int contentHeight;
 
-    // 滚动偏移
-    private int rightScrollOffset = 0;
+    // 滚动偏移（地图配置页 / 全局配置页各自独立，切换标签不丢失各自位置）
+    private int mapScrollOffset = 0;
+    private int globalScrollOffset = 0;
     private int leftScrollOffset = 0;
     private int rightTotalHeight = 0;
     private int leftTotalHeight = 0;
@@ -74,7 +78,8 @@ public class ConfigScreen extends Screen {
     private List<MapConfig> maps = new ArrayList<>();
     private GlobalConfig globalConfig = new GlobalConfig();
     private MapConfig editingMap = null;
-    private int globalTab = 0; // 0:装备, 1:参数
+    private int configTab = 0; // 右侧标签页：0=地图配置, 1=全局配置
+    private int globalTab = 0; // 全局页内子标签：0:装备, 1:参数
 
     // 区分固定控件和滚动控件
     private final List<ClickableWidget> fixedWidgets = new ArrayList<>();
@@ -99,6 +104,31 @@ public class ConfigScreen extends Screen {
     /** 服务端弹窗通知（如"配置已保存！"）：复用确认对话框的提示模式 */
     public void showPopup(String message) {
         confirmDialog.show(Text.literal("提示"), Text.literal(message), null);
+    }
+
+    // 【作用】当前标签页的右侧滚动偏移（0=地图配置页，1=全局配置页）
+    private int currentScrollOffset() {
+        return configTab == 0 ? mapScrollOffset : globalScrollOffset;
+    }
+
+    // 【作用】写回当前标签页的右侧滚动偏移（两页各自保留位置）
+    private void setScrollOffset(int value) {
+        if (configTab == 0) {
+            mapScrollOffset = value;
+        } else {
+            globalScrollOffset = value;
+        }
+    }
+
+    /**
+     * 【作用】切换右侧标签页（0=地图配置，1=全局配置）：只重建当前页内容，两页各自保留滚动位置。
+     * 【被谁使用】顶栏标签按钮、左侧地图列表点击（切回地图配置页）、新建/删除地图。
+     */
+    private void switchConfigTab(int tab) {
+        if (configTab == tab) return;
+        configTab = tab;
+        clearChildren();
+        init();
     }
 
     // 【作用】构造：先从本地缓存装载一份数据用于编辑，再向服务端请求最新配置同步
@@ -134,7 +164,7 @@ public class ConfigScreen extends Screen {
 
     /**
      * 【作用】构建全部控件：先清空重建滚动状态，依次计算布局、顶栏按钮、左侧地图列表、
-     * 右侧地图编辑器与全局配置区；窗口尺寸变化/切图/增删行时都会整体重走本方法。
+     * 右侧当前标签页内容（地图配置 / 全局配置二选一）；窗口尺寸变化/切图/切页/增删行时都会整体重走本方法。
      */
     @Override
     protected void init() {
@@ -149,17 +179,27 @@ public class ConfigScreen extends Screen {
         buildTopBar();
         buildMapList();
 
-        // ----- 右侧可滚动内容（editY 基线：editingMap == null 时保持 contentTop，与原实现一致） -----
-        int editY = contentTop;
-        editY = buildMapEditor(editY);
-        int globalRowY = buildGlobalSection(editY);
+        // ----- 右侧可滚动内容：按标签页只构建其中一页（两页共用滚动区，各自独立偏移） -----
+        int bodyTop = contentTop + TAB_BAR_HEIGHT;
+        int bodyHeight = contentHeight - TAB_BAR_HEIGHT;
+        int editY = bodyTop;
+        if (configTab == 0) {
+            editY = buildMapEditor(editY);
+            if (editingMap == null) {
+                // 【作用】配置尚未同步到达时给出占位提示，避免地图配置页整页空白
+                rightScrollables.add(new LabelWidget(contentLeft, editY, Text.literal("§e正在等待配置同步..."), 9));
+                editY += 18;
+            }
+        } else {
+            editY = buildGlobalSection(editY);
+        }
 
-        rightTotalHeight = Math.max(globalRowY + 20, editY + 20) - contentTop;
+        rightTotalHeight = Math.max(editY + 20, bodyTop + 20) - bodyTop;
         if (leftTotalHeight < headerHeight + 40) leftTotalHeight = headerHeight + 40;
 
-        // 钳制滚动偏移：内容变矮（删除行等）时避免停留在超出范围的偏移上
-        rightScrollOffset = MathHelper.clamp(rightScrollOffset, 0,
-                Math.max(0, rightTotalHeight - contentHeight));
+        // 钳制当前标签页的滚动偏移：内容变矮（删除行等）时避免停留在超出范围的偏移上
+        setScrollOffset(MathHelper.clamp(currentScrollOffset(), 0,
+                Math.max(0, rightTotalHeight - bodyHeight)));
         leftScrollOffset = MathHelper.clamp(leftScrollOffset, 0,
                 Math.max(0, leftTotalHeight - (height - headerHeight - footerHeight)));
     }
@@ -175,7 +215,7 @@ public class ConfigScreen extends Screen {
         contentHeight = height - headerHeight - footerHeight - 12;
     }
 
-    // 【作用】构建顶栏与底部的固定控件：保存配置 / 重新加载 / 返回按钮
+    // 【作用】构建顶栏与底部的固定控件：保存配置 / 重新加载 / 返回按钮，以及右侧标签页按钮（地图配置 / 全局配置）
     private void buildTopBar() {
         int screenWidth = this.width;
         int screenHeight = this.height;
@@ -200,6 +240,19 @@ public class ConfigScreen extends Screen {
                 Text.literal("返回"),
                 button -> close()
         ).dimensions(screenWidth - 80, returnBtnY, 60, 20).build());
+
+        // ----- 固定控件：右侧标签页（当前页标题高亮；两页内容互不挤占，各自独立滚动） -----
+        int tabY = contentTop + 4;
+        int tabWidth = 90;
+        fixedWidgets.add(ButtonWidget.builder(
+                Text.literal(configTab == 0 ? "§e地图配置" : "地图配置"),
+                button -> switchConfigTab(0)
+        ).dimensions(contentLeft, tabY, tabWidth, 20).build());
+
+        fixedWidgets.add(ButtonWidget.builder(
+                Text.literal(configTab == 1 ? "§e全局配置" : "全局配置"),
+                button -> switchConfigTab(1)
+        ).dimensions(contentLeft + tabWidth + 6, tabY, tabWidth, 20).build());
     }
 
     /**
@@ -237,7 +290,8 @@ public class ConfigScreen extends Screen {
                                             selectedMapIndex = index;
                                             editingMap = ConfigScreenSupport.deepCopyMap(maps.get(index));
                                             hasUnsavedChanges = false;
-                                            rightScrollOffset = 0; // 切换地图回到编辑器顶部
+                                            configTab = 0; // 点击地图即切回地图配置页
+                                            mapScrollOffset = 0; // 切换地图回到编辑器顶部
                                             clearChildren();
                                             init();
                                         }
@@ -245,7 +299,8 @@ public class ConfigScreen extends Screen {
                             } else {
                                 selectedMapIndex = index;
                                 editingMap = ConfigScreenSupport.deepCopyMap(maps.get(index));
-                                rightScrollOffset = 0; // 切换地图回到编辑器顶部
+                                configTab = 0; // 点击地图即切回地图配置页
+                                mapScrollOffset = 0; // 切换地图回到编辑器顶部
                                 clearChildren();
                                 init();
                             }
@@ -271,6 +326,16 @@ public class ConfigScreen extends Screen {
         leftTotalHeight += listSpacing + 8;
     }
 
+    /** 生成未占用的默认包点名（A/B/C… 跳过已用名，超过 Z 后回退 P+序号） */
+    private static String nextBombsiteName(java.util.List<MapConfig.Bombsite> sites) {
+        java.util.Set<String> used = new java.util.HashSet<>();
+        for (MapConfig.Bombsite s : sites) used.add(s.getName().toUpperCase());
+        for (char c = 'A'; c <= 'Z'; c++) {
+            if (!used.contains(String.valueOf(c))) return String.valueOf(c);
+        }
+        return "P" + (sites.size() + 1);
+    }
+
     /**
      * 右侧地图编辑器（editingMap == null 时直接返回传入的 editY，保持原基线）。
      * @param editY 起始 y
@@ -281,7 +346,7 @@ public class ConfigScreen extends Screen {
         int fieldWidth = Math.max(100, contentWidth - 140);
 
         if (editingMap != null) {
-            // 【作用】爆破图的 redSpawns/blueSpawns 语义为 T/CT 出生点，界面按地图类型切换称呼
+            // 【作用】爆破模式的 redSpawns/blueSpawns 语义为 T/CT 出生点，界面按地图类型切换称呼
             boolean bombMap = editingMap.isBombMap();
             // ---- 地图ID ----
             rightScrollables.add(new LabelWidget(editX, editY, Text.literal("地图ID:")));
@@ -317,12 +382,12 @@ public class ConfigScreen extends Screen {
             ).dimensions(editX, editY, 90, 20).build();
             rightScrollables.add(enableBtn);
 
-            // ---- 地图类型（NORMAL=普通击杀/计时图；BOMB=爆破图） ----
+            // ---- 地图类型（DEATHMATCH=死亡竞赛；BOMB=爆破） ----
             ButtonWidget gameTypeBtn = ButtonWidget.builder(
-                    Text.literal("类型: " + (editingMap.isBombMap() ? "BOMB" : "NORMAL")),
+                    Text.literal("类型: " + (editingMap.isBombMap() ? "BOMB" : "DEATHMATCH")),
                     button -> {
-                        editingMap.setGameType(editingMap.isBombMap() ? "NORMAL" : "BOMB");
-                        button.setMessage(Text.literal("类型: " + (editingMap.isBombMap() ? "BOMB" : "NORMAL")));
+                        editingMap.setGameType(editingMap.isBombMap() ? "DEATHMATCH" : "BOMB");
+                        button.setMessage(Text.literal("类型: " + (editingMap.isBombMap() ? "BOMB" : "DEATHMATCH")));
                         hasUnsavedChanges = true;
                         clearChildren();
                         init();
@@ -330,10 +395,11 @@ public class ConfigScreen extends Screen {
             ).dimensions(editX + 100, editY, 130, 20).build();
             rightScrollables.add(gameTypeBtn);
             editY += ROW_GAP;
-            addHint(editX, editY, "地图类型：NORMAL=普通图；BOMB=爆破图（切回 NORMAL 会清空包点）");
+            addHint(editX, editY, "地图类型：DEATHMATCH：死亡竞赛 BOMB：爆破模式（切换模式会清空包点配置）");
             editY += 11;
 
-            // ---- 结算方式 ----
+            // ---- 结算方式（仅死亡竞赛图：爆破图按回合数结算，无此配置） ----
+            if (!bombMap) {
             ButtonWidget winCondBtn = ButtonWidget.builder(
                     Text.literal("结算方式: " + editingMap.getWinCondition()),
                     button -> {
@@ -401,8 +467,9 @@ public class ConfigScreen extends Screen {
                 addHint(editX, editY, "平局规则：OVERTIME=平局时发起加时投票；DRAW=直接平局结束");
                 editY += 11;
             }
+            } // end !bombMap（爆破图无结算方式配置，回合胜负由 BombRoundManager 决定）
 
-            // ---- 最低人数（爆破图按 T/CT 方称呼，普通图按红/蓝队） ----
+            // ---- 最低人数 ----
             rightScrollables.add(new LabelWidget(editX, editY,
                     Text.literal(bombMap ? "T 方最低人数:" : "红队最低人数:"), 18));
             TextFieldWidget minRedField = new NumberTextField(editX + FIELD_OFFSET, editY, 50, 18, Text.literal(""));
@@ -431,10 +498,10 @@ public class ConfigScreen extends Screen {
             });
             rightScrollables.add(minBlueField);
             editY += ROW_GAP;
-            addHint(editX, editY, "最低人数 = 开局门槛（两队各达下限才可开局），也是 CONDITIONAL 补位模式的补位阈值");
+            addHint(editX, editY, "最低人数");
             editY += 11;
 
-            // ---- 最高人数（0 = 无上限；爆破图按 T/CT 方称呼） ----
+            // ---- 最高人数（0 = 无上限；爆破模式按 T/CT 方称呼） ----
             rightScrollables.add(new LabelWidget(editX, editY,
                     Text.literal(bombMap ? "T 方最高人数:" : "红队最高人数:"), 18));
             TextFieldWidget maxRedField = new NumberTextField(editX + FIELD_OFFSET, editY, 50, 18, Text.literal(""));
@@ -540,7 +607,7 @@ public class ConfigScreen extends Screen {
             });
             rightScrollables.add(cooldownField);
             editY += ROW_GAP;
-            addHint(editX, editY, "对局结束后该地图进入冷却的秒数，冷却期内无法在该地图开新局");
+            addHint(editX, editY, "对局结束后该地图进入冷却的秒数");
             editY += 11;
 
             // ---- 是否允许补位 ----
@@ -554,7 +621,7 @@ public class ConfigScreen extends Screen {
             ).dimensions(editX, editY, 120, 20).build();
             rightScrollables.add(reinforceableBtn);
             editY += ROW_GAP;
-            addHint(editX, editY, "允许补位=快速匹配超时的玩家可中途加入该图对局；关闭后补位模式不生效");
+            addHint(editX, editY, "允许补位：控制快速匹配超时的玩家可中途加入该图对局");
             editY += 11;
 
             // ---- 补位模式 ----
@@ -573,7 +640,7 @@ public class ConfigScreen extends Screen {
             ).dimensions(editX + FIELD_OFFSET, editY, 160, 20).build();
             rightScrollables.add(reinforceModeBtn);
             editY += ROW_GAP;
-            addHint(editX, editY, "CONDITIONAL=补到最低人数；ALWAYS=补到满员（最高人数 0会全部补入）");
+            addHint(editX, editY, "CONDITIONAL：补到最低人数；ALWAYS：补到满员（0会全部补入）");
             editY += 11;
 
             // ---- 对局维度 ----
@@ -589,33 +656,36 @@ public class ConfigScreen extends Screen {
             addHint(editX, editY, "对局所在维度 ID（如 minecraft:overworld），非法值回退主世界");
             editY += 11;
 
-            // ---- 商店物品（购买页 5 列网格；爆破图分类列编辑器见爆破区） ----
+            // ---- 商店物品（购买页 5 列网格；爆破模式分类列编辑器见爆破区） ----
             if (!editingMap.isBombMap()) {
             rightScrollables.add(new LabelWidget(editX, editY, Text.literal("商店物品:"), 9));
             editY += 18;
             editY = addShopColumnEditor(editX, editY, 5, true, false, false);
             editY = addShopPreview(editX, editY, false, false);
-            } // end !isBombMap（普通图分类列编辑器）
+            } // end !isBombMap（死亡竞赛分类列编辑器）
 
-            // ---- 爆破图包点（仅 BOMB 图显示）----
+            // ---- 爆破模式包点（仅 BOMB 图显示；两点式长方体：角点1 + 角点2） ----
             if (editingMap.isBombMap()) {
                 rightScrollables.add(new LabelWidget(editX, editY, Text.literal("包点:"), 9));
                 editY += 18;
 
                 List<MapConfig.Bombsite> sites = editingMap.getBombsites();
-                // 列布局：名称 | X | Y | Z | 半径 | 删除
+                // 列布局：名称 | X1 Y1 Z1 | X2 Y2 Z2 | 取点2 | 删除
                 int siteNameW = 60;
-                int siteCoordW = Math.min(70, (contentWidth - siteNameW - 130) / 4);
+                int siteCoordW = Math.max(28, Math.min(44, (contentWidth - siteNameW - 140) / 6));
                 int siteX0 = editX + siteNameW + 6;
-                int siteDelX = siteX0 + siteCoordW * 4 + 24;
+                int sitePick2X = siteX0 + (siteCoordW + 8) * 6 + 4;
+                int siteDelX = sitePick2X + 34;
 
-                // 表头（列含义：名称 / 坐标 X·Y·Z / 安放判定半径 / 删除），与下方输入框逐列对齐
+                // 表头（列含义：名称 / 角点1 X·Y·Z / 角点2 X·Y·Z / 删除），与下方输入框逐列对齐
                 if (!sites.isEmpty()) {
                     rightScrollables.add(new LabelWidget(editX, editY, Text.literal("名称"), 9));
-                    rightScrollables.add(new LabelWidget(siteX0, editY, Text.literal("X"), 9));
-                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8), editY, Text.literal("Y"), 9));
-                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8) * 2, editY, Text.literal("Z"), 9));
-                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8) * 3, editY, Text.literal("半径"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0, editY, Text.literal("X1"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8), editY, Text.literal("Y1"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8) * 2, editY, Text.literal("Z1"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8) * 3, editY, Text.literal("X2"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8) * 4, editY, Text.literal("Y2"), 9));
+                    rightScrollables.add(new LabelWidget(siteX0 + (siteCoordW + 8) * 5, editY, Text.literal("Z2"), 9));
                     rightScrollables.add(new LabelWidget(siteDelX, editY, Text.literal("删除"), 9));
                     editY += 12;
                 }
@@ -633,36 +703,52 @@ public class ConfigScreen extends Screen {
                     });
                     rightScrollables.add(siteNameField);
 
-                    int[] coords = {site.getX(), site.getY(), site.getZ()};
-                    for (int c = 0; c < 3; c++) {
-                        final int axis = c;
-                        NumberTextField coordField = new NumberTextField(siteX0 + c * (siteCoordW + 8), rowY, siteCoordW, 18, Text.literal(""));
-                        coordField.setText(String.valueOf(coords[c]));
-                        coordField.setChangedListener(s -> {
-                            if (!s.isEmpty()) {
+                    int[][] corners = {{site.getX1(), site.getY1(), site.getZ1()}, {site.getX2(), site.getY2(), site.getZ2()}};
+                    for (int cIdx = 0; cIdx < 2; cIdx++) {
+                        for (int c = 0; c < 3; c++) {
+                            final int corner = cIdx;
+                            final int axis = c;
+                            NumberTextField coordField = new NumberTextField(siteX0 + (cIdx * 3 + c) * (siteCoordW + 8), rowY, siteCoordW, 18, Text.literal(""));
+                            coordField.setText(String.valueOf(corners[cIdx][c]));
+                            coordField.setChangedListener(s -> {
                                 try {
-                                    int v = Integer.parseInt(s);
-                                    if (axis == 0) sites.get(idx).setX(v);
-                                    else if (axis == 1) sites.get(idx).setY(v);
-                                    else sites.get(idx).setZ(v);
+                                    // 清空输入框 = 空值，写入 0（未填口径，与 Boundary 全 0 视为未配置一致）；
+                                    // 校验仅在两角点均为空值（全 0）时报错
+                                    int v = s.isEmpty() ? 0 : Integer.parseInt(s);
+                                    MapConfig.Bombsite target = sites.get(idx);
+                                    if (corner == 0) {
+                                        if (axis == 0) target.setX1(v);
+                                        else if (axis == 1) target.setY1(v);
+                                        else target.setZ1(v);
+                                    } else {
+                                        if (axis == 0) target.setX2(v);
+                                        else if (axis == 1) target.setY2(v);
+                                        else target.setZ2(v);
+                                    }
                                     hasUnsavedChanges = true;
                                 } catch (NumberFormatException ignored) {}
-                            }
-                        });
-                        rightScrollables.add(coordField);
+                            });
+                            rightScrollables.add(coordField);
+                        }
                     }
 
-                    NumberTextField radiusField = new NumberTextField(siteX0 + 3 * (siteCoordW + 8), rowY, siteCoordW, 18, Text.literal(""));
-                    radiusField.setText(String.valueOf(site.getRadius()));
-                    radiusField.setChangedListener(s -> {
-                        if (!s.isEmpty()) {
-                            try {
-                                sites.get(idx).setRadius(Integer.parseInt(s));
+                    // 取点2：把玩家脚下方块坐标写入该包点角点 2（两测点流程的第二步）
+                    ButtonWidget pick2Btn = ButtonWidget.builder(
+                            Text.literal("取点2"),
+                            button -> {
+                                MinecraftClient client = MinecraftClient.getInstance();
+                                if (client.player == null) return;
+                                var pos = client.player.getBlockPos();
+                                MapConfig.Bombsite target = editingMap.getBombsites().get(idx);
+                                target.setX2(pos.getX());
+                                target.setY2(pos.getY());
+                                target.setZ2(pos.getZ());
                                 hasUnsavedChanges = true;
-                            } catch (NumberFormatException ignored) {}
-                        }
-                    });
-                    rightScrollables.add(radiusField);
+                                clearChildren();
+                                init();
+                            }
+                    ).dimensions(sitePick2X, rowY, 30, 18).build();
+                    rightScrollables.add(pick2Btn);
 
                     ButtonWidget delSiteBtn = ButtonWidget.builder(
                             Text.literal("×"),
@@ -679,7 +765,7 @@ public class ConfigScreen extends Screen {
                 }
                 editY += sites.size() * 22 + 4;
 
-                // 快速添加：以玩家脚下方块坐标新建包点（可视化取点）
+                // 快速添加：以玩家脚下方块坐标新建包点（角点1 = 角点2 = 脚下，1×1×1，再走对角点"取点2"）
                 ButtonWidget addSiteHereBtn = ButtonWidget.builder(
                         Text.literal("+ 在脚下添加包点"),
                         button -> {
@@ -687,7 +773,9 @@ public class ConfigScreen extends Screen {
                             if (client.player == null) return;
                             var pos = client.player.getBlockPos();
                             java.util.List<MapConfig.Bombsite> updated = new java.util.ArrayList<>(editingMap.getBombsites());
-                            updated.add(new MapConfig.Bombsite("A", pos.getX(), pos.getY(), pos.getZ(), 3));
+                            String defName = nextBombsiteName(updated);
+                            updated.add(new MapConfig.Bombsite(defName,
+                                    pos.getX(), pos.getY(), pos.getZ(), pos.getX(), pos.getY(), pos.getZ()));
                             editingMap.setBombsites(updated);
                             hasUnsavedChanges = true;
                             clearChildren();
@@ -696,9 +784,9 @@ public class ConfigScreen extends Screen {
                 ).dimensions(editX, editY, 150, 20).build();
                 rightScrollables.add(addSiteHereBtn);
                 editY += ROW_GAP;
-                addHint(editX, editY, "包点：站入立方体范围内即可安放 C4（半径为半边长，三轴 |坐标差| ≤ 半径，无需注视方块）");
+                addHint(editX, editY, "包点：两角点定义的长方体区域，站入即可安放 C4");
                 editY += 11;
-                addHint(editX, editY, "快速取点：走到包点中央，点击\"在脚下添加包点\"即可写入当前位置");
+                addHint(editX, editY, "快速配置：先在起点点\"在脚下添加包点\"（1×1×1），再走到对角点按该包点的\"取点2\"写入脚下坐标");
                 editY += 11;
 
                 // ---- C4 参数（BombSettings，按图配置）----
@@ -780,7 +868,7 @@ public class ConfigScreen extends Screen {
 
             // ---- 边界坐标（公共 + 队伍专属边界，队伍边界全 0 = 使用公共边界） ----
             // 位置调整：BOUNDARY_COL_SPACING（组间距）/ BOUNDARY_FIELD_OFFSET（输入框偏移）
-            // 爆破图按 T/CT 方称呼队伍，普通图按红/蓝队
+            // 爆破模式按 T/CT 方称呼队伍，死亡竞赛按红/蓝队
             int bY = addBoundaryGroup(bombMap ? "公共边界（T/CT 方专属边界未配置时生效）"
                     : "公共边界（红蓝队专属边界未配置时生效）", editingMap.getBoundary(), editX, editY);
             bY = addBoundaryGroup(bombMap ? "T 方边界（全 0 = 使用公共边界）"
@@ -791,7 +879,7 @@ public class ConfigScreen extends Screen {
             addHint(editX, editY, "按所站方块判定，站在边界方块上不算出界；某维 Min 大于 Max 时自动交换，六个值须全部正确填写（含 Y）");
             editY += 11;
 
-            // ---- 红队出生点（爆破图= T 方出生点；X/Y/Z 三个输入框，数字输入框不支持空格） ----
+            // ---- 红队出生点（爆破模式= T 方出生点；X/Y/Z 三个输入框，数字输入框不支持空格） ----
             rightScrollables.add(new LabelWidget(editX, editY,
                     Text.literal((bombMap ? "T 方出生点" : "红队出生点") + " (X / Y / Z)"), 9));
             editY += 18;
@@ -812,7 +900,7 @@ public class ConfigScreen extends Screen {
             rightScrollables.add(addRedBtn);
             editY += ROW_GAP;
 
-            // ---- 蓝队出生点（爆破图= CT 方出生点；X/Y/Z 三个输入框） ----
+            // ---- 蓝队出生点（爆破模式= CT 方出生点；X/Y/Z 三个输入框） ----
             rightScrollables.add(new LabelWidget(editX, editY,
                     Text.literal((bombMap ? "CT 方出生点" : "蓝队出生点") + " (X / Y / Z)"), 9));
             editY += 18;
@@ -851,13 +939,13 @@ public class ConfigScreen extends Screen {
     }
 
     /**
-     * 全局配置区域（装备/参数两个标签页）。
-     * @param editY 地图编辑器推进后的 y（全局区起始不低于其下）
+     * 全局配置标签页（页内再分装备/参数两个子标签）。
+     * @param editY 全局页内容起始 y（contentTop + 标签栏高度）
      * @return 全局区最后一行的 y（globalRowY）
      */
     private int buildGlobalSection(int editY) {
         // ----- 全局配置区域 -----
-        int globalStartY = Math.max(editY + 10, contentTop + 10);
+        int globalStartY = editY;
         rightScrollables.add(new LabelWidget(contentLeft, globalStartY, Text.literal("全局配置"), 9));
         int tabX = contentLeft;
         int globalRowY = globalStartY + 18;
@@ -966,6 +1054,23 @@ public class ConfigScreen extends Screen {
             globalRowY += ROW_GAP;
             addHint(tabX, globalRowY, "快速匹配超过该秒数无法开局时，进入补位流程（仅加入开启\"允许补位\"的同模式对局）");
             globalRowY += 11;
+
+            // MVP 音乐资源根目录（HTTPS）：客户端访问 <URL>/index_file.json 获取曲目清单；
+            // 留空 = 关闭 MVP 音乐功能
+            rightScrollables.add(new LabelWidget(tabX, globalRowY, Text.literal("MVP音乐URL:")));
+            TextFieldWidget mvpUrlField = new TextFieldWidget(textRenderer,
+                    tabX + FIELD_OFFSET, globalRowY, Math.max(120, contentWidth - FIELD_OFFSET - 10), 18,
+                    Text.literal(""));
+            mvpUrlField.setMaxLength(512);
+            mvpUrlField.setText(globalConfig.getMvpMusicUrl());
+            mvpUrlField.setChangedListener(s -> {
+                globalConfig.setMvpMusicUrl(s);
+                hasUnsavedChanges = true;
+            });
+            rightScrollables.add(mvpUrlField);
+            globalRowY += ROW_GAP;
+            addHint(tabX, globalRowY, "NVP音乐资源库URL");
+            globalRowY += 11;
         }
 
         return globalRowY;
@@ -1012,11 +1117,11 @@ public class ConfigScreen extends Screen {
 
     /**
      * 【作用】商店分类列编辑器（购买页网格布局的列配置）：
-     *         每列可配列头名称与列头图标，列内商品行 = 物品ID（/give 格式）| 价格 | (限购，仅普通图)
+     *         每列可配列头名称与列头图标，列内商品行 = 物品ID（/give 格式）| 价格 | (限购，仅死亡竞赛)
      *         | 显示名 | 图标 | 删除；支持逐列添加商品/手持添加（保留数据组件）与添加/删除列。
-     *         普通图 5 列通用；爆破图 T 方与 CT 方各自独立配置（tTeam 选择编辑哪支队伍），
+     *         死亡竞赛 5 列通用；爆破模式 T 方与 CT 方各自独立配置（tTeam 选择编辑哪支队伍），
      *         各最多 4 列（购买页第 1 列固定为装备列：CT 拆弹装备、T 方空列）。
-     * @param tTeam 爆破图时 true=编辑 T 方列、false=编辑 CT 方列；普通图忽略
+     * @param tTeam 爆破模式时 true=编辑 T 方列、false=编辑 CT 方列；死亡竞赛忽略
      * @return 推进后的 editY
      */
     private int addShopColumnEditor(int editX, int editY, int maxCols, boolean showMaxPurchase,
@@ -1029,7 +1134,7 @@ public class ConfigScreen extends Screen {
                 : "商店分类列（购买页 " + maxCols + " 列网格布局）:"), 9));
         editY += 18;
 
-        // 列列表存取：普通图 = shopColumns；爆破图按 tTeam = shopColumnsT / shopColumnsCT
+        // 列列表存取：死亡竞赛 = shopColumns；爆破模式按 tTeam = shopColumnsT / shopColumnsCT
         List<MapConfig.ShopColumn> shopCols = bombMode
                 ? new ArrayList<>(tTeam ? editingMap.getShopColumnsT() : editingMap.getShopColumnsCT())
                 : new ArrayList<>(editingMap.getShopColumns());
@@ -1041,7 +1146,7 @@ public class ConfigScreen extends Screen {
 
         // 商品行布局：物品ID | 价格 | (限购) | 显示名 | 图标 | ×
         // 【作用】图标列固定 80px、删除列固定 16px，右侧所有固定列（含间距与 8px 留白）统一从
-        //         物品ID 可用宽度中扣除；原实现按 contentWidth-320 推导图标宽度，爆破图
+        //         物品ID 可用宽度中扣除；原实现按 contentWidth-320 推导图标宽度，爆破模式
         //         （无限购列）会得到负宽度，导致图标输入框不可见、表头“图标/删除”互相重叠
         int iconW = 80;
         int delW = 16;
@@ -1071,7 +1176,7 @@ public class ConfigScreen extends Screen {
             MapConfig.ShopColumn col = shopCols.get(c);
             final int colIdx = c;
 
-            // 列头行：序号 + 名称框 + 删除列（爆破图列号从 2 起：第 1 列固定为拆弹装备）
+            // 列头行：序号 + 名称框 + 删除列（爆破模式列号从 2 起：第 1 列固定为拆弹装备）
             rightScrollables.add(new LabelWidget(editX, editY + 3,
                     Text.literal((bombMode ? "列 " + (c + 2) : "列 " + (c + 1)) + ":"), 9));
             TextFieldWidget colNameField = new TextFieldWidget(textRenderer, editX + 34, editY, 90, 18, Text.literal(""));
@@ -1122,7 +1227,7 @@ public class ConfigScreen extends Screen {
                 });
                 rightScrollables.add(pf);
 
-                // 限购次数（0 = 不限购；仅普通图免费商店生效，爆破图按余额购买不显示）
+                // 限购次数（0 = 不限购；仅死亡竞赛免费商店生效，爆破模式按余额购买不显示）
                 if (showMaxPurchase) {
                     NumberTextField mf = new NumberTextField(maxX, rowY, 45, 18, Text.literal(""));
                     mf.setText(String.valueOf(item.getMaxPurchase()));
@@ -1205,7 +1310,7 @@ public class ConfigScreen extends Screen {
             editY += ROW_GAP;
         }
 
-        // 字段说明（按模式区分：爆破图第 1 列为固定装备列且 T/CT 分开配置；普通图全 5 列可配且免费发放）
+        // 字段说明（按模式区分：爆破模式第 1 列为固定装备列且 T/CT 分开配置；死亡竞赛全 5 列可配且免费发放）
         addHint(editX, editY, bombMode
                 ? (tTeam
                         ? "购买页第 1 列为装备列，T 方显示空列（无固定购买项）；本节配置仅对 T 方生效，列内商品超出可滚轮上下滚动"
@@ -1218,8 +1323,8 @@ public class ConfigScreen extends Screen {
     }
 
     /**
-     * 【作用】把分类列列表写回编辑中地图的对应字段：普通图 → shopColumns；
-     *         爆破图 tTeam=true → shopColumnsT（T 方）、false → shopColumnsCT（CT 方）。
+     * 【作用】把分类列列表写回编辑中地图的对应字段：死亡竞赛 → shopColumns；
+     *         爆破模式 tTeam=true → shopColumnsT（T 方）、false → shopColumnsCT（CT 方）。
      * 【被谁使用】addShopColumnEditor（初始化截断与增删列/商品后回写）。
      */
     private void writeShopColumns(List<MapConfig.ShopColumn> cols, boolean bombMode, boolean tTeam) {
@@ -1234,8 +1339,8 @@ public class ConfigScreen extends Screen {
 
     /**
      * 【作用】购买页预览（按当前配置实时绘制 5 列网格布局，随编辑刷新）：
-     *         爆破图按队伍分开预览——tTeam=true 为 T 方视角（第 1 列空列）、false 为 CT 方视角
-     *         （第 1 列拆弹装备）；普通图为 5 列分类网格。
+     *         爆破模式按队伍分开预览——tTeam=true 为 T 方视角（第 1 列空列）、false 为 CT 方视角
+     *         （第 1 列拆弹装备）；死亡竞赛为 5 列分类网格。
      * @return 推进后的 editY
      */
     private int addShopPreview(int editX, int editY, boolean bomb, boolean tTeam) {
@@ -1318,7 +1423,8 @@ public class ConfigScreen extends Screen {
         selectedMapIndex = maps.size() - 1;
         editingMap = ConfigScreenSupport.deepCopyMap(newMap);
         hasUnsavedChanges = true;
-        rightScrollOffset = 0; // 新建地图回到编辑器顶部
+        configTab = 0; // 新建地图后停在编辑器页
+        mapScrollOffset = 0; // 新建地图回到编辑器顶部
         clearChildren();
         init();
     }
@@ -1354,7 +1460,8 @@ public class ConfigScreen extends Screen {
             editingMap = null;
         }
         hasUnsavedChanges = true;
-        rightScrollOffset = 0; // 删除地图后回到编辑器顶部
+        configTab = 0; // 删除后停在编辑器页
+        mapScrollOffset = 0; // 删除地图后回到编辑器顶部
         clearChildren();
         init();
     }
@@ -1395,7 +1502,7 @@ public class ConfigScreen extends Screen {
             }
         }
 
-        // 爆破图包点校验：至少 1 个、名称唯一、坐标不能停留在 0/0/0 占位
+        // 爆破模式包点校验：至少 1 个、名称唯一、坐标不能停留在 0/0/0 占位
         String bombsiteError = ConfigScreenSupport.validateBombsites(maps);
         if (bombsiteError != null) {
             confirmDialog.show(Text.literal("§c包点配置错误"), Text.literal(bombsiteError), null);
@@ -1434,16 +1541,9 @@ public class ConfigScreen extends Screen {
             // 分包发送：C2S payload 有 32768 字节硬限制，大配置直发会被服务端踢线
             ClientNetworkHandler.sendConfigUpdate(json);
             hasUnsavedChanges = false;
-            MinecraftClient client = MinecraftClient.getInstance();
-            if (client.player != null) {
-                client.player.sendMessage(Text.literal("§a配置已发送到服务端！"), false);
-            }
+            ToastManager.show("§a配置已发送到服务端！");
         } catch (Exception e) {
-            if (MinecraftClient.getInstance().player != null) {
-                MinecraftClient.getInstance().player.sendMessage(
-                        Text.literal("§c保存失败: " + e.getMessage()), false
-                );
-            }
+            ToastManager.show("§c保存失败: " + e.getMessage(), 8000);
         }
     }
 
@@ -1461,8 +1561,8 @@ public class ConfigScreen extends Screen {
     }
 
     /**
-     * 【作用】保存前的物品ID解析预校验：遍历全部地图的商店商品（普通图 = 分类列平铺；
-     *         爆破图 = T/CT 两套分类列各自平铺，未配置时回退通用列/旧版平铺 shopItems，
+     * 【作用】保存前的物品ID解析预校验：遍历全部地图的商店商品（死亡竞赛 = 分类列平铺；
+     *         爆破模式 = T/CT 两套分类列各自平铺，未配置时回退通用列/旧版平铺 shopItems，
      *         相同物品串去重防重复警告）与全局默认装备，用与服务端一致的方式解析
      *         （ItemStrings.isPlausible：/give 格式 / SNBT / 纯ID），返回无法解析条目的展示列表
      *         （格式 "地图ID/全局: 条目"，上限 8 条防刷屏）。空手无玩家世界时跳过校验。
@@ -1528,7 +1628,8 @@ public class ConfigScreen extends Screen {
         }
         allowNextSyncRefresh = false;
         loadData();
-        rightScrollOffset = 0; // 重载后回到编辑器顶部
+        mapScrollOffset = 0; // 重载后两页都回到顶部
+        globalScrollOffset = 0;
         clearChildren();
         init();
     }
@@ -1618,19 +1719,20 @@ public class ConfigScreen extends Screen {
         matrices.pop();
         context.disableScissor();
 
-        // ---- 右侧可滚动区域 ----
+        // ---- 右侧可滚动区域（标签栏下方为当前标签页内容） ----
         int clipX = contentLeft;
-        int clipY = contentTop;
+        int clipY = contentTop + TAB_BAR_HEIGHT;
         int clipWidth = contentWidth;
-        int clipHeight = contentHeight;
+        int clipHeight = contentHeight - TAB_BAR_HEIGHT;
         context.enableScissor(clipX, clipY, clipX + clipWidth, clipY + clipHeight);
 
+        int scrollOffset = currentScrollOffset();
         matrices.push();
-        matrices.translate(0, -rightScrollOffset, 0);
+        matrices.translate(0, -scrollOffset, 0);
         for (Drawable drawable : rightScrollables) {
             if (drawable instanceof ClickableWidget widget) {
                 // 传入滚动调整后的鼠标坐标，保证 hover 高亮与实际渲染位置一致
-                widget.render(context, mouseX, mouseY + rightScrollOffset, delta);
+                widget.render(context, mouseX, mouseY + scrollOffset, delta);
             } else {
                 // 非交互控件（LabelWidget / ShopPreviewWidget）：无视鼠标坐标直接渲染
                 drawable.render(context, mouseX, mouseY, delta);
@@ -1687,8 +1789,9 @@ public class ConfigScreen extends Screen {
             return super.mouseClicked(mouseX, mouseY, button);
         }
 
-        if (isInRightPanel(mouseX) && mouseY >= contentTop && mouseY < contentTop + contentHeight) {
-            double adjustedY = mouseY + rightScrollOffset;
+        // 标签栏本身是固定控件（上方已处理），内容命中区域从标签栏下方开始
+        if (isInRightPanel(mouseX) && mouseY >= contentTop + TAB_BAR_HEIGHT && mouseY < contentTop + contentHeight) {
+            double adjustedY = mouseY + currentScrollOffset();
             for (Drawable drawable : rightScrollables) {
                 if (drawable instanceof ClickableWidget widget) {
                     if (widget.mouseClicked(mouseX, adjustedY, button)) {
@@ -1720,7 +1823,7 @@ public class ConfigScreen extends Screen {
             }
         }
         if (isInRightPanel(mouseX)) {
-            double adjustedY = mouseY + rightScrollOffset;
+            double adjustedY = mouseY + currentScrollOffset();
             for (Drawable drawable : rightScrollables) {
                 if (drawable instanceof ClickableWidget widget) {
                     if (widget.mouseReleased(mouseX, adjustedY, button)) return true;
@@ -1740,7 +1843,7 @@ public class ConfigScreen extends Screen {
             }
         }
         if (isInRightPanel(mouseX)) {
-            double adjustedY = mouseY + rightScrollOffset;
+            double adjustedY = mouseY + currentScrollOffset();
             for (Drawable drawable : rightScrollables) {
                 if (drawable instanceof ClickableWidget widget) {
                     if (widget.mouseDragged(mouseX, adjustedY, button, deltaX, deltaY)) return true;
@@ -1758,9 +1861,9 @@ public class ConfigScreen extends Screen {
             leftScrollOffset = MathHelper.clamp((int)(leftScrollOffset - verticalAmount * 20), 0, maxScroll);
             return true;
         }
-        if (isInRightPanel(mouseX)) {
-            int maxScroll = Math.max(0, rightTotalHeight - contentHeight);
-            rightScrollOffset = MathHelper.clamp((int)(rightScrollOffset - verticalAmount * 20), 0, maxScroll);
+        if (isInRightPanel(mouseX) && mouseY >= contentTop + TAB_BAR_HEIGHT && mouseY < contentTop + contentHeight) {
+            int maxScroll = Math.max(0, rightTotalHeight - (contentHeight - TAB_BAR_HEIGHT));
+            setScrollOffset(MathHelper.clamp((int)(currentScrollOffset() - verticalAmount * 20), 0, maxScroll));
             return true;
         }
         return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);

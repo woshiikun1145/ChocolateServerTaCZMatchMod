@@ -1,12 +1,14 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm.client;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.cache.ClientConfig;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.hud.HudOverlay;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.network.ClientNetworkHandler;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.render.BombEntityRenderer;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.LastWordsScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.MatchMenuScreen;
 import cn.woshiikun_1145.mcmod.choco.cstmm.client.screen.ShopScreen;
+import cn.woshiikun_1145.mcmod.choco.cstmm.client.util.ToastManager;
 import cn.woshiikun_1145.mcmod.choco.cstmm.entity.BombEntity;
 import cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities;
 import cn.woshiikun_1145.mcmod.choco.cstmm.item.ModItems;
@@ -19,6 +21,8 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.text.Text;
@@ -62,6 +66,14 @@ public class CstmmClient implements ClientModInitializer {
         ClientNetworkHandler.register();
         registerKeyBindings();
         HudOverlay.init();
+        // Toast 提示栏 HUD 渲染（游戏内屏幕右上）：主菜单打开时由 MatchMenuScreen 在其内容区渲染，此处跳过防重复
+        HudRenderCallback.EVENT.register((context, tickCounter) -> {
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client.currentScreen instanceof MatchMenuScreen) return;
+            ToastManager.renderToasts(context, client.textRenderer,
+                    client.getWindow().getScaledWidth() - 6, 6,
+                    ClientConfig.getThemeColorArgb(), client.getWindow().getScaledWidth() / 3);
+        });
         // C4 实体渲染器注册（绿色长方体占位外观）
         EntityRendererRegistry.register(ModEntities.C4, BombEntityRenderer::new);
 
