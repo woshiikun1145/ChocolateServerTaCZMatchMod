@@ -20,6 +20,7 @@
 8. [配置文件字段参考](#8-配置文件字段参考)
 9. [日志规范](#9-日志规范)
 10. [常见问题排查](#10-常见问题排查)
+11. [第三方依赖与合规（JLayer）](#11-第三方依赖与合规jlayer)
 
 ---
 
@@ -48,13 +49,14 @@
 | `BombRoundManager` | 爆破模式回合状态机（gameType=BOMB）：多回合赛制（休闲先到 8 分/竞技 MR12+加时 BO6）、攻防转换（第 13 回合/加时第 4 回合）、回合重置（复活/装备/传送/C4 指派/拆弹器发放）、胜负判定（全歼/爆炸/拆除/超时，安放后 T 全灭不结束）、3 分钟重连宽限与整队离线挂起、加时继续投票回调 |
 | `EconomyManager` | 爆破图经济系统（价格=匹配内货币非服务器货币，全局可配 `GlobalConfig.BombEconomy`）：起始金 $800/上限 $16000/击杀 $300（休闲减半）/胜利金 3250·3500/败金 1400+连败×500 封顶 3400/安放·拆除个人 $300/T 存活未下包战败 0 败金；购买窗口判定（冻结+开局 20 秒、安放后禁买）与扣费购买（拆弹器 CT 专属、C4 禁购）；补位玩家懒初始化起始金 |
 | `BombInteractionManager` | 爆破交互（每服务器 tick 推进）：安放（T 手持 c4 站包点内**长按右键/使用键**，plantTimeSeconds）与拆除（CT 2.5 格内长按右键，**持拆弹装备 tag `cstmm_defuse_kit` 用 defuseKitSeconds / 裸拆 defuseSeconds**）；条件校验/中断/进度 action bar；C4 实体生成与按 matchId 清理；`/cstmm debug allow_c4 to_be_planted_freely` 开启后跳过全部安放情境限制（任意位置/任意阵营/任意阶段/可重复安放，仅保留存活+手持 C4）；对局结束统一回收拆弹装备 tag |
-| `C4DamageCalculator`（util） | C4 爆炸伤害（《C4爆炸计算.md》模型，参数已 ÷5 到 MC 口径，全部在 `MapConfig.BombSettings` 可配）：双段线性距离衰减（dMax 51→dKill 20 @L1，→0 @L2）、脚/胸/头三采样点取最大、实心遮挡 0 伤/开口方块按 a0 泄漏穿透、背对减伤 dBack、向下取整；无破坏爆炸视觉 |
+| `C4DamageCalculator`（util） | C4 爆炸伤害（《C4爆炸计算.md》模型，参数已 ÷5 到 MC 口径，全部在 `MapConfig.BombSettings` 可配）：双段线性距离衰减（dMax 51→dKill 20 @L1，→0 @L2）、脚/胸/头三采样点取最大、实心遮挡 0 伤/开口方块按 a0 泄漏穿透、背对减伤 dBack、向下取整；伤害以 `genericKill` 源**直接扣除（无视原版盔甲/爆炸保护/抗性/吸收）**；无破坏爆炸视觉 |
 | `item.ModItems` / `entity.ModEntities` | 自定义注册表（命名空间 `cstmm`，非 MOD_ID）：`cstmm:c4` 物品+实体（BombEntity：静止不可推、携带 matchId 隔离清理，挂在创造栏"战斗"；**对局内**由会话驱动倒计时，**对局外自由炸弹**归零先播 `c4_detonation` 引信音、播完 DETONATION_LEAD_MILLIS 后自爆——与对局内同口径，NBT 重载 fuseTicks=0 重置 1 tick 防卡死）。**拆弹装备不是物品**——持有状态 = 玩家 tag `cstmm_defuse_kit`（`BombInteractionManager.DEFUSE_KIT_TAG`） |
-| `PlayerDataManager` | 战绩记录（仅对局结束时记录一次）与档案持久化 |
+| `PlayerDataManager` | 战绩记录（仅对局结束时记录一次）与档案持久化；`setMvpMusic` 校验并写入玩家 `mvpMusicName` 档案字段 |
+| `MvpMusicManager` | MVP 判定与下发：死亡竞赛模式在 `MatchManager.endMatch` 后按"击杀最多→死亡少→随机"选 MVP（0 杀不播）；爆破模式在 `BombRoundManager.endRound` 后按胜负原因判定——CT 胜：拆除=拆弹者，歼灭/超时=回合击杀→伤害→随机；T 胜：C4 爆炸=回合击杀（并列取安放者）→伤害→随机，歼灭=击杀→伤害→随机。MVP 未选音乐或 `mvpMusicUrl` 为空时静默跳过；下发 `cstmm:mvp_music`（含延迟：目标类 2500ms/歼灭类 1000ms/普通 0ms 与 bombMode 标记） |
 | `MatchScheduler` | 全局调度 tick，各 manager tick 用独立 try-catch 隔离异常 |
 | `EventListener` | 玩家加入（握手触发）、死亡重生（回出生点）、伤害（友伤判定）、断线清理 |
 | `BandwidthTracker`（util） | `/cstmm debug bandwidth` 服务器带宽统计：玩家 JOIN 时向连接 Netty 管线最外侧注入出/入站字节计数器（`mixin` 包两个 Accessor 打通 protected/private 字段），1Hz 守护线程采样速率与逐秒记录 |
-| `mixin` 包 | Mixin 访问器（`ClientConnectionAccessor`/`ServerCommonNetworkHandlerAccessor`），仅供带宽统计读取连接管线；无注入型 Mixin |
+| `mixin` 包 | Mixin 访问器（`ClientConnectionAccessor`/`ServerCommonNetworkHandlerAccessor`，带宽统计读取连接管线）与注入型 Mixin：`KeyBindingMixin`（键位冲突修复）、`SoundSystemMixin`（按客户端配置倍率缩放 cstmm 命名空间音效的最终播放音量，模组音效音量控制的实现点） |
 | 命令参数说明 | 战队名参数用原生 `StringArgumentType.string()`（引号包裹空格名由 Brigadier 原生解析）——**不使用自定义 ArgumentType**（服务器环境限制）；战队名建议数据源为 `clan_hints` 同步缓存（服务端执行时用 ClanManager） |
 
 ### 2.2 客户端模块
@@ -66,19 +68,21 @@
 | `ClientHandshakeState` | 握手状态机，全部功能的门禁 |
 | `ConfigDataCache` | 配置同步结果的客户端缓存（供界面渲染） |
 | `ConfigDiskCache` | 配置磁盘持久缓存（按服务器标识隔离；重连哈希一致免收全量配置） |
-| `MatchMenuScreen` | 匹配菜单（欢迎/匹配/队列/战队/履历/个性化/关于页，卡片背景 cover 裁剪渲染，关于页含仓库/问题反馈链接与"千万别点"彩蛋入口）；队列/战队/履历/个性化页由 QueueTabPanel / ClanTabPanel / ProfileTabPanel / PersonalizeTabPanel 渲染（履历页：上 1/3 自己履历 + 下 2/3 全服排行，可滚动，右上角下拉选择 K/D/胜率/总击杀排序） |
-| `QueueTabPanel` / `ClanTabPanel` / `ProfileTabPanel` / `PersonalizeTabPanel` | 队列状态页（own/clan/每图状态 + 渐变地图图）、战队页（列表/搜索/创建/详情/成员管理）、履历页（自己履历 + 全服排行）与个性化页（主题色 + QQ/B站头像绑定） |
+| `MatchMenuScreen` | 匹配菜单（欢迎/匹配/队列/战队/履历/个性化/关于页，卡片背景 cover 裁剪渲染，关于页含仓库/问题反馈链接与"千万别点"彩蛋入口；**侧边栏标签栏可滚轮滚动**（悬停侧边栏滚动，小窗口高度不足时逐帧重定位按钮、滚出可视区隐藏、橙色标记同步偏移并钳制在侧边栏内不越界；欢迎/关于页长行自动换行不截断、关于页按钮内容区内居中、匹配页卡片宽度自适应压缩）；匹配页标题栏右侧依次为取消匹配/休闲模式/竞技模式按钮，已在队列时再次加入地图卡不关闭界面、由服务端 Toast 提示）；队列/战队/履历/个性化页由 QueueTabPanel / ClanTabPanel / ProfileTabPanel / PersonalizeTabPanel 渲染（履历页：上 1/3 自己履历 + 下 2/3 全服排行，可滚动，窄内容区自动隐藏 死亡/场次 列防左缘裁切，右上角下拉选择 K/D/胜率/总击杀排序） |
+| `QueueTabPanel` / `ClanTabPanel` / `ProfileTabPanel` / `PersonalizeTabPanel` | 队列状态页（own/clan/每图状态 + 渐变地图图）、战队页（列表/搜索/创建/详情/成员管理）、履历页（自己履历 + 全服排行）与个性化页（主题色 + QQ/B站头像绑定 + MVP 音乐选择：从服务端 `mvpMusicUrl` 索引加载曲目列表，支持停止试听/翻页/试听/选择/清除（**曲名放不下时滚动显示 marquee**），翻页下方显示资源预下载中提示，图标经 `UrlImageCache` 异步下载；页面支持滚轮滚动（内容区裁剪，控件滚出可视区自动隐藏）；窄窗口自适应（HEX 应用/恢复默认、头像平台/预览/保存/清除按钮右对齐内容区，MVP 音乐顶部按钮窄窗口时换到标题下方独立行，控制区滑块按剩余空间压缩）；底部"控制"区提供模组音效音量、MVP 音乐音量（0~400% 滑块+输入框）与下载线程数（1~32）） |
 | `ClanCache` / `QueueStatusCache` / `LeaderboardCache` | 战队/队列状态/全服排行 JSON 缓存（clan_data / queue_status / leaderboard 包） |
 | `FaceCache` / `FaceImageCache` | 自己的头像绑定缓存（档案同步携带 avatarType/avatarId）与头像图片异步获取（QQ 拼接 qlogo 直链 / B站经 uapis 解析 face 直链，内存缓存 + 失败冷却；断线清空） |
-| `ClientConfig` | 客户端个性化配置 `config/cstmm/client/config.json`（当前仅界面主题色，懒加载 + 原子落盘） |
+| `ClientConfig` | 客户端个性化配置 `config/cstmm/client/config.json`（界面主题色 `themeColor` + MVP 音乐开关 `mvpMusicEnabled`（默认开）与音量 `mvpMusicVolume`（0~4，默认 0.7，100%=1）+ 模组音效音量 `soundEffectsVolume`（0~4，默认 1，经 `SoundSystemMixin` 缩放全部 cstmm 命名空间 MC 音效）+ MVP 资源下载线程数 `downloadThreads`（1~32，默认 3，实时调整 `MvpMusicCache` 下载池并发），懒加载 + 原子落盘） |
 | `BadgeCache` | 战队徽标两级缓存（badge 包按 badgeId 重组，落盘 `config/cstmm/client/cache/badges/<id>.b64`；进服上报磁盘已有 id 服务端免重发；内存+磁盘均缺失时自动发 request_badge 补发；断线仅清内存，磁盘保留跨重连复用） |
 | `Base64ImageDecoder` | base64 图片 → GPU 纹理的健壮解码工具（data URI 前缀剥离/空白清理/MIME 降级/非 PNG 经 ImageIO 转换；地图卡片背景与战队徽标共用，`CardTexture` record 在此类中） |
+| `ToastManager` | 提示栏（NVIDIA 风格：深色横条 + 左侧主题色图标块白"！"，从右侧滑入 250ms ease-out → 停留 → 向右滑出 250ms ease-out；单条总宽 ≤ 窗口 1/3，超长自动换行；最多 5 条堆叠）：独立静态方法 `show(message[, durationMs])` 任意线程可调（同文案 3s 去重防刷屏），`dismiss(message)` 移除进行中提示；渲染两路——游戏内经 `HudRenderCallback`（CstmmClient 注册，屏幕右上）、主菜单打开时由 MatchMenuScreen 在内容区右上渲染（二者互斥防重复）；已接管握手成功/失败/超时、正在握手/同步配置/配置同步成功/正在下载MVP音乐/MVP音乐下载完成/打开配置界面/配置已发送/刷新曲目清单/曲目清单加载失败/头像与MVP音乐保存清除反馈/已在队列或游戏中（原弹窗）、你已离开**队列（服务端 `deliverMessage` 支持 `TOAST:` 前缀路由，前缀由客户端 PopupPayload 接收器剥离）等提示；个性化页内联状态文字（setStatus/setMusicStatus）5 秒自动消失 |
 | `LastWordsScreen` + `WhyYouClickThis` | "千万别点"的遗言流程（不可取消：发送/算了/回车/ESC 均发送遗言；崩溃挂起为静态状态，由 CstmmClient 每 tick 抛出；屏幕被其他模组顶号/断线顶掉时 `removed()` 兜底同样触发；被反崩溃模组吞掉异常则改用 `scheduleStop()` 强制退出） |
-| `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新）：地图类型切换（NORMAL/BOMB）、爆破包点编辑（名称/坐标/半径=立方体半边长 + "在脚下添加"可视化取点，仅 BOMB 图显示）、商店分类列编辑器（普通图 5 列通用；爆破图 T 方与 CT 方两套独立配置各 4 列，共用 `addShopColumnEditor`，普通图额外含限购列；旧单套配置打开时自动复制为两队初始值）+ 购买页实时预览（`ShopPreviewWidget`，爆破图 CT/T 视角各一）、手持添加导出 **/give 格式**（`ItemStrings.fromStack`，含数据组件）、背景图（Base64 ≤327680 字符 / http(s) 图片 URL 无限制，保存时校验 + 物品ID 解析预警告）；`init()` 保留滚动偏移仅钳制（增删行不再跳回顶部），切换地图/重载时显式归零 |
-| `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存：普通图与爆破图统一 **5 列一页式网格**（列头编号+名称；商品格=图标/名称/价格；列内超出鼠标滚轮逐列滚动）。爆破图第 1 列固定"装备"列（拆弹装备购买项仅 CT，T 方空列；分类列按玩家队伍下发 T/CT 独立配置），顶部余额+购买窗口信息栏，余额不足/窗口关闭置灰；普通图 5 列分类网格免费发放 |
+| `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新）：右侧分 **地图配置 / 全局配置** 两个标签页（各自独立滚动偏移，切换不丢失位置；全局页内再分装备/参数子标签），地图类型切换（DEATHMATCH/BOMB）、爆破包点编辑（名称/角点1/角点2 两点式长方体 + "在脚下添加包点"与逐行"取点2"可视化取点，仅 BOMB 图显示）、商店分类列编辑器（死亡竞赛图 5 列通用；爆破图 T 方与 CT 方两套独立配置各 4 列，共用 `addShopColumnEditor`，死亡竞赛图额外含限购列；旧单套配置打开时自动复制为两队初始值）+ 购买页实时预览（`ShopPreviewWidget`，爆破图 CT/T 视角各一）、手持添加导出 **/give 格式**（`ItemStrings.fromStack`，含数据组件）、背景图（Base64 ≤327680 字符 / http(s) 图片 URL 无限制，保存时校验 + 物品ID 解析预警告）；`init()` 保留滚动偏移仅钳制（增删行不再跳回顶部），切换地图/重载时显式归零 |
+| `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存：死亡竞赛图与爆破图统一 **5 列一页式网格**（列头编号+名称；商品格=图标/名称/价格；列内超出鼠标滚轮逐列滚动）。爆破图第 1 列固定"装备"列（拆弹装备购买项仅 CT，T 方空列；分类列按玩家队伍下发 T/CT 独立配置），顶部余额+购买窗口信息栏，余额不足/窗口关闭置灰；死亡竞赛图 5 列分类网格免费发放 |
 | `ShopPreviewWidget` | 配置界面的购买页实时预览（5 列网格，随编辑刷新；爆破图按 tTeam 参数分别渲染 CT 视角（含拆弹装备列）与 T 视角（第 1 列空列）），拆弹装备价格取编辑中的全局经济参数 |
 | `ItemStrings` | 物品串统一解析/导出工具（服务端发放与客户端预览共用）：主格式 **/give 格式** `id[minecraft:组件={...}] 数量`（组件键不带引号，与 /give 输出一致；括号匹配同时感知 [] 与 {} 嵌套，组件值内含列表如 SpawnPotentials:[] 不会截断；**组件值任意类型**经 `{"v":值}` 包装解析——`NbtHelper.fromNbtProviderString` 只接受复合根），兼容旧完整 SNBT（含 1.20 tag 迁移）与 `id 数量`；`fromStack` 把 ItemStack 导出为 /give 格式（手持添加用）；`isPlausible` 供保存前校验；解码失败记录 `ItemStrings` WARN 日志 |
-| `HudOverlay` | CS2 风格对局 HUD 渲染（顶部队伍栏：己方/敌方玩家卡片 + 中央计分板；淡入淡出动画，断线重置）。爆破对局：回合比分（T x : y CT）、C4 红色爆炸倒计时、计分板下方状态行（安放地点/拆弹警告/重连等待/购买窗口，`drawBombStatusLine`）、CT 拆弹装备卡片标记（roster `kit` 字段） |
+| `HudOverlay` | CS2 风格对局 HUD 渲染（顶部队伍栏：己方/敌方玩家卡片 + 中央计分板；淡入淡出动画，断线重置）。爆破对局：回合比分（T x : y CT）、C4 红色爆炸倒计时、计分板下方状态行（安放地点/拆弹警告/重连等待/购买窗口，`drawBombStatusLine`）、CT 拆弹装备卡片标记（roster `kit` 字段）；计分板下方另显示爆破 MVP 音乐金色提示（`drawMvpHint`，5 秒自动消失） |
+| `MvpMusicIndex` / `MvpMusicCache` / `MvpMusicPlayer` / `MvpMusicClientHandler` | MVP 音乐客户端链路：`MvpMusicIndex` 拉取并解析 `<mvpMusicUrl>/index_file.json`（`updated_at` + `musics[]`，支持曲目对象内嵌 `path`/`hash` 子对象或平铺字段；拼装出的曲目/图标 URL 会自动把中文等非 ASCII 字符百分号编码，已编码的 `%XX` 不重复编码），失败回退磁盘缓存 `mvp_music/index_<murmur3(url)>.json`；`MvpMusicCache` 按 MurmurHash3_x86_32 下载校验音乐/图标到 `config/cstmm/client/cache/mvp_music/<host_port>/music/` 与 `.../cover/`（按服务器隔离，JOIN 时 `onServer` 切换；临时文件 + ATOMIC_MOVE，失败 60s 冷却；图标经 `iconTexture` 读盘解码并缓存纹理，未提供图标哈希时退回 URL 直连）；`MvpMusicPlayer` 用 JLayer 解码 MP3 → 16-bit LE PCM → `SourceDataLine` 输出（`FloatControl.MASTER_GAIN` 控制音量，守护线程 `cstmm-mvp-music`，支持 stop/当前曲名查询）；`MvpMusicClientHandler` 收到 S2C 包后按 `delayMs` 延迟，先展示提示文案再异步确保缓存并播放，断线停止 |
 
 ### 2.3 关键设计约束
 
@@ -160,7 +164,7 @@
 
 **leaderboard**（S2C）：分片包（`varInt partIndex` + `varInt totalParts` + `string data(32767B)`，每片 ≤30000 字节），拼接后为 `{"players":[{"name","kills","deaths","matches","wins"},...]}`——全服档案的排行字段快照。排序（K/D、胜率、总击杀）由客户端本地完成；履历页打开时经 `REQUEST_LEADERBOARD` 触发，重新切页即更新。详见 NETWORK.md §5.2。
 
-**shop_data**（S2C）：`bool eligible` + `bool bombMode` + `bool hasDefuser` + `varInt money` + `bool buyWindowOpen` + `varInt defuserPrice` + `varInt colCount` + 循环列 `{string name(64B) + string icon(32000B) + varInt itemCount + 循环商品 {itemId(256B)/price/maxPurchase/team(8B)/displayName(256B)/icon(32000B)}}`——每列自带商品列表（列内商品即购买页网格一列）。数据流：客户端打开 ShopScreen 时在**构造器**发送 `REQUEST_SHOP`（放 init 会因界面刷新循环重复请求）→ 服务端 `sendShopData` 组装列（爆破图 1+4 列含空装备列 + 按阵营的 hasDefuser；普通图 5 列；未配置分类列回退平铺 shopItems 单列）→ `ShopDataCache` 缓存并刷新界面；购买窗口翻转/结算/购买成功按订阅制重推。完整逐字节格式见 NETWORK.md §5.2。
+**shop_data**（S2C）：`bool eligible` + `bool bombMode` + `bool hasDefuser` + `varInt money` + `bool buyWindowOpen` + `varInt defuserPrice` + `varInt colCount` + 循环列 `{string name(64B) + string icon(32000B) + varInt itemCount + 循环商品 {itemId(256B)/price/maxPurchase/team(8B)/displayName(256B)/icon(32000B)}}`——每列自带商品列表（列内商品即购买页网格一列）。数据流：客户端打开 ShopScreen 时在**构造器**发送 `REQUEST_SHOP`（放 init 会因界面刷新循环重复请求）→ 服务端 `sendShopData` 组装列（爆破图 1+4 列含空装备列 + 按阵营的 hasDefuser；死亡竞赛图 5 列；未配置分类列回退平铺 shopItems 单列）→ `ShopDataCache` 缓存并刷新界面；购买窗口翻转/结算/购买成功按订阅制重推。完整逐字节格式见 NETWORK.md §5.2。
 
 **open_config_screen**（S2C）：空包。**request_config_sync**（C2S）：`string clientHash`（客户端本地缓存的核心配置哈希，空载荷防御解码兼容旧版客户端）。服务端限频 **2 次/秒/玩家**，超限拒绝并提示；哈希一致仅回 `config_meta` 小包，不一致下发全量。
 
@@ -242,10 +246,11 @@
 |---|---|---|
 | `config/cstmm/configs/maps.json` | 地图配置 | 原子写盘；单条坏数据仅跳过该条 |
 | `config/cstmm/configs/global.json` | 全局配置 | 原子写盘 |
-| `config/cstmm/data/players/<player_uuid>.json` | 玩家档案（战绩 + 头像绑定 avatarType/avatarId，逐玩家一文件，**进服即创建**） | 原子写盘；**损坏档案不加载、不覆盖**，玩家进服收到聊天警告，管理员修复后重启生效 |
+| `config/cstmm/data/players/<player_uuid>.json` | 玩家档案（战绩 + 头像绑定 avatarType/avatarId + MVP 音乐名 mvpMusicName，逐玩家一文件，**进服即创建**） | 原子写盘；**损坏档案不加载、不覆盖**，玩家进服收到聊天警告，管理员修复后重启生效 |
 | `config/cstmm/data/bags/<player_uuid>.json` | 对局背包快照（逐玩家一文件） | 原子写盘；已有未恢复快照绝不被覆盖；损坏文件不加载、不覆盖、不删除；恢复 = 清背包 → 恢复 → 成功才删快照（null 字段保护），失败保留可重试；旧版单文件 `bags.json` 启动时自动迁移并重命名为 `bags.json.migrated` |
 | `config/cstmm/data/clans.json` | 战队数据（名称/缩写/徽标 base64/队长/成员/上限） | 原子写盘；损坏时 `loadFailed` 拒绝一切战队变更（创建/加入/退出等全部返回错误提示）且绝不覆盖用户文件，管理员修复后重启生效 |
-| **客户端** `config/cstmm/client/config.json` | 客户端个性化配置（当前仅界面主题色 themeColor） | 懒加载 + 变更即原子落盘；损坏按默认值兜底 |
+| **客户端** `config/cstmm/client/config.json` | 客户端个性化配置（界面主题色 themeColor + MVP 音乐开关 mvpMusicEnabled / 音量 mvpMusicVolume（0~4）+ 模组音效音量 soundEffectsVolume（0~4）+ 下载线程数 downloadThreads（1~32）） | 懒加载 + 变更即原子落盘；损坏按默认值兜底 |
+| **客户端** `config/cstmm/client/cache/mvp_music/<host_port>/music/<murmur3>.<ext>` 与 `.../<host_port>/cover/<murmur3>.<ext>` | MVP 音乐与图标磁盘缓存（按服务器隔离，音乐与图标分子目录，按内容 MurmurHash3_x86_32 命名） | `MvpMusicCache` 下载后校验哈希再 ATOMIC_MOVE 落盘；**配置同步完成即**拉取索引并 `prefetchAll` 后台预下载全部资源（不等界面打开/玩家点击；下载池并发=客户端配置 downloadThreads 1~32 默认 3，可实时调整；同资源等待者回调去重；失败弹 ToastManager 提示栏）；失败 60s 冷却；索引回退文件 `mvp_music/index_<murmur3(url)>.json` 存于 mvp_music 根目录 |
 | **客户端** `config/cstmm/client/cache/config_files/<host_port>.json` | 配置磁盘缓存（核心配置 JSON + 哈希，按服务器隔离；标识中冒号等非法字符替换为下划线） | 哈希一致时重连免收全量配置；损坏/缺失静默降级为全量重拉 |
 | **客户端** `config/cstmm/client/cache/badges/<host_port>/<badgeId>.b64` | 徽标磁盘缓存（内容寻址，按服务器隔离，逐徽标一文件） | 分片收齐即落盘；进服上报已知 id 服务端免重发；文件名经 hex16 白名单校验，损坏静默忽略 |
 
@@ -260,19 +265,20 @@
 | `/cstmm reload` | OP≥2 | 从磁盘重新加载配置 |
 | `/cstmm data restore bags <玩家>` | OP≥2 | 恢复玩家全部已保存背包 |
 | `/cstmm data restore bags <玩家> <槽位>` | OP≥2 | 恢复指定槽位（0-40） |
-| `/cstmm data get player <玩家名\|UUID> [字段]` | OP≥2 | 查看玩家战绩档案（支持离线玩家，全量输出含头像绑定行）；可选字段输出单值：kills / deaths / matches / wins / penaltydeaths / kd / name / uuid / avatar（未绑定时显示"未绑定"）/ bags（背包快照概要：保存时间+非空物品数） |
+| `/cstmm data get player <玩家名\|UUID> [字段]` | OP≥2 | 查看玩家战绩档案（支持离线玩家，全量输出含头像绑定行）；可选字段输出单值：kills / deaths / matches / wins / penaltydeaths / kd / name / uuid / avatar（未绑定时显示"未绑定"）/ mvpmusic（MVP 音乐名，未选时显示"未选择"）/ bags（背包快照概要：保存时间+非空物品数） |
 | `/cstmm data get clan "<战队名>" [字段]` | OP≥2 | 查看战队信息；可选字段输出单值：name / abbr / limit / leader / members / badge（超长 base64 只回长度与文件位置）/ createdat。**战队名含空格必须加引号**（string() 参数由 Brigadier 原生读引号并剥引号；无引号输入读到空格即停 → 解析失败）；**引号内名字首尾不得有空白**（`" Team Kun"` 不合法，执行器拒绝并提示正确写法 `"Team Kun"`）。Tab 补全：引号输入（`"Te`）→ 建议 `"Team Kun"` 完整引号名；无引号输入 → 裸词候选。字段为独立参数，Tab 裸字段词 |
 | `/cstmm data get map <地图ID> [字段]` | OP≥2 | 查看单张地图配置：省略字段输出全字段摘要；指定字段输出单值（id / displayname / enabled / wincondition / targetkills / maxduration / tierule / boundary / redboundary / blueboundary / redspawns / bluespawns / minplayers / cooldownseconds / minredplayers / minblueplayers / preparetime / boundarywarningtime / boundarypenaltykills / kickcooldownseconds / reinforcementmode / maxredplayers / maxblueplayers / reinforceable / dimension / background / shopitems） |
-| `/cstmm data get global [字段]` | OP≥2 | 不带字段输出 global.json 原文；指定字段输出单值：quicktimeout / gear（默认装备列表） |
+| `/cstmm data get global <字段>` | OP≥2 | 指定字段输出单值：quicktimeout / gear（默认装备列表）/ mvpmusicurl（MVP 音乐索引根 URL）；global.json 原文查看已迁移至 `/cstmm data get raw_file global` |
 | `/cstmm data delete player <玩家名\|UUID> [profile\|bags\|avatar\|all]` | OP≥2 | 删除玩家数据：省略类型默认 all（战绩档案 players/<uuid>.json + 背包快照 bags/<uuid>.json）；avatar=清除头像绑定（写盘并同步在线客户端三处展示点，原本无绑定时提示无可删数据）；档案删除同时解除损坏标记，玩家重进服后从零建档 |
 | `/cstmm data delete clan "<战队名>"` | OP≥2 | 删除战队（等同队长解散：清除三索引并落盘，在线成员收到通知与最新 MINE）。**战队名含空格必须加引号**（string() 原生引号解析）；引号内名字首尾不得有空白（同 get） |
 | `/cstmm data delete map <地图ID>` | OP≥2 | 删除地图配置（写盘并广播全服；正在对局中使用的地图拒绝删除，防对局僵死） |
-| `/cstmm data get maps\|clans` | OP≥2 | 读取对应 JSON 文件原文；≤1500 字符直接聊天输出，超出则回文件路径 + 开头预览 |
+| `/cstmm data get raw_file maps\|global\|clans` | OP≥2 | 读取对应 JSON 文件原文（原 `get maps\|clans` 与 `get global` 不带字段的行为迁移至此）；≤1500 字符直接聊天输出，超出则回文件路径 + 开头预览 |
 | `/cstmm data edit player <玩家名\|UUID> <字段> <值>` | OP≥2 | 修改档案字段：kills / deaths / matches / wins / penaltyDeaths（支持离线玩家，改后写盘并同步在线客户端） |
 | `/cstmm data edit player <玩家名\|UUID> avatar <qq\|bili> <账号ID>` / `avatar clear` | OP≥2 | 设置/清除玩家头像绑定（支持离线玩家；账号 ID 纯数字，校验规则与客户端个性化页一致；改后写盘，在线玩家同步履历页/战队成员列表/队列页三处头像展示） |
 | `/cstmm data edit player <玩家名\|UUID> name <新名字>` | OP≥2 | 修改玩家档案显示名（仅影响履历/查询展示，不改 UUID；改后写盘并同步在线客户端） |
+| `/cstmm data edit player <玩家名\|UUID> mvpmusic <音乐名\|clear>` | OP≥2 | 设置/清除玩家 MVP 音乐（音乐名须存在于服务端 `mvpMusicUrl` 索引中；`clear` 或空串清除；改后写盘并同步在线客户端）。未配置 `mvpMusicUrl` 时拒绝设置 |
 | `/cstmm data edit map <地图ID> <字段> <值>` | OP≥2 | 命令侧修改地图配置任意字段（改后经 ConfigManager 写盘并广播全服在线客户端）：标量与整数字段直接赋值（targetkills/maxduration/boundarywarningtime/minredplayers/minblueplayers ≥1，其余整数 ≥0）；enabled/reinforceable 接受 true/false/1/0；wincondition=KILLS\|TIMER、tierule=OVERTIME\|DRAW、reinforcementmode=CONDITIONAL\|ALWAYS；boundary/redboundary/blueboundary 用 6 整数 `<minX> <minY> <minZ> <maxX> <maxY> <maxZ>` 或 clear 清空（全 0=未配置回退公共）；redspawns/bluespawns 用 `add <x> <y> <z>` / `remove <序号>`（至少保留 1 个）/ 不可 clear；shopitems 用 `add <物品ID> [价格] [限购]`（末尾两个纯数字解析为价格与限购，支持 "xxx 64" 数量后缀但此时需同时给价格限购）/ `remove <序号>` / `clear`；id 改名（非 ENDED 对局占用时拒绝，与删除同一保护）查重；displayname/background 接受任意文本（background 支持 clear） |
-| `/cstmm data edit global <字段> <值>` | OP≥2 | 命令侧修改全局配置（改后写盘并广播全服）：quicktimeout <秒≥1>；gear set <槽位> <物品ID>（槽位与配置界面同口径：armor.head/chest/legs/feet/body、weapon.mainhand/offhand、container.0~35，兼容简写 head/chest/legs/feet/mainhand/offhand；物品ID 可含数量后缀或 SNBT）；gear remove <槽位>（跨写法等价匹配，`head` 可删 `armor.head` 条目）/ gear clear。gear set 按槽位等价键覆盖同槽旧配置（head 与 armor.head 视为同一槽，不产生重复条目） |
+| `/cstmm data edit global <字段> <值>` | OP≥2 | 命令侧修改全局配置（改后写盘并广播全服）：quicktimeout <秒≥1>；mvpmusicurl <http(s)://URL\|空>（MVP 音乐索引根 URL，空值清除，须 http/https 前缀）；gear set <槽位> <物品ID>（槽位与配置界面同口径：armor.head/chest/legs/feet/body、weapon.mainhand/offhand、container.0~35，兼容简写 head/chest/legs/feet/mainhand/offhand；物品ID 可含数量后缀或 SNBT）；gear remove <槽位>（跨写法等价匹配，`head` 可删 `armor.head` 条目）/ gear clear。gear set 按槽位等价键覆盖同槽旧配置（head 与 armor.head 视为同一槽，不产生重复条目） |
 | `/cstmm data edit clan "<战队名>" <字段> <值>` | OP≥2 | 修改战队字段：name / abbr / limit（人数上限）/ leader（转让队长，支持离线成员）/ badge（URL、base64 ≤48KiB 或 clear 清空；游戏内命令 256 字符上限，超长 base64 经服务器控制台输入；改后写盘并推送成员客户端）。**战队名含空格必须加引号**（string() 原生引号解析）；**引号内名字首尾不得有空白**（`" Team Kun"` 不合法）。Tab 补全：引号输入 → `"完整名"`；字段（裸词）→ 值（leader=成员名、badge=clear、limit=常用数字） |
 | `/cstmm debug match_info_hud <t\|f>` | OP≥2 | 调试：强制显示/关闭比赛信息栏（屏幕顶部中央，淡入约 1 秒）。**仅作用于执行者自己的客户端**（信息栏为客户端显示，仅限游戏内玩家执行，不影响其他玩家）。开启后立即向执行者推送一次，此后每秒向其推送首个活跃对局的 HUD；无活跃对局时向执行者发调试预览计分板（地图名"HUD 调试预览"+ 0:0 + 90 秒倒计时，仅中央计分板无队伍卡片，验证显示链路）；关闭时立即向执行者发清空包（inGame=false）复位其 HUD |
 | `/cstmm debug bandwidth start\|stop\|get\|view` | OP≥2 | 调试：服务器带宽记录（Netty 管线最外侧字节计数器，统计每个连接加密压缩后的线路字节，含原版与模组全部流量；玩家 JOIN 时注入）。start=清零并开始逐秒采样；stop=停止并返回时长/总量/峰值汇总；get=当前最近 1 秒出/入站速率；view=总量/均值/峰值摘要 + 最近 15 条逐秒样本。采样线程为常驻 1Hz 守护线程 |
@@ -308,12 +314,12 @@
 | `redBoundary` / `blueBoundary` | object | 全 0 | 红/蓝队专属边界，全 0 时该队回退 `boundary` |
 | `redSpawns` / `blueSpawns` | 数组 | [] | 出生点 `{"x","y","z"}`（保存校验非空） |
 | `shopItems` | 数组 | [] | 旧版平铺本图商品 `{"itemId","price","maxPurchase"}`（未配置 shopColumns 时回退；ShopItem 类保留在 GlobalConfig） |
-| `shopColumns` | 数组 | [] | 普通图商店分类列 `{"name","items":[ShopItem]}`（购买页网格 5 列生效；爆破图未配置队伍列时回退；旧键 `bombShopColumns` 自动迁移） |
+| `shopColumns` | 数组 | [] | 死亡竞赛图商店分类列 `{"name","items":[ShopItem]}`（购买页网格 5 列生效；爆破图未配置队伍列时回退；旧键 `bombShopColumns` 自动迁移） |
 | `shopColumnsT` / `shopColumnsCT` | 数组 | [] | 爆破图 T 方 / CT 方购买页分类列，各最多 4 列生效；按玩家队伍下发与购买（未配置回退 shopColumns） |
-| `bombsites` | 数组 | [] | 包点 `{"name","x","y","z","radius"}`：判定为**立方体**（三轴 \|坐标差\| ≤ radius，半径=半边长，≤0 按 3 兜底） |
+| `bombsites` | 数组 | [] | 包点 `{"name","x1","y1","z1","x2","y2","z2"}`：两角点定义的**长方体**（三轴取 Min/Max 含边判定，填反自动交换；旧版 `{"name","x","y","z","radius"}` 中心+半径格式由 ConfigManager.loadMaps 自动迁移为两点式，下次保存落盘新格式） |
 | `backgroundBase64` | string | "" | 卡片背景图（PNG 的 Base64） |
 
-`global.json`：`quickTimeout`（快速匹配超时秒数，唯一全局对局参数）、`defaultGear`（竞技默认装备 `{"slot","itemId"}`）。slot 与配置界面校验器同口径：`armor.head/chest/legs/feet/body` 或 `container.0~container.35`（`/item replace entity` 语法）；同时兼容简写 `head/chest/legs/feet/mainhand/offhand` 与 `weapon.mainhand/offhand`（`EquipmentManager.applyToSlot` 全部识别：armor.* 映射对应盔甲槽、weapon.* 映射主手/副手、container.N 替换主背包 N 号槽、armor.body 玩家无该槽位进背包/掉落、未知槽位塞背包或掉落；slot 为 null/空串的条目跳过）。
+`global.json`：`quickTimeout`（快速匹配超时秒数，唯一全局对局参数）、`defaultGear`（竞技默认装备 `{"slot","itemId"}`）、`mvpMusicUrl`（MVP 音乐云端索引根 URL，`http://` 或 `https://`，留空禁用）。slot 与配置界面校验器同口径：`armor.head/chest/legs/feet/body` 或 `container.0~container.35`（`/item replace entity` 语法）；同时兼容简写 `head/chest/legs/feet/mainhand/offhand` 与 `weapon.mainhand/offhand`（`EquipmentManager.applyToSlot` 全部识别：armor.* 映射对应盔甲槽、weapon.* 映射主手/副手、container.N 替换主背包 N 号槽、armor.body 玩家无该槽位进背包/掉落、未知槽位塞背包或掉落；slot 为 null/空串的条目跳过）。
 
 ## 9. 日志规范
 
@@ -348,3 +354,34 @@
 - 任一入口抛出未捕获 Throwable（含 Error）→ **进入保护模式**：完整异常堆栈打印到服务器控制台、向全体在线玩家广播警告、尽力强制结算所有活跃对局（恢复玩家原点/背包/游戏模式），此后模组全部功能停用（各入口直接跳过，命令提示"模组已进入保护模式"），服务器本体继续运行，保护持续到重启；
 - 秒级调度不再逐任务吞异常——任一子系统异常即进入保护模式，避免带病运行；
 - 停服保存（SERVER_STOPPING）为独立 try/catch：单项保存失败不跳过另一项（停服阶段保护模式无意义）。
+
+---
+
+## 11. 第三方依赖与合规（JLayer）
+
+客户端 MVP 音乐需要解码 MP3，而 Minecraft 原版音效系统只支持资源包内的 `.ogg`，因此引入纯 Java MP3 解码器 **JLayer**。
+
+| 项目 | 内容 |
+|---|---|
+| 依赖 | `javazoom:jlayer:1.0.1`（本地文件 `libs/jlayer-1.0.1.jar`） |
+| 构建声明 | [build.gradle](build.gradle)：`implementation name: 'jlayer-1.0.1'` + `include name: 'jlayer-1.0.1'` |
+| 打包形态 | **jar-in-jar 独立嵌套 JAR**：`META-INF/jars/jlayer-1.0.1.jar`（Loom 自动写入 `fabric.mod.json` 的 `jars` 列表） |
+| 许可证 | GNU Lesser General Public License（LGPL）2.1 |
+| 许可证全文 | 仓库 `libs/LGPL-2.1.txt`；构建时复制为模组内 `LICENSE-JLAYER-LGPL-2.1.txt` |
+| 版权与声明 | `THIRD_PARTY_NOTICES.md`（同时打进模组 jar 根目录），完整保留原始版权声明 |
+| 完整源代码 | 仓库 `libs/jlayer-1.0.1-sources.jar`（与二进制同版本）；上游 <https://github.com/javazoom/jlayer> |
+| 是否修改 | 未修改 JLayer 源码或二进制 |
+
+代码引用 JLayer 时必须保持 `javazoom.jl.decoder.*` 包名不变，否则替换库后模组无法链接。
+
+### 11.1 替换 JLayer（LGPL 允许的“可替换库”操作）
+
+1. 解压模组 jar：`unzip chocolate-server-tacz-match-mod-<版本>.jar -d cstmm-unpacked`；
+2. 用自编译的、API 兼容的 JLayer 1.0.1 替换
+   `cstmm-unpacked/META-INF/jars/jlayer-1.0.1.jar`（保持文件名不变最简单）；
+   若文件名不同，同步修改 `cstmm-unpacked/fabric.mod.json` 中 `jars[].file`；
+3. 重新打包（保持原结构）：`cd cstmm-unpacked && zip -r ../chocolate-server-tacz-match-mod-<版本>-jlayer-replaced.jar .`；
+4. 服务端与客户端部署同一份修改后的 jar（本模组两端必须同版本）。
+
+> 若修改了 JLayer 源码，按 LGPL 要求必须公开修改后的完整源码；替换后的库仍需保留许可证与版权声明。
+> 离线构建：以上 jar 与源码均已放入 `libs/`，`gradle build --offline` 不依赖外部 Maven 源。

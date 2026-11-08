@@ -71,8 +71,8 @@ CSTMM 网络层基于 **Fabric Networking API v1**（`fabric-networking-api-v1`�
 
 | 侧 | 注册 |
 |---|---|
-| `playS2C()` ×14 | `hud_data` `match_status` `config_sync` `config_meta` `open_config_screen` `player_profile` `leaderboard` `handshake_s2c` `shop_data` `clan_data` `queue_status` `popup` `badge` `clan_hints` |
-| `playC2S()` ×9 | `match_action` `config_update` `request_config_sync` `handshake_c2s` `clan_action` `request_queue_status` `request_badge` `badge_known` `set_face` |
+| `playS2C()` ×15 | `hud_data` `match_status` `config_sync` `config_meta` `open_config_screen` `player_profile` `leaderboard` `handshake_s2c` `shop_data` `clan_data` `queue_status` `popup` `badge` `clan_hints` `mvp_music` |
+| `playC2S()` ×10 | `match_action` `config_update` `request_config_sync` `handshake_c2s` `clan_action` `request_queue_status` `request_badge` `badge_known` `set_face` `set_mvp_music` |
 
 **接收器注册**（只需数据流向的接收侧）：
 
@@ -87,6 +87,8 @@ CSTMM 网络层基于 **Fabric Networking API v1**（`fabric-networking-api-v1`�
 | `request_queue_status` | C2S | 服务端（订阅集增删 + 立即回发快照） | 同上 |
 | `request_badge` | C2S | 服务端（badgeId 反查战队补发全部分片） | 同上 |
 | `set_face` | C2S | 服务端 `handleSetFace`（校验后写档案 + 同步档案/战队/队列三处下发） | 同上 |
+| `set_mvp_music` | C2S | 服务端 `handleSetMvpMusic`（校验音乐名后写档案 + 回发 player_profile） | `context.server().execute()` → 主线程 |
+| `mvp_music` | S2C | 客户端 `MvpMusicClientHandler.onPayload`（延迟后展示提示 + 播放音乐） | `context.client().execute()` → 客户端主线程 |
 | 其余 12 个 S2C 包 | S2C | 客户端各接收器（`ClientNetworkHandler`） | `context.client().execute()` → 客户端主线程 |
 
 ### 3.2 线程模型（重要）
@@ -149,6 +151,8 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 | `cstmm:request_badge` | C2S | 徽标缓存缺失请求（客户端收 MINE/DETAIL 后内存+磁盘均无该 badgeId 时请求补发） | 极低频 |
 | `cstmm:badge_known` | C2S | 客户端进服上报磁盘缓存已有的徽标 id 列表，服务端加入该玩家"已下发"集合（跳过重发） | 每次进服 1 次（有缓存才发） |
 | `cstmm:set_face` | C2S | 设置/清除自己的头像绑定（个性化页保存/清除按钮；服务端校验 qq/bili 平台 + 纯数字 ID） | 玩家操作驱动 |
+| `cstmm:set_mvp_music` | C2S | 设置/清除自己的 MVP 音乐（个性化页选择/清除；服务端校验音乐名 ≤256 字节 UTF-8，写档案后回发 player_profile） | 玩家操作驱动 |
+| `cstmm:mvp_music` | S2C | MVP 音乐播放通知（对局结算/爆破回合结束后服务端判定 MVP 并下发；客户端按 `delayMs` 延迟后展示提示并播放音乐） | 事件驱动（每回合/每局最多一次） |
 
 ### 5.2 逐包字段表
 
@@ -166,7 +170,7 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 > 快速匹配走专用 `JOIN_QUICK` 动作，不再以 `"quick"` 伪地图 ID 复用 `JOIN_QUEUE`（否则真实地图 ID 恰为 `quick` 时会被劫持进快速队列）。
 > **爆破交互（PLANT_BOMB=11 / DEFUSE_BOMB=12，阶段③）**：客户端每 tick 检测按键状态（安放=手持 `cstmm:c4` + 右键（使用键）按住；拆除=3 格内有 `cstmm:c4` 实体 + 右键按住），**按住状态翻转时**才发 `target="start"/"stop"`（不刷包）。`mapName`/`team` 空闲。服务端 `BombInteractionManager` 校验对局/阵营/包点或炸弹范围/阶段后逐 tick 累计进度（进度与条件校验全在服务端，客户端仅上报按键状态翻转）。
 
-**`cstmm:hud_data`（S2C）**：`string mapName(64B，发送前 truncate)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame` + `varInt phase`（MatchSession.GamePhase ordinal，1=准备 2=战斗）+ `string rosterJson(65536B，发送前 truncate)` + `string extraJson(65536B)`。`remainingSeconds` 在准备阶段携带准备倒计时、战斗阶段携带对局剩余秒数。`rosterJson` 为本局花名册紧凑 JSON 数组（元素字段：`u`=uuid、`n`=名字、`t`=队伍 1红/2蓝、`k`=本局个人击杀、`d`=本局死亡、`lk`=上一条命击杀、`c`=战队缩写（无战队省略）、`b`=徽标引用（base64 徽标为内容寻址 id，URL 徽标为完整 URL，客户端自行下载；无徽标省略）、`at`/`ai`=头像绑定平台/账号（未设置省略）、`kit`=true 爆破图 CT 持有拆弹装备（玩家 tag 判定，非物品；无省略）），供客户端渲染 CS2 风格顶部队伍栏；徽标分片经 `ensureHudBadge` 保证先行下发。血量/存活/阵亡状态由客户端本地读取玩家实体，不入包。结束时发 `inGame=false` 清除包。`extraJson` 普通对局为 `"{}"`；爆破对局携带回合状态 `{"bombMode":true,"round","wins1","wins2","tTeam"(1/2),"ot","otRound","planted","bombTimer","buyTime"(购买窗口=冻结时间+开局后 N 秒，与 EconomyManager 判定同源),"waiting"(整队离线等待重连),"defusing"(拆弹进行中)}`，客户端据此渲染回合比分、T/CT 标签、C4 红色倒计时与状态行（C4 已安放[不含包点位置]/拆弹警告/重连等待/购买窗口）。
+**`cstmm:hud_data`（S2C）**：`string mapName(64B，发送前 truncate)` + `int redKills` + `int blueKills` + `int remainingSeconds` + `bool inGame` + `varInt phase`（MatchSession.GamePhase ordinal，1=准备 2=战斗）+ `string rosterJson(65536B，发送前 truncate)` + `string extraJson(65536B)`。`remainingSeconds` 在准备阶段携带准备倒计时、战斗阶段携带对局剩余秒数。`rosterJson` 为本局花名册紧凑 JSON 数组（元素字段：`u`=uuid、`n`=名字、`t`=队伍 1红/2蓝、`k`=本局个人击杀、`d`=本局死亡、`lk`=上一条命击杀、`c`=战队缩写（无战队省略）、`b`=徽标引用（base64 徽标为内容寻址 id，URL 徽标为完整 URL，客户端自行下载；无徽标省略）、`at`/`ai`=头像绑定平台/账号（未设置省略）、`kit`=true 爆破图 CT 持有拆弹装备（玩家 tag 判定，非物品；无省略）），供客户端渲染 CS2 风格顶部队伍栏；徽标分片经 `ensureHudBadge` 保证先行下发。血量/存活/阵亡状态由客户端本地读取玩家实体，不入包。结束时发 `inGame=false` 清除包。`extraJson` 死亡竞赛对局为 `"{}"`；爆破对局携带回合状态 `{"bombMode":true,"round","wins1","wins2","tTeam"(1/2),"ot","otRound","planted","bombTimer","buyTime"(购买窗口=冻结时间+开局后 N 秒，与 EconomyManager 判定同源),"waiting"(整队离线等待重连),"defusing"(拆弹进行中)}`，客户端据此渲染回合比分、T/CT 标签、C4 红色倒计时与状态行（C4 已安放[不含包点位置]/拆弹警告/重连等待/购买窗口）。
 
 **`cstmm:match_status`（S2C）**：`enum StatusType（MATCH_STARTING/MATCH_ENDED/VOTE_STARTED/VOTE_RESULT/COUNTDOWN，ordinal）` + `string message(128B，发送链路统一截断)` + `int redKills` + `int blueKills`。
 
@@ -197,11 +201,15 @@ Fabric Networking 的接收回调在 **Netty IO 线程**执行，**不在主线�
 
 **`cstmm:set_face`（C2S）**：`string avatarType(16B)` + `string avatarId(32B)`——头像绑定（"qq"/"bili" + 纯数字账号 ID），空 avatarType = 清除。服务端校验（`PlayerProfile.validateAvatarBinding`）后写入玩家档案（`config/cstmm/data/players/<uuid>.json` 的 avatarType/avatarId 字段），成功后弹窗确认并向三处同步：重发自己的档案（履历页）、向战队全体在线成员重推 MINE（成员列表头像广播）、向本人重发队列快照（徽标右侧头像）。**服务端只存/发绑定，不解析图片直链**——头像图片由各客户端按绑定自行获取（QQ 拼接 qlogo 直链 / B站经 uapis 解析 face 字段）。
 
+**`cstmm:set_mvp_music`（C2S）**：`string musicName(256B)`——玩家选择的 MVP 音乐名（须存在于服务端配置的索引 `index_file.json` 的 `musics[].music_name` 中；空串/`clear` = 清除）。服务端校验 UTF-8 字节 ≤256 后写入档案 `mvpMusicName` 字段，成功后弹窗并回发 `player_profile`（履历页/个性化页刷新显示）。未配置 `mvpMusicUrl` 时服务端拒绝设置。
+
+**`cstmm:mvp_music`（S2C）**：`string mvpName(64B)` + `string musicName(256B)` + `varInt delayMs` + `bool bombMode`——MVP 音乐播放通知。`mvpName` 为 MVP 玩家显示名；`musicName` 为其选择的音乐名；`delayMs` 为客户端延迟展示/播放的毫秒数（爆破目标类回合结束 2500ms，歼灭类 1000ms，死亡竞赛模式结算 0ms）；`bombMode` 区分展示位置（true=爆破→信息栏 HUD 下方金色提示；false=普通→聊天栏）。客户端收到后：① 从 `global.mvpMusicUrl` 加载索引、按 musicName 查找曲目；② 确保音乐文件已缓存（MurmurHash3_x86_32 校验下载）；③ 到 delayMs 后展示提示文案 `正在播放【mvpName】的MVP音乐【作者 - 音乐名】` 并播放（受 `mvpMusicEnabled`/`mvpMusicVolume` 客户端配置控制，JLayer 解码 MP3 → SourceDataLine 输出）。MVP 玩家未选音乐或曲目未找到时静默跳过。
+
 **`cstmm:popup`（S2C）**：`string message(256B)`——客户端在匹配菜单/配置界面内弹对话框；其他界面或无界面时用全局弹窗界面（PopupScreen）承载，确定后返回原界面。
 
 **`cstmm:clan_hints`（S2C）**：`string json(32767B)`——`{"战队名":["成员1",...]}` 全服战队名+成员名快照，客户端写入 `CommandHintCache` 供 `/cstmm data get|edit|delete clan` 的 Tab 补全（建议 provider 在客户端执行，战队数据只在服务端）。触发时机：玩家 JOIN（单发）+ 战队任何变更（`ClanManager.save` 落盘点，全服广播）。损坏 JSON 客户端静默保留旧缓存；断线清空。
 
-**`cstmm:shop_data`（S2C）**：`bool eligible` + `bool bombMode`（是否爆破图经济商店）+ `bool hasDefuser`（爆破图第 1 列是否显示拆弹装备购买项：CT=true，T=false 空列）+ `varInt money`（爆破图匹配内货币余额，普通图 0）+ `bool buyWindowOpen`（购买窗口状态）+ `varInt defuserPrice` + `varInt colCount` + 循环列 `{string name(64B) + varInt itemCount + 循环商品 {string itemId(256B) + varInt price + varInt maxPurchase + string team(8B) + string displayName(256B) + string icon(32000B)}}`。列布局：爆破图 = 1+4 列（columns[0] 为空"装备"列，拆弹装备由 hasDefuser 单独渲染；1..4=分类列，**按接收玩家队伍取 T/CT 独立配置的列**），普通图 = 5 列分类网格；商品 icon/displayName 超长按 UTF-8 字节截断防断连。BUY_ITEM 购买成功后服务端重发本包刷新余额；购买窗口翻转/结算改钱时按订阅制主动推送。
+**`cstmm:shop_data`（S2C）**：`bool eligible` + `bool bombMode`（是否爆破图经济商店）+ `bool hasDefuser`（爆破图第 1 列是否显示拆弹装备购买项：CT=true，T=false 空列）+ `varInt money`（爆破图匹配内货币余额，死亡竞赛图 0）+ `bool buyWindowOpen`（购买窗口状态）+ `varInt defuserPrice` + `varInt colCount` + 循环列 `{string name(64B) + varInt itemCount + 循环商品 {string itemId(256B) + varInt price + varInt maxPurchase + string team(8B) + string displayName(256B) + string icon(32000B)}}`。列布局：爆破图 = 1+4 列（columns[0] 为空"装备"列，拆弹装备由 hasDefuser 单独渲染；1..4=分类列，**按接收玩家队伍取 T/CT 独立配置的列**），死亡竞赛图 = 5 列分类网格；商品 icon/displayName 超长按 UTF-8 字节截断防断连。BUY_ITEM 购买成功后服务端重发本包刷新余额；购买窗口翻转/结算改钱时按订阅制主动推送。
 
 **`cstmm:handshake_s2c`**：`string serverVersion`。**`cstmm:handshake_c2s`**：`string clientVersion`。**`cstmm:open_config_screen`**：空包（codec 仅占位）；`cstmm:request_config_sync` 见 5.2（`string clientHash`）。
 

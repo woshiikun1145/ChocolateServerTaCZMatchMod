@@ -28,6 +28,11 @@ repositories {
     // Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
     // See https://docs.gradle.org/current/userguide/declaring_repositories.html
     // for more information about repositories.
+
+    // 本地第三方 jar 仓库：JLayer（纯 Java MP3 解码器）以文件形式随仓库提供，
+    flatDir {
+        dirs 'libs'
+    }
 }
 
 dependencies {
@@ -37,6 +42,10 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+    // JLayer 1.0.1 javazoom:jlayer，LGPL 2.1
+    implementation name: 'jlayer', version: '1.0.1'
+    include name: 'jlayer', version: '1.0.1'
 }
 
 processResources {
@@ -79,6 +88,11 @@ jar {
     from("LICENSE") {
         rename { "${it}_${project.archives_base_name}" }
     }
+    // 随模组分发 JLayer 的许可证全文与第三方声明
+    from("libs/LGPL-2.1.txt") {
+        rename { "LICENSE-JLAYER-LGPL-2.1.txt" }
+    }
+    from("THIRD_PARTY_NOTICES.md")
 }
 
 // configure the maven publication
