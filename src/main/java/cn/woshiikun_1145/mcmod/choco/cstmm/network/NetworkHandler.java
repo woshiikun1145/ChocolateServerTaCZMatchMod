@@ -112,6 +112,7 @@ public class NetworkHandler {
         PayloadTypeRegistry.playS2C().register(PopupPayload.ID, PopupPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(BadgePayload.ID, BadgePayload.CODEC);
         PayloadTypeRegistry.playS2C().register(ClanHintsPayload.ID, ClanHintsPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(MvpMusicPayload.ID, MvpMusicPayload.CODEC);
 
         PayloadTypeRegistry.playC2S().register(MatchActionPayload.ID, MatchActionPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(ConfigUpdatePayload.ID, ConfigUpdatePayload.CODEC);
@@ -122,6 +123,7 @@ public class NetworkHandler {
         PayloadTypeRegistry.playC2S().register(RequestBadgePayload.ID, RequestBadgePayload.CODEC);
         PayloadTypeRegistry.playC2S().register(BadgeKnownPayload.ID, BadgeKnownPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(SetFacePayload.ID, SetFacePayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(SetMvpMusicPayload.ID, SetMvpMusicPayload.CODEC);
 
         // ===== C2S 接收器（服务端处理客户端请求） =====
         // 【作用】注册客户端→服务端（C2S）各数据包的编解码器与全局接收器，回调统一转服务端主线程执行
@@ -216,6 +218,13 @@ public class NetworkHandler {
             ServerPlayerEntity player = context.player();
             if (player == null) return;
             context.server().execute(() -> ModGuardian.run("处理头像设置(C2S)", () -> handleSetFace(payload, player)));
+        });
+
+        // 【作用】客户端选择/清除自己的 MVP 音乐：校验后写入档案并同步自己的档案（个性化页回显）
+        ServerPlayNetworking.registerGlobalReceiver(SetMvpMusicPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            if (player == null) return;
+            context.server().execute(() -> ModGuardian.run("处理MVP音乐设置(C2S)", () -> handleSetMvpMusic(payload, player)));
         });
 
         ServerPlayNetworking.registerGlobalReceiver(RequestQueueStatusPayload.ID, (payload, context) -> {
@@ -554,13 +563,17 @@ public class NetworkHandler {
 
     /**
      * 【作用】按内容路由消息：携带 "POPUP:" 前缀的消息走弹窗（如"已在战队"、重复入队类提示），
-     * 其余走聊天栏。服务端任意模块需要"按内容路由弹窗/聊天"时统一调用本方法——
-     * 直接 player.sendMessage 会把 "POPUP:" 前缀原样发给客户端聊天栏。
-     * 【被谁使用】QueueManager（重复入队提示）、NetworkHandler 内部 handleClanAction（战队操作失败提示）。
+     * 携带 "TOAST:" 前缀的消息走客户端顶部提示栏（Toast，前缀原样下发由客户端剥离），
+     * 其余走聊天栏。服务端任意模块需要"按内容路由弹窗/Toast/聊天"时统一调用本方法——
+     * 直接 player.sendMessage 会把前缀原样发给客户端聊天栏。
+     * 【被谁使用】QueueManager（重复入队提示、离队提示）、NetworkHandler 内部 handleClanAction（战队操作失败提示）。
      */
     public static void deliverMessage(ServerPlayerEntity player, String message) {
         if (message != null && message.startsWith("POPUP:")) {
             sendPopup(player, message.substring(6));
+        } else if (message != null && (message.startsWith("TOAST:") || message.startsWith("HUDTEST:"))) {
+            // 原样下发（含前缀），客户端 PopupPayload 接收器按前缀转 Toast / HUD 调试开关
+            sendPopup(player, message);
         } else {
             player.sendMessage(Text.literal(message), false);
         }
@@ -683,6 +696,22 @@ public class NetworkHandler {
     }
 
     /**
+     * 【作用】处理客户端选择/清除自己的 MVP 音乐（C2S SetMvpMusicPayload）：校验后写入玩家档案
+     *         （mvpMusicName 字段），随后重发自己的档案让个性化页回显最新选择。
+     * 【被谁使用】NetworkHandler 内部：SetMvpMusicPayload 接收器（服务端主线程）。
+     */
+    private static void handleSetMvpMusic(SetMvpMusicPayload payload, ServerPlayerEntity player) {
+        String musicName = payload.musicName() == null ? "" : payload.musicName().trim();
+        String err = PlayerDataManager.getInstance().setMvpMusic(player.getUuid(), musicName);
+        if (err != null) {
+            deliverMessage(player, err);
+            return;
+        }
+        sendPopup(player, musicName.isEmpty() ? "§e已清除 MVP 音乐" : "§aMVP 音乐已保存！");
+        sendPlayerProfile(player);
+    }
+
+    /**
      * 【作用】玩家头像绑定变更后，向目标玩家（在线时）同步三处展示点：
      *         自己的档案（履历页头像，绑定随档案序列化下发）、所在战队全部成员的 MINE
      *         （成员列表展示全成员头像）、自己的队列快照（队列页徽标右侧头像）；
@@ -755,7 +784,7 @@ public class NetworkHandler {
                         // 爆破图：走经济系统（购买窗口 + 余额扣费 + 拆弹器所有权）
                         success = EconomyManager.getInstance().tryPurchase(player, buySession, buyMap, itemIndex);
                     } else if (buySession.isCompetitive()) {
-                        // 普通竞技图：维持免费发放
+                        // 死亡竞赛图：维持免费发放
                         success = EquipmentManager.getInstance().givePurchasedItem(player, itemIndex);
                         if (success) {
                             player.sendMessage(Text.literal("§a购买成功！"), false);
@@ -766,7 +795,7 @@ public class NetworkHandler {
                         player.sendMessage(Text.literal("§c仅竞技模式对局中可购买商品"), false);
                         return;
                     }
-                    // 购买成功后重发商店数据（爆破图刷新余额；普通图无变化仅作兜底同步）
+                    // 购买成功后重发商店数据（爆破图刷新余额；死亡竞赛图无变化仅作兜底同步）
                     if (success) {
                         sendShopData(player, buySession);
                     }
@@ -775,7 +804,7 @@ public class NetworkHandler {
                 }
             }
             case REQUEST_SHOP -> {
-                // 按玩家所在地图下发商店数据：普通图仅竞技模式可购；爆破图休闲/竞技均可（走经济系统）
+                // 按玩家所在地图下发商店数据：死亡竞赛图仅竞技模式可购；爆破图休闲/竞技均可（走经济系统）
                 MatchSession session = MatchManager.getInstance().getPlayerSession(player.getUuid());
                 if (session == null || session.getPhase() == MatchSession.GamePhase.ENDED) {
                     ServerPlayNetworking.send(player, ShopDataS2CPayload.create(
@@ -799,7 +828,7 @@ public class NetworkHandler {
     /**
      * 【作用】向单玩家下发商店数据（REQUEST_SHOP 响应与 BUY_ITEM 成功后订阅制推送共用）：
      *         爆破图组装 1+4 列（第 1 列固定"装备"列：CT 携带拆弹装备购买项、T 方空列，
-     *         第 2~5 列为分类列）；普通图组装 5 列分类网格（免费发放）。
+     *         第 2~5 列为分类列）；死亡竞赛图组装 5 列分类网格（免费发放）。
      *         分类列未配置时回退旧版平铺 shopItems 单列。仅服务端。
      * 【被谁使用】handleMatchAction 的 REQUEST_SHOP/BUY_ITEM 分支、sendShopDataToTeam。
      */
@@ -820,7 +849,7 @@ public class NetworkHandler {
             // 分类列按玩家队伍下发（T/红 与 CT/蓝 独立配置）
             appendShopColumns(columns, map, 4, playerIsT);
         } else if (eligible && map != null) {
-            // 普通图：5 列分类网格（全部生效，无队伍区分）
+            // 死亡竞赛图：5 列分类网格（全部生效，无队伍区分）
             appendShopColumns(columns, map, 5, null);
         }
 
@@ -832,7 +861,7 @@ public class NetworkHandler {
 
     /**
      * 【作用】把地图的商店分类列追加上下发列表（上限 maxCols 列）：
-     *         tTeam=null 取普通图通用列 shopColumns；true/false 取爆破图 T/CT 队伍列
+     *         tTeam=null 取死亡竞赛图通用列 shopColumns；true/false 取爆破图 T/CT 队伍列
      *         （未独立配置时 MapConfig 内部回退通用列）。
      *         全部未配置但旧版平铺 shopItems 非空时回退单列"商品"。
      */

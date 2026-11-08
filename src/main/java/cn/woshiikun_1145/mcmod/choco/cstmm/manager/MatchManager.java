@@ -251,7 +251,7 @@ public class MatchManager implements MatchApi {
 
         if (config.isBombMap()) {
             // 爆破图：回合状态机负责每回合初始化（阵营出生点/每回合装备/冻结/C4 指派），
-            // 不走普通对局的整场一次 setupPlayer
+            // 不走死亡竞赛对局的整场一次 setupPlayer
             session.setBombMode(true);
             BombRoundManager.getInstance().startFirstRound(session, config);
         } else {
@@ -561,12 +561,23 @@ public class MatchManager implements MatchApi {
 
         broadcastMatchStatus(session, MatchStatusPayload.StatusType.MATCH_ENDED, message);
 
+        // 【作用】HUD 胜利横幅：整场结束显示 6 秒（爆破按 T/CT 称呼，死亡竞赛按红/蓝）
+        String bannerText = session.isBombMode()
+                ? (winnerTeam == session.getTTeam() ? "T 胜利" : "CT 胜利")
+                : (winnerTeam == 1 ? "红队胜利" : winnerTeam == 2 ? "蓝队胜利" : "比赛结束");
+        session.setBanner(winnerTeam, bannerText, "比赛结束", System.currentTimeMillis() + 6000);
+
+        // 【MVP 音乐】死亡竞赛模式对局结算播报（爆破模式由每回合结束单独触发，此处跳过）
+        MvpMusicManager.onNormalMatchEnd(session);
+
         updatePlayerProfiles(session, winnerTeam);
         // 结算时因死亡被跳过恢复的玩家：快照/原点/原游戏模式保留，待 AFTER_RESPAWN 补恢复
         Set<UUID> pendingRespawnRestore = restoreAllPlayers(session);
 
         session.setPhase(MatchSession.GamePhase.ENDED);
         session.setStartTime(System.currentTimeMillis());
+        // 头顶名字前缀清理（per-player 计分板队伍移除）
+        clearNameTagTeams(session);
         if (session.isBombMode()) {
             // 爆破对局：清理回合状态机的挂起结算标记等
             BombRoundManager.getInstance().onMatchEnd(session);
@@ -707,7 +718,7 @@ public class MatchManager implements MatchApi {
         }
 
         // 【作用】爆破对局断线：不立即结算，进入 3 分钟重连宽限（整队离线挂起等待），
-        //        与普通对局"单侧无人即判负"的规则不同
+        //        与死亡竞赛对局"单侧无人即判负"的规则不同
         if (session.isBombMode()) {
             BombRoundManager.getInstance().onDisconnect(session, playerUuid);
             return;
@@ -789,6 +800,8 @@ public class MatchManager implements MatchApi {
         // 【作用】构建本局花名册 JSON（全快照统一一份，内容不变时经 sendHudData 去重零流量）
         String rosterJson = buildRosterJson(session);
         Set<String> rosterBadgeIds = collectRosterBadgeIds(rosterJson);
+        // 【作用】头顶名字前缀刷新（幂等：前缀/成员未变化时零发包）
+        applyNameTagTeams(session);
 
         HudDataPayload payload = new HudDataPayload(
                 session.getMapName(),
@@ -970,10 +983,13 @@ public class MatchManager implements MatchApi {
                 o.addProperty("kit", true);
             }
 
-            // 【作用】战队信息：缩写 + 徽标引用（URL 徽标下发完整 URL，base64 徽标下发内容寻址 id）
+            // 【作用】战队信息：全名 + 缩写 + 徽标引用（URL 徽标下发完整 URL，base64 徽标下发内容寻址 id）
             Clan clan = clanManager.getClanByPlayer(uuid);
             if (clan != null) {
                 o.addProperty("c", clan.getAbbreviation());
+                if (clan.name != null && !clan.name.isEmpty()) {
+                    o.addProperty("cn", clan.name);
+                }
                 String badge = clan.getBadgeBase64();
                 if (badge != null && !badge.isEmpty()) {
                     o.addProperty("b", ClanManager.isBadgeUrl(badge) ? badge : clan.getBadgeId());
@@ -1015,7 +1031,7 @@ public class MatchManager implements MatchApi {
     }
 
     /**
-     * 【作用】构建 HUD 扩展信息 JSON（HudDataPayload.extraJson）：普通对局为 "{}"，
+     * 【作用】构建 HUD 扩展信息 JSON（HudDataPayload.extraJson）：死亡竞赛对局为 "{}"，
      *         爆破对局携带回合状态 {"bombMode","round","wins1","wins2","tTeam","ot","otRound",
      *         "planted","bombTimer","buyTime","waiting","defusing"}——
      *         客户端据此渲染回合比分、T/CT 阵营标签、C4 倒计时与状态行（C4 已安放/拆弹警告/
@@ -1024,26 +1040,94 @@ public class MatchManager implements MatchApi {
      * 【被谁使用】broadcastHudData / broadcastForcedHudData（每秒构建）。仅服务端。
      */
     private String buildHudExtraJson(MatchSession session) {
-        if (!session.isBombMode()) return "{}";
         JsonObject o = new JsonObject();
-        o.addProperty("bombMode", true);
-        o.addProperty("round", session.getRoundNumber());
-        o.addProperty("wins1", session.getTeam1RoundWins());
-        o.addProperty("wins2", session.getTeam2RoundWins());
-        o.addProperty("tTeam", session.getTTeam());
-        o.addProperty("ot", session.isInOvertime());
-        o.addProperty("otRound", session.getOvertimeRoundInSet());
-        o.addProperty("planted", session.isBombPlanted());
-        o.addProperty("bombTimer", session.getBombTimerSeconds());
-        // 购买窗口：冻结时间 + 开局后 N 秒（与 EconomyManager 购买判定同源）
-        MapConfig hudMap = ConfigManager.getInstance().getMap(session.getMapName());
-        o.addProperty("buyTime", EconomyManager.getInstance().isBuyWindowOpen(session, hudMap));
-        // 整队离线等待重连（挂起对局推进中的提示）
-        o.addProperty("waiting", session.isWaitingReconnect());
-        // 拆弹进行中警告（精确进度由拆弹者 action bar 实时显示；带 kit/裸拆时长不同，
-        // 统一快照无法换算单一百分比，故不在此下发进度值）
-        o.addProperty("defusing", session.getDefusingPlayer() != null);
+        if (session.isBombMode()) {
+            o.addProperty("bombMode", true);
+            o.addProperty("round", session.getRoundNumber());
+            o.addProperty("wins1", session.getTeam1RoundWins());
+            o.addProperty("wins2", session.getTeam2RoundWins());
+            o.addProperty("tTeam", session.getTTeam());
+            o.addProperty("ot", session.isInOvertime());
+            o.addProperty("otRound", session.getOvertimeRoundInSet());
+            o.addProperty("planted", session.isBombPlanted());
+            o.addProperty("bombTimer", session.getBombTimerSeconds());
+            // 购买窗口：冻结时间 + 开局后 N 秒（与 EconomyManager 购买判定同源）
+            MapConfig hudMap = ConfigManager.getInstance().getMap(session.getMapName());
+            o.addProperty("buyTime", EconomyManager.getInstance().isBuyWindowOpen(session, hudMap));
+            // 整队离线等待重连（挂起对局推进中的提示）
+            o.addProperty("waiting", session.isWaitingReconnect());
+            // 拆弹进行中警告（精确进度由拆弹者 action bar 实时显示；带 kit/裸拆时长不同，
+            // 统一快照无法换算单一百分比，故不在此下发进度值）
+            o.addProperty("defusing", session.getDefusingPlayer() != null);
+        } else {
+            o.addProperty("bombMode", false);
+        }
+        // 【作用】HUD 胜利横幅（回合/整场结束限时显示；未设置或已过期省略字段，客户端据此不绘制）
+        long now = System.currentTimeMillis();
+        if (session.getBannerTeam() != 0 && !session.getBannerText().isEmpty() && now < session.getBannerUntil()) {
+            o.addProperty("bannerTeam", session.getBannerTeam());
+            o.addProperty("bannerText", session.getBannerText());
+            o.addProperty("bannerSub", session.getBannerSub());
+            o.addProperty("bannerUntil", session.getBannerUntil());
+        }
         return o.toString();
+    }
+
+    /**
+     * 【作用】为对局内全体在线玩家设置头顶名字前缀：[队伍][战队名] 玩家名
+     *         （原版计分板队伍 prefix 机制，等同 /team modify * prefix）：
+     *         爆破图 [T]/[CT]（黄/蓝），死亡竞赛 [红]/[蓝]；有战队追加 [战队名]。
+     *         每玩家独立计分板队伍（前缀含战队名因人而异），内容不变时零发包，
+     *         覆盖攻防转换（T/CT 互换）与改名场景。
+     * 【被谁使用】broadcastHudData（每秒幂等刷新）。仅服务端。
+     */
+    private void applyNameTagTeams(MatchSession session) {
+        MinecraftServer server = Cstmm.getServer();
+        if (server == null) return;
+        net.minecraft.scoreboard.ServerScoreboard sb = server.getScoreboard();
+        ClanManager clanManager = ClanManager.getInstance();
+        boolean bomb = session.isBombMode();
+        for (UUID uuid : session.getAllPlayers()) {
+            ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
+            if (player == null) continue;
+            int teamNo = session.getPlayerTeam(uuid);
+            if (teamNo == 0) continue;
+            String teamLabel = bomb
+                    ? (session.isTTeam(teamNo) ? "§e[T]" : "§9[CT]")
+                    : (teamNo == 1 ? "§c[红]" : "§9[蓝]");
+            Clan clan = clanManager.getClanByPlayer(uuid);
+            String prefix = teamLabel
+                    + (clan != null && clan.name != null && !clan.name.isEmpty() ? "§7[" + clan.name + "]" : "")
+                    + "§f ";
+            // 队伍名仅允许字母数字_-且 ≤16 字符：c + uuid 去 - 前 12 位十六进制，对局内唯一
+            String teamName = "c" + uuid.toString().replace("-", "").substring(0, 12);
+            net.minecraft.scoreboard.Team team = sb.getTeam(teamName);
+            if (team == null) team = sb.addTeam(teamName);
+            if (!team.getPrefix().getString().equals(prefix)) {
+                team.setPrefix(net.minecraft.text.Text.literal(prefix));
+                team.setColor(net.minecraft.util.Formatting.valueOf(
+                        bomb ? (session.isTTeam(teamNo) ? "GOLD" : "BLUE") : (teamNo == 1 ? "RED" : "BLUE")));
+            }
+            String playerName = player.getName().getString();
+            if (!team.getPlayerList().contains(playerName)) {
+                sb.addScoreHolderToTeam(playerName, team);
+            }
+        }
+    }
+
+    /** 【作用】整场结束移除头顶名字前缀（清理 per-player 计分板队伍）。仅服务端。 */
+    private void clearNameTagTeams(MatchSession session) {
+        MinecraftServer server = Cstmm.getServer();
+        if (server == null) return;
+        net.minecraft.scoreboard.ServerScoreboard sb = server.getScoreboard();
+        for (UUID uuid : session.getAllPlayers()) {
+            net.minecraft.scoreboard.Team team = sb.getTeam("c" + uuid.toString().replace("-", "").substring(0, 12));
+            if (team == null) continue;
+            for (String member : new java.util.ArrayList<>(team.getPlayerList())) {
+                sb.removeScoreHolderFromTeam(member, team);
+            }
+            sb.removeTeam(team);
+        }
     }
 
     /**

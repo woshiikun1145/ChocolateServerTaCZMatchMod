@@ -83,7 +83,7 @@ public final class MatchSoundPlayer {
 
     /**
      * 【作用】向单个玩家非定位单播一条音效（MASTER 分类，发包到玩家自身坐标 = 全音量可闻）。
-     * 【被谁使用】sendToSession（对局播报）、ModCommands（debug test 播报音效试听）。
+     * 【被谁使用】sendToSession（对局播报）、ModCommands（debug audio_test 播报音效试听）。
      */
     public static void playToPlayer(ServerPlayerEntity player, SoundEvent sound, float volume, float pitch) {
         player.networkHandler.sendPacket(new PlaySoundS2CPacket(

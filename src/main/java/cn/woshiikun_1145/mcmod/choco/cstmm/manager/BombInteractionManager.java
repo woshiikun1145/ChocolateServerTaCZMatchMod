@@ -390,6 +390,9 @@ public class BombInteractionManager {
         session.setPlantProgress(0);
         if (site == null && !freePlantingAllowed) return; // 并发兜底（tick 内已校验）
 
+        // 【MVP】记录本回合安放者（T 方 C4 爆炸胜利时并列击杀的判定依据）
+        session.setRoundPlanter(player.getUuid());
+
         session.setBombPlanted(true);
         session.setBombEverPlantedThisRound(true);
         session.setBombTimerSeconds(config.getBombSettings().getC4TimerSeconds());
@@ -431,6 +434,8 @@ public class BombInteractionManager {
 
     /** 拆除成功：会话清理 → 清实体 → 个人拆除奖励 → CT 赢得回合（目标金档）。 */
     private void defuseBomb(MinecraftServer server, MatchSession session, MapConfig config, ServerPlayerEntity player) {
+        // 【MVP】记录本回合拆除者（CT 拆弹胜利时直接获得 MVP）
+        session.setRoundDefuser(player.getUuid());
         session.setDefusingPlayer(null);
         session.setDefuseProgress(0);
         session.setBombPlanted(false);

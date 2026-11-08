@@ -68,10 +68,10 @@ public class MapConfig {
     private String dimension;
     /** 本图商店商品（旧版平铺列表兜底；新配置统一用 shopColumns 分类列，此字段仅作兼容保留） */
     private List<GlobalConfig.ShopItem> shopItems;
-    /** 地图类型：NORMAL=普通击杀/计时图；BOMB=爆破图（红=T 进攻方、蓝=CT 防守方，多回合制） */
+    /** 地图类型：DEATHMATCH=死亡竞赛（击杀/计时图）；BOMB=爆破图（红=T 进攻方、蓝=CT 防守方，多回合制） */
     private String gameType;
     /**
-     * 商店分类列（购买页网格布局）：普通图的 5 列分类；爆破图下此字段作为 T/CT 未独立配置时的
+     * 商店分类列（购买页网格布局）：死亡竞赛图的 5 列分类；爆破图下此字段作为 T/CT 未独立配置时的
      * 回退（兼容旧版 bombShopColumns）。旧 JSON 键 bombShopColumns 自动迁移。
      */
     @SerializedName(value = "shopColumns", alternate = "bombShopColumns")
@@ -80,9 +80,9 @@ public class MapConfig {
     private List<ShopColumn> shopColumnsT;
     /** 爆破图购买页 CT 方（蓝队）分类列（第 1 列固定拆弹装备列，第 2~5 列可配，最多 4 列） */
     private List<ShopColumn> shopColumnsCT;
-    /** 爆破图包点列表（普通图为空列表；包点数量无上限） */
+    /** 爆破图包点列表（死亡竞赛图为空列表；包点数量无上限） */
     private List<Bombsite> bombsites;
-    /** 爆破图炸弹参数（全局可调；普通图忽略） */
+    /** 爆破图炸弹参数（全局可调；死亡竞赛图忽略） */
     private BombSettings bombSettings;
     /** 本图默认装备（爆破图回合重生/阵亡玩家回装备用；未配置时回退全局默认装备） */
     private List<GlobalConfig.EquipSlot> defaultGear;
@@ -118,7 +118,7 @@ public class MapConfig {
         this.maxBluePlayers = 0;
         this.dimension = "minecraft:overworld";
         this.shopItems = new ArrayList<>();
-        this.gameType = "NORMAL";
+        this.gameType = "DEATHMATCH";
         this.shopColumns = new ArrayList<>();
         this.shopColumnsT = new ArrayList<>();
         this.shopColumnsCT = new ArrayList<>();
@@ -185,9 +185,9 @@ public class MapConfig {
 
     // ==================== 地图类型与爆破参数 ====================
 
-    /** 地图类型（Gson 兜底：缺失/null 时按普通图处理） */
+    /** 地图类型（Gson 兜底：缺失/null 或非 BOMB 的旧值——含旧版 NORMAL——一律按 DEATHMATCH 处理） */
     public String getGameType() {
-        return gameType == null || gameType.isEmpty() ? "NORMAL" : gameType;
+        return "BOMB".equalsIgnoreCase(gameType) ? "BOMB" : "DEATHMATCH";
     }
 
     /** 是否为爆破地图（BombRoundManager 回合机、队列过滤、商店/装备逻辑按此分支） */
@@ -196,8 +196,8 @@ public class MapConfig {
     }
 
     public void setGameType(String gameType) {
-        this.gameType = "BOMB".equalsIgnoreCase(gameType) ? "BOMB" : "NORMAL";
-        // 切为普通图时清空包点，避免残留数据在误改回普通图时被引用
+        this.gameType = "BOMB".equalsIgnoreCase(gameType) ? "BOMB" : "DEATHMATCH";
+        // 切为死亡竞赛图时清空包点，避免残留数据在误改回死亡竞赛图时被引用
         if (!isBombMap()) {
             this.bombsites = new ArrayList<>();
         }
@@ -217,7 +217,7 @@ public class MapConfig {
 
     public void setBombSettings(BombSettings bombSettings) { this.bombSettings = bombSettings; }
 
-    /** 商店分类列（Gson 兜底：缺失/null 返回空列表；普通图最多 5 列生效） */
+    /** 商店分类列（Gson 兜底：缺失/null 返回空列表；死亡竞赛图最多 5 列生效） */
     public List<ShopColumn> getShopColumns() {
         return shopColumns == null ? List.of() : shopColumns;
     }
@@ -249,9 +249,9 @@ public class MapConfig {
     }
 
     /**
-     * 【作用】商店商品平铺列表（普通图购买索引定位用）：按分类列顺序拼接全部商品；
+     * 【作用】商店商品平铺列表（死亡竞赛图购买索引定位用）：按分类列顺序拼接全部商品；
      *         未配置分类列时回退旧版平铺 shopItems。
-     * 【被谁使用】EquipmentManager.givePurchasedItem（普通图免费发放）、ConfigScreen 保存前预校验。
+     * 【被谁使用】EquipmentManager.givePurchasedItem（死亡竞赛图免费发放）、ConfigScreen 保存前预校验。
      */
     public List<GlobalConfig.ShopItem> getFlatShopItems() {
         List<ShopColumn> cols = getShopColumns();
@@ -445,46 +445,60 @@ public class MapConfig {
 
     /**
      * 【作用】爆破图包点（C4 可安放区域）：名称（如 A/B，用于 HUD 与消息展示）、
-     * 中心方块坐标与判定半径（立方体半边长，三轴 |坐标差| 均不超过半径即在包点内）。
-     * 【被谁使用】BombRoundManager 安放判定、爆炸定位；配置界面（阶段⑤）可视化编辑。
+     * 两角点坐标定义的长方体（立方体形式，两测点；三轴取 Min/Max 后含边判定）。
+     * 【被谁使用】BombInteractionManager 安放判定；配置界面（阶段⑤）可视化编辑。
+     * 旧版"中心坐标 + 半径"格式由 ConfigManager.loadMaps 迁移为两点式。
      */
     public static class Bombsite {
         /** 包点名（"A"/"B"/自定义，非空） */
         private String name;
-        /** 包点中心 X/Y/Z（方块坐标） */
-        private int x, y, z;
-        /** 安放判定半径（立方体半边长，方块；三轴 |坐标差| ≤ 半径即在包点内；<=0 时按 3 处理） */
-        private int radius;
+        /** 角点 1 X/Y/Z（方块坐标） */
+        private int x1, y1, z1;
+        /** 角点 2 X/Y/Z（方块坐标，与角点 1 为长方体对角） */
+        private int x2, y2, z2;
 
         public Bombsite() {
             this.name = "A";
-            this.x = 0; this.y = 0; this.z = 0;
-            this.radius = 3;
+            this.x1 = 0; this.y1 = 0; this.z1 = 0;
+            this.x2 = 0; this.y2 = 0; this.z2 = 0;
         }
 
-        public Bombsite(String name, int x, int y, int z, int radius) {
+        public Bombsite(String name, int x1, int y1, int z1, int x2, int y2, int z2) {
             this.name = name == null || name.isBlank() ? "A" : name;
-            this.x = x; this.y = y; this.z = z;
-            this.radius = radius;
+            this.x1 = x1; this.y1 = y1; this.z1 = z1;
+            this.x2 = x2; this.y2 = y2; this.z2 = z2;
         }
 
         public String getName() { return name == null || name.isBlank() ? "A" : name; }
-        public int getX() { return x; }
-        public int getY() { return y; }
-        public int getZ() { return z; }
-        /** 安放判定半径（非正数按 3 兜底，防止包点退化成不可用） */
-        public int getRadius() { return Math.max(3, radius); }
+        public int getX1() { return x1; }
+        public int getY1() { return y1; }
+        public int getZ1() { return z1; }
+        public int getX2() { return x2; }
+        public int getY2() { return y2; }
+        public int getZ2() { return z2; }
         public void setName(String name) { this.name = name; }
-        public void setX(int x) { this.x = x; }
-        public void setY(int y) { this.y = y; }
-        public void setZ(int z) { this.z = z; }
-        public void setRadius(int radius) { this.radius = radius; }
+        public void setX1(int v) { this.x1 = v; }
+        public void setY1(int v) { this.y1 = v; }
+        public void setZ1(int v) { this.z1 = v; }
+        public void setX2(int v) { this.x2 = v; }
+        public void setY2(int v) { this.y2 = v; }
+        public void setZ2(int v) { this.z2 = v; }
 
-        /** 玩家坐标是否在包点判定范围内（立方体：三轴 |坐标差| 均不超过半径；半径为方块尺度） */
+        /** 两角点是否均为空值（三坐标全 0，视为未填写；仅填一角点不算空） */
+        public boolean isUnconfigured() {
+            return x1 == 0 && y1 == 0 && z1 == 0 && x2 == 0 && y2 == 0 && z2 == 0;
+        }
+
+        /** 玩家坐标是否在包点长方体内（三轴取两角点 Min/Max 含边判定；Min/Max 填反自动交换） */
         public boolean contains(double px, double py, double pz) {
-            double dx = Math.abs(px - (x + 0.5)), dy = Math.abs(py - (y + 0.5)), dz = Math.abs(pz - (z + 0.5));
-            int r = getRadius();
-            return dx <= r && dy <= r && dz <= r;
+            return inAxis(Math.floor(px), x1, x2)
+                    && inAxis(Math.floor(py), y1, y2)
+                    && inAxis(Math.floor(pz), z1, z2);
+        }
+
+        /** 按方块坐标判定某一维，Min > Max 时自动交换 */
+        private static boolean inAxis(double v, int a, int b) {
+            return v >= Math.min(a, b) && v <= Math.max(a, b);
         }
     }
 

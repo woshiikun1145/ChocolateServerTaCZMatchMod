@@ -230,7 +230,7 @@ public class QueueManager implements QueueApi {
 
         if (entry == null) {
             if (engine.removeFromQuickQueues(uuid)) {
-                player.sendMessage(Text.literal("§e你已离开快速匹配队列！"), false);
+                NetworkHandler.deliverMessage(player, "TOAST:§e你已离开快速匹配队列！");
                 return;
             }
             player.sendMessage(Text.literal("§c你不在任何队列中！"), false);
@@ -242,7 +242,7 @@ public class QueueManager implements QueueApi {
         // 用 team 标记而非 mapId 字符串判断，真实地图 ID 恰为 "quick" 时不会被误判
         if (entry.team == -1) {
             engine.removeFromQuickQueues(uuid);
-            player.sendMessage(Text.literal("§e你已离开快速匹配队列！"), false);
+            NetworkHandler.deliverMessage(player, "TOAST:§e你已离开快速匹配队列！");
             onQueueChanged();
             return;
         }
@@ -252,7 +252,7 @@ public class QueueManager implements QueueApi {
             list.remove(uuid);
         }
 
-        player.sendMessage(Text.literal("§e你已离开 " + entry.mapId + " 队列！"), false);
+        NetworkHandler.deliverMessage(player, "TOAST:§e你已离开 " + entry.mapId + " 队列！");
         Cstmm.LOGGER.debug("[CSTMM - QueueManager] {} left queue", player.getName());
         onQueueChanged();
     }

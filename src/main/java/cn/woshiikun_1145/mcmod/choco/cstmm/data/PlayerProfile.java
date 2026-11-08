@@ -13,6 +13,8 @@ import java.util.UUID;
 public class PlayerProfile {
     /** 头像绑定账号 ID 长度上限（QQ号 5-11 位、B站 UID 可更长，取宽松上限） */
     public static final int MAX_AVATAR_ID_LENGTH = 32;
+    /** MVP 音乐名（index_file.json 的 music_name）长度上限（UTF-8 字节数） */
+    public static final int MAX_MVP_MUSIC_NAME_BYTES = 256;
 
     // 玩家 UUID（持久化主键）
     private UUID playerUuid;
@@ -32,6 +34,8 @@ public class PlayerProfile {
     private String avatarType = "";
     // 头像绑定账号 ID（QQ号 / B站 UID，纯数字）
     private String avatarId = "";
+    // 自己的 MVP 音乐名（index_file.json 的 music_name；空串 = 未选择，随档案持久化）
+    private String mvpMusicName = "";
 
     // Gson 反序列化所需的无参构造
     public PlayerProfile() {}
@@ -46,6 +50,7 @@ public class PlayerProfile {
         this.penaltyDeaths = 0;
         this.avatarType = "";
         this.avatarId = "";
+        this.mvpMusicName = "";
     }
 
     public UUID getPlayerUuid() { return playerUuid; }
@@ -57,12 +62,30 @@ public class PlayerProfile {
     public int getPenaltyDeaths() { return penaltyDeaths; }
     public String getAvatarType() { return avatarType == null ? "" : avatarType; }
     public String getAvatarId() { return avatarId == null ? "" : avatarId; }
+    public String getMvpMusicName() { return mvpMusicName == null ? "" : mvpMusicName; }
 
     public void setPlayerUuid(UUID playerUuid) { this.playerUuid = playerUuid; }
     public void setPlayerName(String playerName) { this.playerName = playerName; }
     public void setAvatarBinding(String avatarType, String avatarId) {
         this.avatarType = avatarType == null ? "" : avatarType;
         this.avatarId = avatarId == null ? "" : avatarId;
+    }
+
+    public void setMvpMusicName(String mvpMusicName) {
+        this.mvpMusicName = mvpMusicName == null ? "" : mvpMusicName;
+    }
+
+    /**
+     * 【作用】校验 MVP 音乐名：空串（清除）直接通过；非空时 UTF-8 字节数不得超过上限。
+     * @return null 表示通过，否则返回可直接发给玩家的错误消息
+     */
+    public static String validateMvpMusicName(String name) {
+        if (name == null || name.isEmpty()) return null; // 清除选择
+        int bytes = name.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        if (bytes > MAX_MVP_MUSIC_NAME_BYTES) {
+            return "§c音乐名过长！";
+        }
+        return null;
     }
 
     /**

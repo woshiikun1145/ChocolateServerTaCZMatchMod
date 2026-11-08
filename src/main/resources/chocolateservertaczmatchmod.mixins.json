@@ -9,7 +9,8 @@
   ],
   "client": [
     "KeyBindingAccessor",
-    "KeyBindingMixin"
+    "KeyBindingMixin",
+    "SoundSystemMixin"
   ],
   "injectors": {
     "defaultRequire": 1

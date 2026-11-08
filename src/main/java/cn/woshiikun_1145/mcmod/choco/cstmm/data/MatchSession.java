@@ -48,6 +48,14 @@ public class MatchSession {
     private final java.util.Map<UUID, Integer> lastLifeKills;
     // 玩家名缓存（uuid → 最近一次在线时的名字；离线玩家仍可显示卡片名）
     private final java.util.Map<UUID, String> playerNames;
+    // 各玩家本回合击杀数（仅爆破模式累计；回合开始时清空，MVP 判定读取）
+    private final java.util.Map<UUID, Integer> roundKills;
+    // 各玩家本回合造成伤害总量（仅爆破模式累计；回合开始时清空，MVP 判定读取）
+    private final java.util.Map<UUID, Double> roundDamage;
+    // 本回合安放 C4 的玩家（无安放为 null；T 爆炸胜利的 MVP 并列判定读取）
+    private UUID roundPlanter = null;
+    // 本回合拆除 C4 的玩家（无拆除为 null；CT 拆弹胜利的 MVP 判定读取）
+    private UUID roundDefuser = null;
 
     // ==================== 爆破模式回合状态（仅爆破图对局使用） ====================
     // 是否爆破对局（地图 gameType=BOMB 时由 MatchManager 开局时置位）
@@ -129,6 +137,8 @@ public class MatchSession {
         this.lifeKills = new java.util.HashMap<>();
         this.lastLifeKills = new java.util.HashMap<>();
         this.playerNames = new java.util.HashMap<>();
+        this.roundKills = new java.util.HashMap<>();
+        this.roundDamage = new java.util.HashMap<>();
         this.overtimeCount = 0;
     }
 
@@ -232,6 +242,41 @@ public class MatchSession {
         return playerDeaths.getOrDefault(playerUuid, 0);
     }
 
+    // ==================== 回合内 MVP 统计（仅爆破模式） ====================
+
+    /**
+     * 【作用】记录一次本回合击杀（EventListener 爆破对局异队击杀时调用）。
+     * 【被谁使用】EventListener 的 AFTER_DEATH 有效击杀路径（仅 session.isBombMode()）。仅服务端。
+     */
+    public void recordRoundKill(UUID killerUuid) {
+        if (killerUuid == null) return;
+        roundKills.merge(killerUuid, 1, Integer::sum);
+    }
+
+    /**
+     * 【作用】累计玩家本回合造成的有效伤害（EventListener 爆破对局异队伤害时调用）。
+     * 【被谁使用】EventListener 的 ALLOW_DAMAGE（仅 session.isBombMode()）。仅服务端。
+     */
+    public void addRoundDamage(UUID attackerUuid, double amount) {
+        if (attackerUuid == null || amount <= 0) return;
+        roundDamage.merge(attackerUuid, amount, Double::sum);
+    }
+
+    /** 【作用】玩家本回合击杀数（无记录返回 0）。MvpMusicManager 判定读取。 */
+    public int getRoundKills(UUID playerUuid) {
+        return roundKills.getOrDefault(playerUuid, 0);
+    }
+
+    /** 【作用】玩家本回合伤害总量（无记录返回 0）。MvpMusicManager 判定读取。 */
+    public double getRoundDamage(UUID playerUuid) {
+        return roundDamage.getOrDefault(playerUuid, 0.0);
+    }
+
+    public UUID getRoundPlanter() { return roundPlanter; }
+    public void setRoundPlanter(UUID roundPlanter) { this.roundPlanter = roundPlanter; }
+    public UUID getRoundDefuser() { return roundDefuser; }
+    public void setRoundDefuser(UUID roundDefuser) { this.roundDefuser = roundDefuser; }
+
     /** 【作用】上一条命击杀数（无记录或从未死亡返回 0）。HUD 击杀徽章读取。 */
     public int getLastLifeKills(UUID playerUuid) {
         return lastLifeKills.getOrDefault(playerUuid, 0);
@@ -278,6 +323,25 @@ public class MatchSession {
         if (tTeam == 1 || tTeam == 2) this.tTeam = tTeam;
     }
 
+    // ==================== HUD 胜利横幅（回合/整场结束限时显示，CS2 风格顶部横幅） ====================
+    // 横幅归属队伍（1/2，0=无）、标题/副标题文本与截止时间戳（毫秒）
+    private volatile int bannerTeam = 0;
+    private volatile String bannerText = "";
+    private volatile String bannerSub = "";
+    private volatile long bannerUntil = 0;
+
+    /** 【作用】设置胜利横幅（回合/整场结束时调用）。 */
+    public void setBanner(int team, String text, String sub, long untilMillis) {
+        this.bannerTeam = text == null || text.isEmpty() ? 0 : team;
+        this.bannerText = text == null ? "" : text;
+        this.bannerSub = sub == null ? "" : sub;
+        this.bannerUntil = untilMillis;
+    }
+    public int getBannerTeam() { return bannerTeam; }
+    public String getBannerText() { return bannerText; }
+    public String getBannerSub() { return bannerSub; }
+    public long getBannerUntil() { return bannerUntil; }
+
     /** 队伍当前阵营：true = T（进攻方），false = CT（防守方）。 */
     public boolean isTTeam(int team) { return team == tTeam; }
 
@@ -292,7 +356,7 @@ public class MatchSession {
 
     /**
      * 【作用】队伍显示名：爆破对局按当前攻防身份返回“T 方”/“CT 方”（攻防会在竞技第 13 回合
-     *         与加时第 4 回合翻转，不能写死红/蓝队名）；普通对局返回“红队”/“蓝队”。
+     *         与加时第 4 回合翻转，不能写死红/蓝队名）；死亡竞赛对局返回“红队”/“蓝队”。
      *         队伍编号 1=红队、2=蓝队。
      * 【被谁使用】BombRoundManager、VoteManager、QuickMatchEngine、ModCommands 的玩家可见消息拼装。
      */
@@ -358,6 +422,11 @@ public class MatchSession {
         roundPending = false;
         waitingReconnect = false;
         bombEverPlantedThisRound = false;
+        // 回合内 MVP 统计（新回合从零开始）
+        roundKills.clear();
+        roundDamage.clear();
+        roundPlanter = null;
+        roundDefuser = null;
     }
 
     public boolean isBombPlanted() { return bombPlanted; }

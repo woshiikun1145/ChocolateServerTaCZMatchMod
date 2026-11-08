@@ -17,6 +17,10 @@ public class GlobalConfig {
     // 注意：准备时间、边界警告/惩罚、踢人冷却、补位规则、最低人数均已改为按地图配置（见 MapConfig）
     private int quickTimeout = 30;         // 快速匹配超时秒数（唯一保留的全局参数）
 
+    // MVP 音乐资源根目录 URL（HTTPS 服务器；客户端访问 <url>/index_file.json 获取曲目清单；
+    // 空串 = 未配置，客户端不播放 MVP 音乐）
+    private String mvpMusicUrl = "";
+
     /** 爆破图经济系统参数（CS 标准默认值，全局可配；仅 gameType=BOMB 的地图对局生效） */
     private BombEconomy bombEconomy;
 
@@ -32,6 +36,10 @@ public class GlobalConfig {
 
     public int getQuickTimeout() { return quickTimeout; }
     public void setQuickTimeout(int quickTimeout) { this.quickTimeout = quickTimeout; }
+
+    /** MVP 音乐资源根目录 URL（空串 = 未配置；Gson 缺失/null 时兜底空串） */
+    public String getMvpMusicUrl() { return mvpMusicUrl == null ? "" : mvpMusicUrl.trim(); }
+    public void setMvpMusicUrl(String mvpMusicUrl) { this.mvpMusicUrl = mvpMusicUrl == null ? "" : mvpMusicUrl.trim(); }
 
     /** 爆破图经济参数（Gson 兜底：缺失/null 时以默认值对象兜底） */
     public BombEconomy getBombEconomy() {
@@ -55,7 +63,7 @@ public class GlobalConfig {
         private String itemId;
         private int price;
         private int maxPurchase;
-        /** 适用队伍：BOTH=双方（默认）/ T / CT（爆破图购买校验；普通图忽略） */
+        /** 适用队伍：BOTH=双方（默认）/ T / CT（爆破图购买校验；死亡竞赛图忽略） */
         private String team;
         /** 显示名覆盖（空 = 用物品自带名，含自定义名） */
         private String displayName;

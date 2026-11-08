@@ -22,6 +22,7 @@ import java.util.List;
  *         eCR = 爆炸接触率：实体碰撞箱未被方块阻挡部分的表面积占比（原版爆炸暴露判定，
  *               位于爆心且完全无遮挡 = 100%），修正 eCRB：eCR≥0.5 时 1/eCR，否则 0.5；
  *         背对爆心固定减伤 dB；最终 d = floor(d1·p·eCRB − dB)，最小 0。
+ *         结算以 genericKill 伤害源直接扣除（无视原版盔甲/爆炸保护/抗性/吸收减伤）。
  *         爆炸本体不破坏地形（CS 语义），仅视觉与音效。
  * 【被谁使用】BombRoundManager#detonateBomb（C4 倒计时归零时调用）。仅服务端。
  */
@@ -105,7 +106,11 @@ public class C4DamageCalculator {
             int damage = calculate(world, center, player, settings);
             if (damage <= 0) continue;
 
-            DamageSource source = world.getDamageSources().explosion(null, null);
+            // C4 无视原版减伤（盔甲/盔甲韧性/爆炸保护附魔/抗性与吸收效果），按模型伤害直接扣除：
+            // genericKill 伤害类型位于 bypasses_armor / bypasses_effects / bypasses_enchantments /
+            // bypasses_cooldown 标签，不经原版减伤管线，等效于直接从血量扣除 damage 点；
+            // 无 attacker，死亡播报与击杀统计口径不变（死亡计入，无击杀者）
+            DamageSource source = world.getDamageSources().genericKill();
             player.damage(source, damage);
             player.sendMessage(Text.literal("§c受到 C4 爆炸伤害：" + damage), false);
         }

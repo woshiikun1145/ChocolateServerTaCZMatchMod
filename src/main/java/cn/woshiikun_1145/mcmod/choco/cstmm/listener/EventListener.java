@@ -114,8 +114,14 @@ public class EventListener {
                 // 【爆破】冻结阶段（购买时间）内取消一切伤害，防止未开局抢先手
                 if (session.isBombMode() && session.getPhase() == MatchSession.GamePhase.PREPARING) return false;
 
+                int victimTeam = session.getPlayerTeam(victim.getUuid());
+                int attackerTeam = session.getPlayerTeam(attacker.getUuid());
+                // 异队且为爆破对局：累计本回合伤害总量（MVP 并列判定数据源）
+                if (victimTeam != attackerTeam && session.isBombMode()) {
+                    session.addRoundDamage(attacker.getUuid(), amount);
+                }
                 // 同队时取消伤害
-                return session.getPlayerTeam(victim.getUuid()) != session.getPlayerTeam(attacker.getUuid());
+                return victimTeam != attackerTeam;
             } catch (Throwable t) {
                 ModGuardian.engage("友伤拦截判定", t);
                 return true; // 保护模式下回退原版伤害行为
@@ -201,6 +207,10 @@ public class EventListener {
 
             // 【作用】记击杀者个人击杀（本局累计 + 当前生命计数，HUD 花名册/徽章数据源）
             session.recordKill(killerUuid);
+            // 【爆破】记本回合击杀（回合结束 MVP 判定数据源）
+            if (session.isBombMode()) {
+                session.recordRoundKill(killerUuid);
+            }
 
             // 【爆破】击杀奖励：击杀者 +killReward（休闲减半，全局可配）；奖励到账即推送商店数据
             if (session.isBombMode()) {

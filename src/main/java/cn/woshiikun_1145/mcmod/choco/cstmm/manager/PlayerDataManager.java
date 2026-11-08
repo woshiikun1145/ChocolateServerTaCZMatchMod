@@ -216,6 +216,26 @@ public class PlayerDataManager {
         return null;
     }
 
+    /**
+     * 【作用】设置/清除玩家自己的 MVP 音乐选择（存于档案 mvpMusicName 字段，随档案持久化）。
+     * @param musicName index_file.json 中的 music_name；空串表示清除选择
+     * @return null 表示成功，否则返回可直接发给玩家的错误消息
+     * 【被谁使用】NetworkHandler 的 SET_MVP_MUSIC 处理（服务端主线程）。
+     */
+    public String setMvpMusic(UUID uuid, String musicName) {
+        if (uuid == null) return "§c无效的玩家";
+        String name = musicName == null ? "" : musicName.trim();
+        String err = PlayerProfile.validateMvpMusicName(name);
+        if (err != null) return err;
+        PlayerProfile profile = profiles.get(uuid);
+        if (profile == null) return "§c档案未加载，请重新进服后再试";
+        profile.setMvpMusicName(name);
+        saveProfile(uuid);
+        Cstmm.LOGGER.info("[CSTMM - PlayerDataManager] MVP music {} for {}",
+                name.isEmpty() ? "cleared" : "set to \"" + name + "\"", uuid);
+        return null;
+    }
+
     // ==================== 同步到客户端 ====================
 
     /** 管理员命令修改档案后统一调用：原子写盘并同步在线玩家的客户端缓存

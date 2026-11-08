@@ -69,7 +69,7 @@ public class BombRoundManager {
 
     /**
      * 【作用】爆破对局入口：初始化回合状态并开启第 1 回合（由 MatchManager.startMatch 爆破分支调用，
-     *         替代普通图的 prepareMatch 全员初始化）。
+     *         替代死亡竞赛图的 prepareMatch 全员初始化）。
      * 【被谁使用】MatchManager#startMatch（地图 gameType=BOMB 时）。仅服务端。
      */
     public void startFirstRound(MatchSession session, MapConfig config) {
@@ -411,6 +411,12 @@ public class BombRoundManager {
             session.addOtWin(winnerTeam);
         }
 
+        // 【作用】HUD 胜利横幅（CS2 风格顶部横幅，显示至回合间歇结束）
+        if (winnerTeam != 0) {
+            session.setBanner(winnerTeam, teamDisplayName(session, winnerTeam) + " 胜利", "回合结束",
+                    System.currentTimeMillis() + intermission * 1000L);
+        }
+
         // 【作用】回合结果播报：胜方按攻防身份 T/CT 称呼，比分同时标注 T/CT（不混用红/蓝队名）
         String winnerName = teamDisplayName(session, winnerTeam);
         broadcastBomb(session, "§6=== " + winnerName + "赢得第 " + session.getRoundNumber()
@@ -425,6 +431,9 @@ public class BombRoundManager {
         EconomyManager.getInstance().settleRound(session, winnerTeam, winKind);
         // 订阅制商店推送：回合结算改钱（胜败金/连败金），全员余额刷新
         cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler.sendShopDataToTeam(session);
+
+        // 【MVP 音乐】按本回合胜负方式判定 MVP 并向对局内全员下发（未选择音乐则静默跳过）
+        MvpMusicManager.onBombRoundEnd(session, winnerTeam, reason);
 
         decideSeriesState(session, config);
     }

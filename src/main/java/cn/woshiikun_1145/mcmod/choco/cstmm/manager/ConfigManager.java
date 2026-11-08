@@ -8,6 +8,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.util.math.BlockPos;
 
@@ -146,6 +147,20 @@ public class ConfigManager {
                         Cstmm.LOGGER.info("[CSTMM - ConfigManager] Migrated map '{}': minPlayers={} -> minRed/minBlue={}/{}",
                                 map.getId(), map.getMinPlayers(), legacy, legacy);
                     }
+                    // 旧版本迁移：地图类型 NORMAL（普通图）→ DEATHMATCH（死亡竞赛），
+                    // 内存中即时生效，下次保存 maps.json 时落盘为新值
+                    if (el.isJsonObject()) {
+                        JsonElement rawType = el.getAsJsonObject().get("gameType");
+                        if (rawType != null && rawType.isJsonPrimitive()
+                                && "NORMAL".equalsIgnoreCase(rawType.getAsString())) {
+                            map.setGameType("DEATHMATCH");
+                            Cstmm.LOGGER.info("[CSTMM - ConfigManager] Migrated map '{}': gameType NORMAL -> DEATHMATCH",
+                                    map.getId());
+                        }
+                        // 旧版本迁移：包点"中心坐标+半径"（x/y/z/radius）→ 两点式长方体（x1/y1/z1/x2/y2/z2），
+                        // 直接改写 JSON 元素后由下方 Gson 解析，下次保存 maps.json 时落盘为新格式
+                        migrateLegacyBombsites(map.getId(), el.getAsJsonObject());
+                    }
                     // 规范化显式 null 字段与残缺出生点，防止下游选点 NPE / 无终局对局
                     normalizeMap(map);
                     valid.add(map);
@@ -160,6 +175,45 @@ public class ConfigManager {
         } catch (Exception e) {
             // JSON 语法错误（JsonSyntaxException）或 IO 故障：保留内存配置，绝不回写覆盖用户文件
             Cstmm.LOGGER.error("[CSTMM - ConfigManager] Failed to load maps.json, keeping current config", e);
+        }
+    }
+
+    /**
+     * 【作用】旧版包点格式迁移：中心坐标+半径（x/y/z/radius）→ 两点式长方体（x1/y1/z1/x2/y2/z2）。
+     *         在 loadMaps 解析流程内直接改写地图 JSON 元素，仅当包点条目含旧 x 且缺新 x1 时执行；
+     *         半径缺失/非法按旧版兜底值 3 处理（旧 Bombsite.getRadius 非正数回退 3）。
+     *         迁移后下次保存 maps.json 时落盘为新格式。
+     * 【被谁使用】loadMaps（服务端内部）。
+     */
+    private static void migrateLegacyBombsites(String mapId, JsonObject mapObj) {
+        JsonElement sitesEl = mapObj.get("bombsites");
+        if (sitesEl == null || !sitesEl.isJsonArray()) return;
+        boolean migrated = false;
+        for (JsonElement siteEl : sitesEl.getAsJsonArray()) {
+            if (siteEl == null || !siteEl.isJsonObject()) continue;
+            JsonObject site = siteEl.getAsJsonObject();
+            if (!site.has("x") || site.has("x1")) continue;
+            int r = 3;
+            if (site.has("radius") && site.get("radius").isJsonPrimitive()) {
+                try { r = Math.max(3, site.get("radius").getAsInt()); } catch (Exception ignored) {}
+            }
+            try {
+                int x = site.get("x").getAsInt();
+                int y = site.get("y").getAsInt();
+                int z = site.get("z").getAsInt();
+                site.addProperty("x1", x - r);
+                site.addProperty("y1", y - r);
+                site.addProperty("z1", z - r);
+                site.addProperty("x2", x + r);
+                site.addProperty("y2", y + r);
+                site.addProperty("z2", z + r);
+                migrated = true;
+            } catch (Exception e) {
+                Cstmm.LOGGER.warn("[CSTMM - ConfigManager] Map '{}' has a malformed legacy bombsite entry, skipped", mapId);
+            }
+        }
+        if (migrated) {
+            Cstmm.LOGGER.info("[CSTMM - ConfigManager] Migrated map '{}': bombsites center+radius -> two-corner cuboid", mapId);
         }
     }
 

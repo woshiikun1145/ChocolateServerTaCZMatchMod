@@ -50,7 +50,7 @@ public record HudDataPayload(
                 // 花名册 JSON：发送前按字节截断兜底（正常构建时已远小于上限）
                 buf.writeString(NetworkHandler.truncateByUtf8Bytes(
                         payload.rosterJson() == null ? "[]" : payload.rosterJson(), MAX_ROSTER_BYTES), MAX_ROSTER_BYTES);
-                // 扩展信息 JSON（爆破回合状态等；普通对局为 "{}"）
+                // 扩展信息 JSON（爆破回合状态等；死亡竞赛对局为 "{}"）
                 buf.writeString(NetworkHandler.truncateByUtf8Bytes(
                         payload.extraJson() == null ? "{}" : payload.extraJson(), MAX_EXTRA_BYTES), MAX_EXTRA_BYTES);
             },

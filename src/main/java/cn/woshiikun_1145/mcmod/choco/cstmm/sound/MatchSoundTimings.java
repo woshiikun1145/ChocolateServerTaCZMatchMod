@@ -2,9 +2,9 @@ package cn.woshiikun_1145.mcmod.choco.cstmm.sound;
 
 /**
  * 【作用】对局播报音效时序常量（毫秒）：集中管理对局内各播报音效之间的延迟，
- *         /cstmm debug test 的模拟序列同样从本类取值——调整任一常量，试听时序与实战时序同步生效。
+ *         /cstmm debug audio_test 的模拟序列同样从本类取值——调整任一常量，试听时序与实战时序同步生效。
  * 【被谁使用】BombRoundManager（引信起爆延迟、爆炸/拆除后的胜负音延迟）、
- *           ModCommands（debug test 模拟序列）。仅服务端。
+ *           ModCommands（debug audio_test 模拟序列）。仅服务端。
  */
 public final class MatchSoundTimings {
 

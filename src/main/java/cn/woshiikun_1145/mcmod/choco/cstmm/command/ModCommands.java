@@ -55,7 +55,7 @@ import java.util.concurrent.CompletableFuture;
  * /cstmm vote     kick &lt;玩家&gt; / kickyes / kickno
  * /cstmm config / reload                                             （OP≥2）
  * /cstmm data     get player|clan|map|global / edit player|clan|map|global / restore bags / delete player|clan|map   （OP≥2，支持离线玩家）
- * /cstmm debug    match_info_hud &lt;t|f&gt; / bandwidth start|stop|get|view / allow_c4 to_be_planted_freely &lt;t|f&gt; / test &lt;c4_defuse|c4_explosion|t_win|ct_win&gt;  （OP≥2 调试）
+ * /cstmm debug    match_info_hud &lt;t|f&gt; / bandwidth start|stop|get|view / allow_c4 to_be_planted_freely &lt;t|f&gt; / audio_test &lt;c4_defuse|c4_explosion|t_win|ct_win&gt;  （OP≥2 调试）
  * </pre>
  * 每个节点按 registerXxx 方法拆分注册，执行逻辑为独立静态方法，便于增删子命令。
  */
@@ -176,13 +176,24 @@ public class ModCommands {
     private static void registerDebug(LiteralArgumentBuilder<ServerCommandSource> cstmm) {
         var debug = CommandManager.literal("debug")
                 .requires(source -> source.hasPermissionLevel(2))
-                .executes(usage("/cstmm debug match_info_hud <t|f> | bandwidth start|stop|get|view | exception_protect_test [confirm] | test <c4_defuse|c4_explosion|t_win|ct_win>"));
+                .executes(usage("/cstmm debug hud_test <mvp_banner|victory_banner|match_info_hud> <t|f> | bandwidth start|stop|get|view | exception_protect_test [confirm] | audio_test <c4_defuse|c4_explosion|t_win|ct_win>"));
 
-        // ----- match_info_hud：强制显示/关闭比赛信息栏（仅作用于执行者自己的客户端） -----
-        debug.then(CommandManager.literal("match_info_hud")
-                .then(CommandManager.argument("enabled", StringArgumentType.word())
-                        .suggests(ModCommands::suggestDebugToggle)
-                        .executes(guard("debug.match_info_hud", ModCommands::debugMatchInfoHud))));
+        // ----- hud_test：HUD 显示调试（横幅/比赛信息栏，演示数据，仅作用于执行者自己的客户端） -----
+        debug.then(CommandManager.literal("hud_test")
+                .executes(usage("/cstmm debug hud_test <mvp_banner|victory_banner|match_info_hud> <t|f>"
+                        + "（非对局时显示/关闭横幅；match_info_hud 为强制显示比赛信息栏调试预览）"))
+                .then(CommandManager.literal("mvp_banner")
+                        .then(CommandManager.argument("enabled", StringArgumentType.word())
+                                .suggests(ModCommands::suggestDebugToggle)
+                                .executes(guard("debug.hud_test.mvp_banner", ctx -> debugHudTest(ctx, "mvp_banner")))))
+                .then(CommandManager.literal("victory_banner")
+                        .then(CommandManager.argument("enabled", StringArgumentType.word())
+                                .suggests(ModCommands::suggestDebugToggle)
+                                .executes(guard("debug.hud_test.victory_banner", ctx -> debugHudTest(ctx, "victory_banner")))))
+                .then(CommandManager.literal("match_info_hud")
+                        .then(CommandManager.argument("enabled", StringArgumentType.word())
+                                .suggests(ModCommands::suggestDebugToggle)
+                                .executes(guard("debug.hud_test.match_info_hud", ModCommands::debugMatchInfoHud)))));
 
         // ----- bandwidth：服务器带宽记录 -----
         debug.then(CommandManager.literal("bandwidth")
@@ -211,30 +222,30 @@ public class ModCommands {
                 .then(CommandManager.argument("itemString", StringArgumentType.greedyString())
                         .executes(guard("debug.item_parse_test", ModCommands::debugItemParseTest))));
 
-        // ----- test：模拟战局对应情形下的完整播报序列（非定位试听给执行者） -----
-        var test = CommandManager.literal("test")
-                .executes(usage("/cstmm debug test <c4_defuse|c4_explosion|t_win|ct_win>（模拟战局对应情形的完整播报序列）"));
-        test.then(CommandManager.literal("c4_defuse")
-                .executes(guard("debug.test.c4_defuse", ctx -> debugTestSound(ctx, "c4_defuse"))));
-        test.then(CommandManager.literal("c4_explosion")
-                .executes(guard("debug.test.c4_explosion", ctx -> debugTestSound(ctx, "c4_explosion"))));
-        test.then(CommandManager.literal("t_win")
-                .executes(guard("debug.test.t_win", ctx -> debugTestSound(ctx, "t_win"))));
-        test.then(CommandManager.literal("ct_win")
-                .executes(guard("debug.test.ct_win", ctx -> debugTestSound(ctx, "ct_win"))));
-        debug.then(test);
+        // ----- audio_test：模拟战局对应情形下的完整播报序列（非定位试听给执行者） -----
+        var audioTest = CommandManager.literal("audio_test")
+                .executes(usage("/cstmm debug audio_test <c4_defuse|c4_explosion|t_win|ct_win>（模拟战局对应情形的完整播报序列）"));
+        audioTest.then(CommandManager.literal("c4_defuse")
+                .executes(guard("debug.audio_test.c4_defuse", ctx -> debugTestSound(ctx, "c4_defuse"))));
+        audioTest.then(CommandManager.literal("c4_explosion")
+                .executes(guard("debug.audio_test.c4_explosion", ctx -> debugTestSound(ctx, "c4_explosion"))));
+        audioTest.then(CommandManager.literal("t_win")
+                .executes(guard("debug.audio_test.t_win", ctx -> debugTestSound(ctx, "t_win"))));
+        audioTest.then(CommandManager.literal("ct_win")
+                .executes(guard("debug.audio_test.ct_win", ctx -> debugTestSound(ctx, "ct_win"))));
+        debug.then(audioTest);
 
         cstmm.then(debug);
     }
 
     /**
-     * debug test <c4_defuse|c4_explosion|t_win|ct_win>：模拟战局对应情形下的完整播报序列，
+     * debug audio_test <c4_defuse|c4_explosion|t_win|ct_win>：模拟战局对应情形下的完整播报序列，
      * 按真实对局的触发时序非定位试听给执行者——
      * c4_defuse    = 拆除成功：拆除确认音 + 语音播报同时响起，1 秒后 CT 回合胜利音；
      * c4_explosion = C4 起爆：1.5 秒引信音 → 爆炸轰鸣，爆炸 1 秒后 T 回合胜利音；
      * t_win        = T 全歼 CT 回合胜利音（立即）；
      * ct_win       = CT 全歼 T/超时回合胜利音（立即）。
-     * 【被谁使用】registerDebug 的 test 分支。
+     * 【被谁使用】registerDebug 的 audio_test 分支。
      */
     private static int debugTestSound(CommandContext<ServerCommandSource> ctx, String which) {
         if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity player)) {
@@ -363,6 +374,37 @@ public class ModCommands {
             ctx.getSource().sendMessage(Text.literal(
                     "§e比赛信息栏强制显示已关闭（你的客户端 HUD 已复位）"));
         }
+        return 1;
+    }
+
+    /**
+     * debug hud_test <mvp_banner|victory_banner> <t|f>：非对局时显示/关闭 HUD 横幅调试
+     * （演示数据：胜利横幅"T 胜利/回合结束"，MVP 横幅 Steve + 演示曲目）。
+     * 横幅为客户端渲染：经 PopupPayload 的 HUDTEST: 前缀通道下发执行者，仅作用于执行者自己的客户端。
+     * 【被谁使用】registerDebug 的 hud_test 分支（两个字面量子命令共用本执行器）。
+     */
+    private static int debugHudTest(CommandContext<ServerCommandSource> ctx, String target) {
+        if (!(ctx.getSource().getEntity() instanceof ServerPlayerEntity executor)) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§c该调试命令仅限游戏内玩家执行（横幅为客户端渲染，只作用于执行者）"));
+            return 0;
+        }
+        String arg = StringArgumentType.getString(ctx, "enabled").trim().toLowerCase();
+        Boolean enable = switch (arg) {
+            case "t", "true", "1", "开" -> true;
+            case "f", "false", "0", "关" -> false;
+            default -> null;
+        };
+        if (enable == null) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§c用法: /cstmm debug hud_test <mvp_banner|victory_banner> <t|f>（true/false/1/0）"));
+            return 0;
+        }
+        cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler.deliverMessage(
+                executor, "HUDTEST:" + target + (enable ? ":t" : ":f"));
+        ctx.getSource().sendMessage(Text.literal(enable
+                ? "§aHUD 横幅调试已开启：非对局时显示 §f" + target + " §a演示数据 §7（仅你的客户端；关闭用 hud_test " + target + " f）"
+                : "§eHUD 横幅调试已关闭：§f" + target));
         return 1;
     }
 
@@ -578,7 +620,7 @@ public class ModCommands {
                     ServerPlayerEntity player = requirePlayer(ctx);
                     if (player == null) return 0;
                     ServerPlayNetworking.send(player, new OpenConfigScreenPayload());
-                    player.sendMessage(Text.literal("§a正在打开配置界面..."), false);
+                    // "正在打开配置界面..."提示改由客户端收到 OpenConfigScreenPayload 后以 Toast 弹出
                     return 1;
                 })));
 
@@ -596,7 +638,7 @@ public class ModCommands {
     private static void registerData(LiteralArgumentBuilder<ServerCommandSource> cstmm) {
         var data = CommandManager.literal("data")
                 .requires(source -> source.hasPermissionLevel(2))
-                .executes(usage("/cstmm data get player|clan|map|global <名称> [字段] / edit player|clan|map|global <名称> <字段> <值> / restore bags <玩家> [槽位] / delete player|clan|map <名称> [数据类型]"));
+                .executes(usage("/cstmm data get player|clan|map|global <名称> [字段] | raw_file maps|global|clans（JSON 文件原文） / edit player|clan|map|global <名称> <字段> <值> / restore bags <玩家> [槽位] / delete player|clan|map <名称> [数据类型]"));
 
         // ----- restore bags（保留原有能力） -----
         data.then(CommandManager.literal("restore")
@@ -625,9 +667,9 @@ public class ModCommands {
                                             return 1;
                                         }))))));
 
-        // ----- get player / get clan / get map|global（单图/全局字段查询）/ get <配置项>（JSON 原文） -----
+        // ----- get player / get clan / get map|global（单图/全局字段查询）/ get raw_file <配置项>（JSON 文件原文） -----
         data.then(CommandManager.literal("get")
-                .executes(usage("/cstmm data get player <名称> [字段] | clan \"<战队名>\" [字段] | map <地图ID> [字段] | global [字段] | maps|clans（战队名必须带引号）"))
+                .executes(usage("/cstmm data get player <名称> [字段] | clan \"<战队名>\" [字段] | map <地图ID> [字段] | global <字段> | raw_file maps|global|clans（JSON 文件原文；战队名必须带引号）"))
                 .then(CommandManager.literal("player")
                         .then(CommandManager.argument("player", StringArgumentType.string())
                                 .suggests(ModCommands::suggestProfileNames)
@@ -646,7 +688,7 @@ public class ModCommands {
                                 .executes(guard("data.get.clan", ModCommands::dataGetClan))
                                 .then(CommandManager.argument("field", StringArgumentType.word())
                                         .suggests(ModCommands::suggestClanGetFields)
-                                        .executes(guard("data.get.clan", ModCommands::dataGetClan))))))
+                                        .executes(guard("data.get.clan", ModCommands::dataGetClan)))))
                 // 单张地图查询：省略字段输出全字段摘要；指定字段输出单值
                 .then(CommandManager.literal("map")
                         .then(CommandManager.argument("mapId", StringArgumentType.string())
@@ -655,16 +697,26 @@ public class ModCommands {
                                 .then(CommandManager.argument("field", StringArgumentType.word())
                                         .suggests(ModCommands::suggestMapFields)
                                         .executes(guard("data.get.map", ModCommands::dataGetMap)))))
-                // 全局配置单字段查询（不带字段保持原行为：输出 global.json 原文）
+                // 全局配置单字段查询（无字段的 global.json 原文查看已迁移至 raw_file global）
                 .then(CommandManager.literal("global")
-                        .executes(guard("data.get.global.raw", ctx -> dataGetConfigItem(ctx, "global")))
+                        .executes(guard("data.get.global", ctx -> {
+                            ctx.getSource().sendMessage(Text.literal(
+                                    "§eglobal.json 原文查看已迁移至 §f/cstmm data get raw_file global"
+                                            + "§e；单字段查询请指定字段: §fquicktimeout / gear / mvpmusicurl"));
+                            return 0;
+                        }))
                         .then(CommandManager.argument("field", StringArgumentType.word())
                                 .suggests(ModCommands::suggestGlobalFields)
                                 .executes(guard("data.get.global", ModCommands::dataGetGlobal))))
-                .then(CommandManager.literal("maps")
-                        .executes(guard("data.get.maps", ctx -> dataGetConfigItem(ctx, "maps"))))
-                .then(CommandManager.literal("clans")
-                        .executes(guard("data.get.clans", ctx -> dataGetConfigItem(ctx, "clans"))));
+                // JSON 配置文件原文查看（原 get maps|clans|global 的文件原文输出统一迁移至此）
+                .then(CommandManager.literal("raw_file")
+                        .executes(usage("/cstmm data get raw_file maps|global|clans"))
+                        .then(CommandManager.literal("maps")
+                                .executes(guard("data.get.raw_file.maps", ctx -> dataGetConfigItem(ctx, "maps"))))
+                        .then(CommandManager.literal("global")
+                                .executes(guard("data.get.raw_file.global", ctx -> dataGetConfigItem(ctx, "global"))))
+                        .then(CommandManager.literal("clans")
+                                .executes(guard("data.get.raw_file.clans", ctx -> dataGetConfigItem(ctx, "clans"))))));
 
         // ----- edit player / edit clan / edit map / edit global -----
         data.then(CommandManager.literal("edit")
@@ -687,7 +739,12 @@ public class ModCommands {
                                 // 改名分支：/cstmm data edit player <玩家> name <新名字>
                                 .then(CommandManager.literal("name")
                                         .then(CommandManager.argument("newName", StringArgumentType.greedyString())
-                                                .executes(guard("data.edit.player.name", ModCommands::dataEditPlayerName))))))
+                                                .executes(guard("data.edit.player.name", ModCommands::dataEditPlayerName))))
+                                // MVP 音乐分支：/cstmm data edit player <玩家> mvpmusic <音乐名|clear>
+                                .then(CommandManager.literal("mvpmusic")
+                                        .then(CommandManager.argument("musicName", StringArgumentType.greedyString())
+                                                .suggests(ModCommands::suggestMvpMusicNames)
+                                                .executes(guard("data.edit.player.mvpmusic", ModCommands::dataEditPlayerMvpMusic))))))
                 // 战队名：string() 原生引号支持；字段 word、值 greedy 均为独立参数
                 .then(CommandManager.literal("clan")
                         .then(CommandManager.argument("clan", StringArgumentType.string())
@@ -759,13 +816,15 @@ public class ModCommands {
                 case "uuid" -> profile.getPlayerUuid().toString();
                 case "avatar" -> profile.getAvatarType().isEmpty()
                         ? "未绑定" : profile.getAvatarType() + " " + profile.getAvatarId();
+                case "mvpmusic" -> profile.getMvpMusicName().isEmpty()
+                        ? "未选择" : profile.getMvpMusicName();
                 // bags 不属于档案字段：读 InventoryManager 的已保存快照概要
                 case "bags" -> bagSummary(profile.getPlayerUuid());
                 default -> null;
             };
             if (value == null) {
                 ctx.getSource().sendMessage(Text.literal(
-                        "§c未知字段: " + field + "（可选: kills deaths matches wins penaltydeaths kd name uuid avatar bags）"));
+                        "§c未知字段: " + field + "（可选: kills deaths matches wins penaltydeaths kd name uuid avatar mvpmusic bags）"));
                 return 0;
             }
             ctx.getSource().sendMessage(Text.literal(
@@ -783,7 +842,9 @@ public class ModCommands {
                         + String.format(" §7(胜率 %.1f%%)", winRate) + "\n" +
                         "§e惩罚死亡: §f" + profile.getPenaltyDeaths() + "\n" +
                         "§e头像绑定: §f" + (profile.getAvatarType().isEmpty()
-                                ? "未绑定" : profile.getAvatarType() + " " + profile.getAvatarId())));
+                                ? "未绑定" : profile.getAvatarType() + " " + profile.getAvatarId()) + "\n" +
+                        "§eMVP音乐: §f" + (profile.getMvpMusicName().isEmpty()
+                                ? "未选择" : profile.getMvpMusicName())));
         return 1;
     }
 
@@ -967,6 +1028,34 @@ public class ModCommands {
         return 1;
     }
 
+    /**
+     * data edit player ... mvpmusic：管理员设置/清除玩家 MVP 音乐选择（支持离线玩家，改后写盘并同步在线客户端）。
+     * 用法：mvpmusic <音乐名> / mvpmusic clear；音乐名即 index_file.json 的 music_name。
+     * 【被谁使用】registerData 的 edit player mvpmusic 分支。
+     */
+    private static int dataEditPlayerMvpMusic(CommandContext<ServerCommandSource> ctx) {
+        String input = StringArgumentType.getString(ctx, "player");
+        String raw = StringArgumentType.getString(ctx, "musicName").trim();
+        String name = "clear".equalsIgnoreCase(raw) ? "" : raw;
+        PlayerProfile profile = PlayerDataManager.getInstance().findProfile(input);
+        if (profile == null) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§e未找到玩家档案: §f" + input + " §7（离线玩家需曾进入服务器）"));
+            return 0;
+        }
+        String err = PlayerDataManager.getInstance().setMvpMusic(profile.getPlayerUuid(), name);
+        if (err != null) {
+            ctx.getSource().sendMessage(Text.literal(err));
+            return 0;
+        }
+        // setMvpMusic 已落盘；在线玩家再同步一次档案（个性化页回显）
+        PlayerDataManager.getInstance().persistAndSync(profile.getPlayerUuid());
+        ctx.getSource().sendMessage(Text.literal(
+                "§a已更新 §f" + profile.getPlayerName() + " §a的 MVP 音乐: §f"
+                        + (name.isEmpty() ? "已清除" : name + " §7（在线玩家已同步）")));
+        return 1;
+    }
+
     /** data edit clan：修改战队字段（name/abbr/limit/leader），校验与索引重建复用 ClanManager。
      *  战队名含空格必须加引号（string() 参数由 Brigadier 原生处理）；字段/值为独立参数。 */
     private static int dataEditClan(CommandContext<ServerCommandSource> ctx) {
@@ -1061,7 +1150,7 @@ public class ModCommands {
         MapConfig map = ConfigManager.getInstance().getMap(mapId);
         if (map == null) {
             ctx.getSource().sendMessage(Text.literal(
-                    "§e未找到地图: §f" + mapId + " §7（用 /cstmm data get maps 查看 ID 列表）"));
+                    "§e未找到地图: §f" + mapId + " §7（查看 ID 列表，用 /cstmm data get raw_file maps）"));
             return 0;
         }
         if (field != null) {
@@ -1075,7 +1164,7 @@ public class ModCommands {
             ctx.getSource().sendMessage(Text.literal("§6[地图配置." + f + "] §f" + value));
             return 1;
         }
-        // 【作用】爆破图的队伍按 T/CT 方称呼（普通图按红/蓝队）；red/blue 字段语义在爆破图对应 T/CT 侧
+        // 【作用】爆破图的队伍按 T/CT 方称呼（死亡竞赛图按红/蓝队）；red/blue 字段语义在爆破图对应 T/CT 侧
         boolean bomb = map.isBombMap();
         String minLabel = bomb ? "最低人数 T/CT" : "最低人数 红/蓝";
         String maxLabel = bomb ? "上限 T/CT" : "上限 红/蓝";
@@ -1127,7 +1216,7 @@ public class ModCommands {
         MapConfig map = ConfigManager.getInstance().getMap(mapId);
         if (map == null) {
             ctx.getSource().sendMessage(Text.literal(
-                    "§e未找到地图: §f" + mapId + " §7（用 /cstmm data get maps 查看 ID 列表）"));
+                    "§e未找到地图: §f" + mapId + " §7（查看 ID 列表，用 /cstmm data get raw_file maps）"));
             return 0;
         }
         String err = applyMapFieldEdit(map, field, value);
@@ -1154,7 +1243,7 @@ public class ModCommands {
         MapConfig map = configManager.getMap(mapId);
         if (map == null) {
             ctx.getSource().sendMessage(Text.literal(
-                    "§e未找到地图: §f" + mapId + " §7（用 /cstmm data get maps 查看 ID 列表）"));
+                    "§e未找到地图: §f" + mapId + " §7（查看 ID 列表，用 /cstmm data get raw_file maps）"));
             return 0;
         }
         // 与配置界面保存同一保护：非 ENDED 对局占用的地图禁止删除
@@ -1176,7 +1265,7 @@ public class ModCommands {
 
     /**
      * data get global <字段>：查看全局配置单字段（quicktimeout / gear）。
-     * 不带字段时保持原行为（registerData 中直接输出 global.json 原文）。
+     * 不带字段时由 registerData 提示迁移（global.json 原文查看已移至 /cstmm data get raw_file global）。
      * 【被谁使用】registerData 的 get global <字段> 分支。
      */
     private static int dataGetGlobal(CommandContext<ServerCommandSource> ctx) {
@@ -1185,11 +1274,12 @@ public class ModCommands {
         String value = switch (field) {
             case "quicktimeout" -> global.getQuickTimeout() + " 秒";
             case "gear" -> gearListText(global);
+            case "mvpmusicurl" -> global.getMvpMusicUrl().isEmpty() ? "未配置" : global.getMvpMusicUrl();
             default -> null;
         };
         if (value == null) {
             ctx.getSource().sendMessage(Text.literal(
-                    "§c未知字段: " + field + "（可选: quicktimeout gear）"));
+                    "§c未知字段: " + field + "（可选: quicktimeout gear mvpmusicurl）"));
             return 0;
         }
         ctx.getSource().sendMessage(Text.literal("§6[全局配置." + field + "] §f" + value));
@@ -1265,18 +1355,40 @@ public class ModCommands {
                     }
                 }
             }
+            case "mvpmusicurl" -> {
+                // 空值 = 清除配置（客户端不播放 MVP 音乐）；非空必须是 http(s) 地址
+                if (value.isEmpty()) {
+                    global.setMvpMusicUrl("");
+                } else {
+                    String url = String.join(" ", t);
+                    if (!isHttpUrl(url)) {
+                        ctx.getSource().sendMessage(Text.literal(
+                                "§cMVP 音乐 URL 必须是 http:// 或 https:// 开头的地址（留空可清除配置）"));
+                        return 0;
+                    }
+                    global.setMvpMusicUrl(url);
+                }
+            }
             default -> {
                 ctx.getSource().sendMessage(Text.literal(
-                        "§c未知字段: " + field + "（可选: quicktimeout gear）"));
+                        "§c未知字段: " + field + "（可选: quicktimeout gear mvpmusicurl）"));
                 return 0;
             }
         }
         ConfigManager.getInstance().updateGlobalConfig(global);
         NetworkHandler.broadcastConfigUpdate();
-        String shown = field.equals("quicktimeout")
-                ? global.getQuickTimeout() + " 秒" : gearListText(global);
+        String shown = switch (field) {
+            case "quicktimeout" -> global.getQuickTimeout() + " 秒";
+            case "mvpmusicurl" -> global.getMvpMusicUrl().isEmpty() ? "未配置" : global.getMvpMusicUrl();
+            default -> gearListText(global);
+        };
         ctx.getSource().sendMessage(Text.literal("§a已更新全局配置 §f" + field + " §a: §f" + shown));
         return 1;
+    }
+
+    /** http/https 地址粗校验（命令/配置界面共用，只拦明显非法输入） */
+    private static boolean isHttpUrl(String url) {
+        return url != null && (url.startsWith("http://") || url.startsWith("https://"));
     }
 
     /** 字段名规范化：地图字段的常见别名统一到 MAP_FIELDS 中的规范名 */
@@ -1296,6 +1408,7 @@ public class ModCommands {
         if (field == null) return null;
         return switch (field) {
             case "defaultgear" -> "gear";
+            case "mvp_music_url", "mvpmusic" -> "mvpmusicurl";
             default -> field;
         };
     }
@@ -1335,7 +1448,7 @@ public class ModCommands {
 
     /**
      * 商店分类列展示文本（购买页网格布局的列配置）：
-     * 普通图 = 通用 5 列；爆破图 = T 方与 CT 方两套列分开显示
+     * 死亡竞赛图 = 通用 5 列；爆破图 = T 方与 CT 方两套列分开显示
      * （未独立配置的队伍显示"回退通用列"）。列内商品过多时仅展示前 4 项摘要防聊天刷屏。
      */
     private static String shopColumnsText(MapConfig map) {
@@ -1424,8 +1537,9 @@ public class ModCommands {
                 for (int i = 0; i < sites.size(); i++) {
                     MapConfig.Bombsite b = sites.get(i);
                     if (i > 0) sb.append("、");
-                    sb.append(b.getName()).append("(").append(b.getX()).append(",").append(b.getY())
-                            .append(",").append(b.getZ()).append(" r").append(b.getRadius()).append(")");
+                    sb.append(b.getName()).append("(").append(b.getX1()).append(",").append(b.getY1())
+                            .append(",").append(b.getZ1()).append(" ~ ").append(b.getX2()).append(",")
+                            .append(b.getY2()).append(",").append(b.getZ2()).append(")");
                 }
                 yield sb.toString();
             }
@@ -1607,32 +1721,31 @@ public class ModCommands {
                 map.setDimension(t[0]);
             }
             case "gametype" -> {
-                if (t.length != 1) return "§c用法: gametype <NORMAL|BOMB>（NORMAL=普通图，BOMB=爆破图）";
+                if (t.length != 1) return "§c用法: gametype <DEATHMATCH|BOMB>（DEATHMATCH=死亡竞赛图，BOMB=爆破图）";
                 String upper = t[0].toUpperCase();
-                if (!upper.equals("NORMAL") && !upper.equals("BOMB")) {
-                    return "§c地图类型只能是 NORMAL 或 BOMB";
+                if (!upper.equals("DEATHMATCH") && !upper.equals("BOMB")) {
+                    return "§c地图类型只能是 DEATHMATCH 或 BOMB";
                 }
                 map.setGameType(upper);
             }
             case "bombsites" -> {
-                // 包点编辑：add <名> <x> <y> <z> [半径] / remove <名|序号> / clear
-                //（爆破图专用；切回 NORMAL 时 setGameType 自动清空包点）
+                // 包点编辑：add <名> <x1> <y1> <z1> <x2> <y2> <z2>（两角点长方体）/ remove <名|序号> / clear
+                //（爆破图专用；切回 DEATHMATCH 时 setGameType 自动清空包点）
                 List<MapConfig.Bombsite> sites = new ArrayList<>(map.getBombsites());
-                if (t.length == 0) return "§c用法: add <名称> <x> <y> <z> [半径] / remove <名称|序号> / clear";
+                if (t.length == 0) return "§c用法: add <名称> <x1> <y1> <z1> <x2> <y2> <z2> / remove <名称|序号> / clear";
                 switch (t[0].toLowerCase()) {
                     case "add" -> {
-                        if (t.length < 6 || t.length > 7) return "§c用法: add <名称> <x> <y> <z> [半径（默认 3）]";
-                        Integer x = parseIntOrNull(t[2]);
-                        Integer y = parseIntOrNull(t[3]);
-                        Integer z = parseIntOrNull(t[4]);
-                        if (x == null || y == null || z == null) return "§c坐标必须是整数";
-                        int radius = 3;
-                        if (t.length == 7) {
-                            Integer r = parseIntOrNull(t[6 - 1]);
-                            if (r == null || r <= 0) return "§c半径必须是正整数";
-                            radius = r;
+                        if (t.length != 8) return "§c用法: add <名称> <x1> <y1> <z1> <x2> <y2> <z2>（两角点定义长方体，Min/Max 可任填）";
+                        Integer x1 = parseIntOrNull(t[2]);
+                        Integer y1 = parseIntOrNull(t[3]);
+                        Integer z1 = parseIntOrNull(t[4]);
+                        Integer x2 = parseIntOrNull(t[5]);
+                        Integer y2 = parseIntOrNull(t[6]);
+                        Integer z2 = parseIntOrNull(t[7]);
+                        if (x1 == null || y1 == null || z1 == null || x2 == null || y2 == null || z2 == null) {
+                            return "§c坐标必须是整数";
                         }
-                        sites.add(new MapConfig.Bombsite(t[1], x, y, z, radius));
+                        sites.add(new MapConfig.Bombsite(t[1], x1, y1, z1, x2, y2, z2));
                         map.setBombsites(sites);
                     }
                     case "remove" -> {
@@ -1856,7 +1969,7 @@ public class ModCommands {
     }
 
     /**
-     * data get maps|global|clans：读取磁盘上的 JSON 原文。
+     * data get raw_file maps|global|clans：读取磁盘上的 JSON 原文（原 get maps|clans|global 无字段行为）。
      * 小内容直接聊天输出；大内容（含 base64 背景图/徽标的文件可达数 MB）只回
      * 文件路径与开头预览，避免刷爆聊天栏。读磁盘而非内存序列化——返回的即"原文"，
      * 手改未 reload 的差异也如实呈现。
@@ -1894,7 +2007,7 @@ public class ModCommands {
     /** 聊天直接输出 JSON 原文的字符数上限，超过则只回文件路径 + 预览 */
     private static final int CHAT_JSON_MAX_CHARS = 1500;
 
-    /** data get 配置项 → 磁盘 JSON 文件路径；未知配置项返回 null */
+    /** data get raw_file 配置项 → 磁盘 JSON 文件路径；未知配置项返回 null */
     private static Path configItemFile(String item) {
         Path root = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir();
         return switch (item) {
@@ -2097,9 +2210,16 @@ public class ModCommands {
     /** data edit player 的字段补全（avatar 走独立字面量分支，仅作提示展示） */
     private static CompletableFuture<Suggestions> suggestPlayerFields(CommandContext<ServerCommandSource> ctx,
                                                                       SuggestionsBuilder builder) {
-        for (String field : new String[]{"kills", "deaths", "matches", "wins", "penaltyDeaths", "avatar"}) {
+        for (String field : new String[]{"kills", "deaths", "matches", "wins", "penaltyDeaths", "avatar", "mvpmusic"}) {
             if (field.toLowerCase().startsWith(builder.getRemaining().toLowerCase())) builder.suggest(field);
         }
+        return builder.buildFuture();
+    }
+
+    /** data edit player mvpmusic 的音乐名补全（来自当前 index 曲目清单的服务端不可知，仅提示 clear） */
+    private static CompletableFuture<Suggestions> suggestMvpMusicNames(CommandContext<ServerCommandSource> ctx,
+                                                                       SuggestionsBuilder builder) {
+        if ("clear".startsWith(builder.getRemaining())) builder.suggest("clear");
         return builder.buildFuture();
     }
 
@@ -2180,7 +2300,7 @@ public class ModCommands {
     /** data get player 的单字段补全 */
     private static CompletableFuture<Suggestions> suggestPlayerGetFields(CommandContext<ServerCommandSource> ctx,
                                                                          SuggestionsBuilder builder) {
-        for (String field : new String[]{"kills", "deaths", "matches", "wins", "penaltydeaths", "kd", "name", "uuid", "avatar", "bags"}) {
+        for (String field : new String[]{"kills", "deaths", "matches", "wins", "penaltydeaths", "kd", "name", "uuid", "avatar", "mvpmusic", "bags"}) {
             if (field.startsWith(builder.getRemaining().toLowerCase())) builder.suggest(field);
         }
         return builder.buildFuture();
@@ -2218,7 +2338,7 @@ public class ModCommands {
     /** data get/edit global 的字段补全 */
     private static CompletableFuture<Suggestions> suggestGlobalFields(CommandContext<ServerCommandSource> ctx,
                                                                       SuggestionsBuilder builder) {
-        for (String field : new String[]{"quicktimeout", "gear"}) {
+        for (String field : new String[]{"quicktimeout", "gear", "mvpmusicurl"}) {
             if (field.startsWith(builder.getRemaining().toLowerCase())) builder.suggest(field);
         }
         return builder.buildFuture();
@@ -2252,7 +2372,7 @@ public class ModCommands {
         MatchSession session = MatchManager.getInstance().getPlayerSession(uuid);
 
         if (session != null) {
-            // 【作用】爆破图按当前攻防身份显示 T 方/CT 方，普通图显示红队/蓝队
+            // 【作用】爆破图按当前攻防身份显示 T 方/CT 方，死亡竞赛图显示红队/蓝队
             String team = session.teamDisplayName(session.getPlayerTeam(uuid));
             String phase = switch (session.getPhase()) {
                 case PREPARING -> "准备中 (" + session.getPrepCounter() + "s)";
@@ -2300,7 +2420,7 @@ public class ModCommands {
                 case ENDED -> "§7已结束";
                 default -> "§7空闲";
             };
-            // 【作用】爆破图按攻防身份显示 T/CT 人数；普通图显示红/蓝人数
+            // 【作用】爆破图按攻防身份显示 T/CT 人数；死亡竞赛图显示红/蓝人数
             int team1Count = session.getRedPlayers().size();
             int team2Count = session.getBluePlayers().size();
             String counts = session.isBombMode()
