@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "chocolateservertaczmatchmod",
+  "version": "${version}",
+  "name": "Chocolate Server Tacz Match Mod",
+  "description": "A match mod for ChocolateServer, mc.zgwl.eu.org",
+  "authors": [],
+  "contact": {},
+  "license": "MIT",
+  "icon": "assets/chocolateservertaczmatchmod/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "client": [
+      "cn.woshiikun_1145.mcmod.choco.cstmm.client.CstmmClient"
+    ],
+    "main": [
+      "cn.woshiikun_1145.mcmod.choco.cstmm.Cstmm"
+    ]
+  },
+  "mixins": [
+    "chocolateservertaczmatchmod.mixins.json",
+    {
+      "config": "chocolateservertaczmatchmod.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}

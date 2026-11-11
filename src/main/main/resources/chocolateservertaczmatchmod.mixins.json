@@ -1,0 +1,21 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "cn.woshiikun_1145.mcmod.choco.cstmm.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ClientConnectionAccessor",
+    "ServerCommonNetworkHandlerAccessor"
+  ],
+  "client": [
+    "KeyBindingAccessor",
+    "KeyBindingMixin",
+    "SoundSystemMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "overwrites": {
+    "requireAnnotations": true
+  }
+}
