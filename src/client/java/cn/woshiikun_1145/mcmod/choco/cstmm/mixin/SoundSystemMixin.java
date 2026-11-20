@@ -24,6 +24,12 @@ public abstract class SoundSystemMixin {
     @Inject(method = "getAdjustedVolume(Lnet/minecraft/client/sound/SoundInstance;)F",
             at = @At("RETURN"), cancellable = true)
     private void cstmm$scaleModSoundVolume(SoundInstance sound, CallbackInfoReturnable<Float> cir) {
+        // 【作用】闪光弹致盲声音屏蔽（移植 CounterStrikeGrenades 的 PlaySoundEvent 逻辑）：
+        //         致盲期间非豁免音效音量置 0（豁免判定见 FlashbangBlindEffectRenderer.isSuppressed）
+        if (cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.FlashbangBlindEffectRenderer.isSuppressed(sound)) {
+            cir.setReturnValue(0f);
+            return;
+        }
         if (cir.getReturnValueF() <= 0f) return;
         Identifier id = sound.getId();
         if (id == null || !ClientConfig.MOD_SOUND_NAMESPACE.equals(id.getNamespace())) return;

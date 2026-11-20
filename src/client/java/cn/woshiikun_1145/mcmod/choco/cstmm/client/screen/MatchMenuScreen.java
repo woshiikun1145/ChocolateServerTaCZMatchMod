@@ -134,7 +134,9 @@ public class MatchMenuScreen extends Screen {
         if (maps != null && !maps.isEmpty()) {
             for (MapConfig config : maps) {
                 if (!config.isEnabled()) continue;
-                String type = config.getWinCondition() == MapConfig.WinCondition.KILLS ? "按击杀" : "按计时";
+                // 【作用】卡片副标题：爆破图按回合结算（winCondition 字段不适用），死亡竞赛图按击杀/计时
+                String type = config.isBombMap() ? "爆破模式"
+                        : (config.getWinCondition() == MapConfig.WinCondition.KILLS ? "按击杀" : "按计时");
                 mapCards.add(new MapCardData(
                         config.getId(),
                         config.getDisplayName(),

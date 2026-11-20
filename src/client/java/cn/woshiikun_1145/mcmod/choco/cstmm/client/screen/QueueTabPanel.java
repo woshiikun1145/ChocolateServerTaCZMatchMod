@@ -252,8 +252,10 @@ public class QueueTabPanel {
         context.drawText(tr, cfg != null ? "§f" + cfg.getDisplayName() : "§f" + map.id, x + 12, y + 12, 0xFFFFFF, true);
         String idText = "ID:" + map.id;
         context.drawText(tr, "§7" + idText, x + cellA - 10 - tr.getWidth(idText), y + 14, 0xAAAAAA, true);
-        context.drawText(tr, "§e" + (cfg != null && cfg.getWinCondition() == MapConfig.WinCondition.KILLS ? "按击杀" : "按计时"),
-                x + 12, y + height - 22, 0xFFFFFF, true);
+        // 【作用】左列结算方式：爆破图按回合结算（winCondition 字段不适用），死亡竞赛图按击杀/计时
+        String settleText = cfg == null ? "" : (cfg.isBombMap() ? "爆破模式"
+                : cfg.getWinCondition() == MapConfig.WinCondition.KILLS ? "按击杀" : "按计时");
+        context.drawText(tr, "§e" + settleText, x + 12, y + height - 22, 0xFFFFFF, true);
         String modeTag = "§7[§e" + currentModeTag() + "§7]";
         context.drawText(tr, modeTag, x + cellA - 10 - tr.getWidth(modeTag), y + height - 22, 0xFFFFFF, true);
 

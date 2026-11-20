@@ -70,6 +70,10 @@ public class ConfigScreen extends Screen {
     private int mapScrollOffset = 0;
     private int globalScrollOffset = 0;
     private int leftScrollOffset = 0;
+    // 商店预览各列滚动行偏移（预览控件每次 rebuild 都会重建，偏移由本类持有以保持）
+    private final int[] previewScrollDeathmatch = new int[5];
+    private final int[] previewScrollBombT = new int[5];
+    private final int[] previewScrollBombCT = new int[5];
     private int rightTotalHeight = 0;
     private int leftTotalHeight = 0;
 
@@ -563,20 +567,22 @@ public class ConfigScreen extends Screen {
             rightScrollables.add(boundaryWarningField);
             editY += ROW_GAP;
 
-            // ---- 边界惩罚 ----
-            rightScrollables.add(new LabelWidget(editX, editY, Text.literal("边界惩罚(击杀):")));
-            TextFieldWidget boundaryPenaltyField = new NumberTextField(editX + FIELD_OFFSET, editY, 50, 18, Text.literal(""));
-            boundaryPenaltyField.setText(String.valueOf(editingMap.getBoundaryPenaltyKills()));
-            boundaryPenaltyField.setChangedListener(s -> {
-                if (!s.isEmpty()) {
-                    try {
-                        editingMap.setBoundaryPenaltyKills(Integer.parseInt(s));
-                        hasUnsavedChanges = true;
-                    } catch (NumberFormatException ignored) {}
-                }
-            });
-            rightScrollables.add(boundaryPenaltyField);
-            editY += ROW_GAP;
+            // ---- 边界惩罚（仅死亡竞赛；爆破模式按回合比分结算，不显示该残留配置项） ----
+            if (!bombMap) {
+                rightScrollables.add(new LabelWidget(editX, editY, Text.literal("边界惩罚(击杀):")));
+                TextFieldWidget boundaryPenaltyField = new NumberTextField(editX + FIELD_OFFSET, editY, 50, 18, Text.literal(""));
+                boundaryPenaltyField.setText(String.valueOf(editingMap.getBoundaryPenaltyKills()));
+                boundaryPenaltyField.setChangedListener(s -> {
+                    if (!s.isEmpty()) {
+                        try {
+                            editingMap.setBoundaryPenaltyKills(Integer.parseInt(s));
+                            hasUnsavedChanges = true;
+                        } catch (NumberFormatException ignored) {}
+                    }
+                });
+                rightScrollables.add(boundaryPenaltyField);
+                editY += ROW_GAP;
+            }
 
             // ---- 踢人冷却 ----
             rightScrollables.add(new LabelWidget(editX, editY, Text.literal("踢人冷却(秒):")));
@@ -860,6 +866,7 @@ public class ConfigScreen extends Screen {
                     editingMap.setShopColumnsCT(ConfigScreenSupport.copyShopColumns(editingMap.getShopColumns()));
                 }
 
+                editY = addBombFirstColumnEditor(editX, editY);
                 editY = addShopColumnEditor(editX, editY, 4, false, true, true);
                 editY = addShopPreview(editX, editY, true, true);
                 editY = addShopColumnEditor(editX, editY, 4, false, true, false);
@@ -1116,6 +1123,120 @@ public class ConfigScreen extends Screen {
     }
 
     /**
+     * 【作用】爆破图购买页第 1 列（装备列）附加商品编辑器：第 1 项固定为拆弹装备（仅 CT），
+     *         本编辑器只配置其后的商品（物品ID | 价格 | 显示名 | 图标 | 删除），T/CT 按商品队伍规则显示。
+     * 【被谁使用】init() 爆破图分支（T/CT 分类列编辑器之前）。
+     */
+    private int addBombFirstColumnEditor(int editX, int editY) {
+        rightScrollables.add(new LabelWidget(editX, editY, Text.literal(
+                "购买页第 1 列（装备列）附加商品（第 1 项固定为拆弹装备；下方为可配置商品，T/CT 按商品队伍规则显示）:"), 9));
+        editY += 18;
+
+        List<GlobalConfig.ShopItem> items = new ArrayList<>(editingMap.getShopColumn1Items());
+        editingMap.setShopColumn1Items(items);
+
+        int iconW = 80;
+        int delW = 16;
+        int fixedRight = 6 + 45 + 6 + 90 + 6 + iconW + 6 + delW + 8;
+        int itemNameW = Math.max(60, contentWidth - fixedRight - 14);
+        int itemRowX = editX + 14;
+        int priceX = itemRowX + itemNameW + 6;
+        int nameX = priceX + 45 + 6;
+        int iconX = nameX + 90 + 6;
+        int delX = iconX + iconW + 6;
+
+        if (!items.isEmpty()) {
+            rightScrollables.add(new LabelWidget(itemRowX, editY, Text.literal("物品ID（/give 格式）"), 9));
+            rightScrollables.add(new LabelWidget(priceX, editY, Text.literal("价格"), 9));
+            rightScrollables.add(new LabelWidget(nameX, editY, Text.literal("显示名"), 9));
+            rightScrollables.add(new LabelWidget(iconX, editY, Text.literal("图标"), 9));
+            rightScrollables.add(new LabelWidget(delX, editY, Text.literal("删除"), 9));
+            editY += 16;
+        }
+
+        for (int r = 0; r < items.size(); r++) {
+            GlobalConfig.ShopItem item = items.get(r);
+            final int rIdx = r;
+            int rowY = editY + r * 22;
+
+            TextFieldWidget f = new TextFieldWidget(textRenderer, itemRowX, rowY, itemNameW, 18, Text.literal(""));
+            f.setMaxLength(4096);
+            f.setText(item.getItemId() != null ? item.getItemId() : "");
+            f.setChangedListener(s -> {
+                items.get(rIdx).setItemId(s);
+                hasUnsavedChanges = true;
+            });
+            rightScrollables.add(f);
+
+            NumberTextField pf = new NumberTextField(priceX, rowY, 45, 18, Text.literal(""));
+            pf.setText(String.valueOf(item.getPrice()));
+            pf.setChangedListener(s -> {
+                if (!s.isEmpty()) {
+                    try {
+                        items.get(rIdx).setPrice(Integer.parseInt(s));
+                        hasUnsavedChanges = true;
+                    } catch (NumberFormatException ignored) {}
+                }
+            });
+            rightScrollables.add(pf);
+
+            TextFieldWidget nf = new TextFieldWidget(textRenderer, nameX, rowY, 90, 18, Text.literal(""));
+            nf.setMaxLength(128);
+            nf.setText(item.getDisplayName());
+            nf.setChangedListener(s -> {
+                items.get(rIdx).setDisplayName(s);
+                hasUnsavedChanges = true;
+            });
+            rightScrollables.add(nf);
+
+            TextFieldWidget if_ = new TextFieldWidget(textRenderer, iconX, rowY, iconW, 18, Text.literal(""));
+            if_.setMaxLength(32000);
+            if_.setText(item.getIcon());
+            if_.setChangedListener(s -> {
+                items.get(rIdx).setIcon(s);
+                hasUnsavedChanges = true;
+            });
+            rightScrollables.add(if_);
+
+            ButtonWidget delItemBtn = ButtonWidget.builder(Text.literal("×"), button -> {
+                items.remove(rIdx);
+                editingMap.setShopColumn1Items(items);
+                hasUnsavedChanges = true;
+                clearChildren();
+                init();
+            }).dimensions(delX, rowY, 16, 18).build();
+            rightScrollables.add(delItemBtn);
+        }
+        editY += items.size() * 22 + 2;
+
+        int addItemY = editY;
+        ButtonWidget addItemBtn = ButtonWidget.builder(Text.literal("+ 添加商品"), button -> {
+            items.add(new GlobalConfig.ShopItem("", 0, 0));
+            editingMap.setShopColumn1Items(items);
+            hasUnsavedChanges = true;
+            clearChildren();
+            init();
+        }).dimensions(itemRowX, addItemY, 100, 20).build();
+        rightScrollables.add(addItemBtn);
+
+        ButtonWidget handAddBtn = ButtonWidget.builder(Text.literal("手持添加"), button -> {
+            String itemStr = handItemNbt();
+            if (itemStr == null) return;
+            items.add(new GlobalConfig.ShopItem(itemStr, 0, 0));
+            editingMap.setShopColumn1Items(items);
+            hasUnsavedChanges = true;
+            clearChildren();
+            init();
+        }).dimensions(itemRowX + 110, addItemY, 90, 20).build();
+        rightScrollables.add(handAddBtn);
+        editY += ROW_GAP + 4;
+
+        addHint(editX, editY, "第 1 项拆弹装备固定不可配置（价格在全局经济参数 defuserPrice）；本列表为第 1 列其余商品，购买页紧跟在拆弹装备之后显示");
+        editY += 11;
+        return editY;
+    }
+
+    /**
      * 【作用】商店分类列编辑器（购买页网格布局的列配置）：
      *         每列可配列头名称与列头图标，列内商品行 = 物品ID（/give 格式）| 价格 | (限购，仅死亡竞赛)
      *         | 显示名 | 图标 | 删除；支持逐列添加商品/手持添加（保留数据组件）与添加/删除列。
@@ -1352,8 +1473,10 @@ public class ConfigScreen extends Screen {
         // 【作用】预览标题绘制在控件 y 坐标上方 14px，这里先预留标题高度，
         //         避免标题压到上一行字段说明（提示文字）上
         int titleGap = 14;
+        int[] previewScroll = !bomb ? previewScrollDeathmatch
+                : (tTeam ? previewScrollBombT : previewScrollBombCT);
         rightScrollables.add(new ShopPreviewWidget(editX, editY + titleGap, contentWidth, previewH,
-                () -> editingMap, () -> globalConfig.getBombEconomy().getDefuserPrice(), bomb, tTeam));
+                () -> editingMap, () -> globalConfig.getBombEconomy().getDefuserPrice(), bomb, tTeam, previewScroll));
         return editY + titleGap + previewH + 14;
     }
 
@@ -1862,6 +1985,14 @@ public class ConfigScreen extends Screen {
             return true;
         }
         if (isInRightPanel(mouseX) && mouseY >= contentTop + TAB_BAR_HEIGHT && mouseY < contentTop + contentHeight) {
+            // 悬停在商店预览上且该列可滚动时，滚轮只滚预览列，不滚整页
+            int adjustedMouseY = (int) mouseY + currentScrollOffset();
+            for (Drawable drawable : rightScrollables) {
+                if (drawable instanceof ShopPreviewWidget preview
+                        && preview.mouseScrolled(mouseX, adjustedMouseY, verticalAmount)) {
+                    return true;
+                }
+            }
             int maxScroll = Math.max(0, rightTotalHeight - (contentHeight - TAB_BAR_HEIGHT));
             setScrollOffset(MathHelper.clamp((int)(currentScrollOffset() - verticalAmount * 20), 0, maxScroll));
             return true;

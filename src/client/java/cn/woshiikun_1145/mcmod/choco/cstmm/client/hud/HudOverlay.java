@@ -241,12 +241,18 @@ public class HudOverlay implements HudRenderCallback {
                     centerX, TOP_Y + 10, 1.5f, timeColor, true);
         }
 
-        // 第三行：比分——爆破对局显示回合比分（T 黄 / CT 蓝），死亡竞赛对局显示击杀比分（领先亮色/落后暗色）
+        // 第三行：比分——爆破对局显示回合比分（己方恒在左 / 敌方在右，与两侧卡片列、
+        //         存活人数同口径；T/CT 标签跟随各自队伍，换边后己方比分不再跑位），
+        //         死亡竞赛对局显示击杀比分（领先亮色/落后暗色）
         String scoreText;
         if (bombMode) {
-            int tWins = tTeam == 1 ? wins1 : wins2;
-            int ctWins = tTeam == 1 ? wins2 : wins1;
-            scoreText = "§eT " + tWins + " §8: §9" + ctWins + " CT";
+            int ownTeam = ownTeamNumber();
+            int ownWins = ownTeam == 1 ? wins1 : wins2;
+            int enemyWins = ownTeam == 1 ? wins2 : wins1;
+            boolean ownIsT = ownTeam == tTeam;
+            scoreText = ownIsT
+                    ? "§eT " + ownWins + " §8: §9" + enemyWins + " CT"
+                    : "§9CT " + ownWins + " §8: §e" + enemyWins + " T";
         } else {
             String redColor = redKills >= blueKills ? "§c" : "§4";
             String blueColor = blueKills >= redKills ? "§9" : "§1";
@@ -660,18 +666,25 @@ public class HudOverlay implements HudRenderCallback {
         }
     }
 
+    /**
+     * 【作用】取自己所在队伍编号（1 红 / 2 蓝）；自己不在花名册（如观战）时默认红队，
+     *         与 splitTeams 同口径。比分行/存活人数等"己方在左"的布局统一取用。
+     * 【被谁使用】drawScoreboard（爆破回合比分排序）、teamListOf。仅客户端。
+     */
+    private static int ownTeamNumber() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        UUID self = client.player != null ? client.player.getUuid() : null;
+        for (RosterEntry e : roster) {
+            if (self != null && e.uuid().equals(self)) return e.team();
+        }
+        return 1;
+    }
+
     /** 【作用】取指定视角侧的队伍列表（存活人数统计用）。仅 HUD 内部使用。 */
     private static List<RosterEntry> teamListOf(boolean ownSide) {
         // 与 splitTeams 同口径：按自己所在队拆分（无自己时默认红队为"己方"）
         MinecraftClient client = MinecraftClient.getInstance();
-        UUID self = client.player != null ? client.player.getUuid() : null;
-        int ownTeam = 1;
-        for (RosterEntry e : roster) {
-            if (self != null && e.uuid().equals(self)) {
-                ownTeam = e.team();
-                break;
-            }
-        }
+        int ownTeam = ownTeamNumber();
         List<RosterEntry> list = new ArrayList<>();
         for (RosterEntry e : roster) {
             boolean isOwn = e.team() == ownTeam;

@@ -34,6 +34,8 @@ public class ShopDataCache {
     private boolean buyWindowOpen = false;
     // 拆弹装备价格（爆破图购买页第 1 列固定项）
     private int defuserPrice = 0;
+    // 玩家是否已持有拆弹装备（服务端 tag 态下发）：true 时购买项置灰显示"已持有"不可点
+    private boolean ownedDefuser = false;
 
     // 单例，禁止外部实例化
     private ShopDataCache() {}
@@ -49,13 +51,14 @@ public class ShopDataCache {
     // 覆盖写入完整商店数据（购买页网格布局 + 爆破经济信息）
     public void update(boolean eligible, boolean bombMode, boolean hasDefuser,
                        int money, boolean buyWindowOpen, int defuserPrice,
-                       List<ShopDataS2CPayload.ColumnData> columns) {
+                       boolean ownedDefuser, List<ShopDataS2CPayload.ColumnData> columns) {
         this.eligible = eligible;
         this.bombMode = bombMode;
         this.hasDefuser = hasDefuser;
         this.money = Math.max(0, money);
         this.buyWindowOpen = buyWindowOpen;
         this.defuserPrice = Math.max(0, defuserPrice);
+        this.ownedDefuser = ownedDefuser;
         this.columns = columns != null ? List.copyOf(columns) : new ArrayList<>();
     }
 
@@ -85,6 +88,9 @@ public class ShopDataCache {
     // 拆弹装备价格（爆破图第 1 列固定项）
     public int getDefuserPrice() { return defuserPrice; }
 
+    // 玩家是否已持有拆弹装备（爆破图第 1 列限购置灰）
+    public boolean ownedDefuser() { return ownedDefuser; }
+
     // 断线时清空缓存
     public void clear() {
         eligible = false;
@@ -94,5 +100,6 @@ public class ShopDataCache {
         money = 0;
         buyWindowOpen = false;
         defuserPrice = 0;
+        ownedDefuser = false;
     }
 }

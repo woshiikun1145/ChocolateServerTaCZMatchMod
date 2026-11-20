@@ -99,12 +99,37 @@ public class ShopScreen extends Screen {
             String headerName = "";
 
             if (bomb && c == 0) {
-                // 第 1 列：装备列（仅 CT 显示拆弹装备购买项；T 方空列）
+                // 第 1 列：装备列（仅 CT 显示拆弹装备购买项；T 方空列）；
+                // 已持有（服务端 tag 态下发）时置灰显示"已持有"不可点（限购：每人一个）
                 headerName = "装备";
                 if (cache.hasDefuser()) {
                     int price = cache.getDefuserPrice();
-                    boolean affordable = cache.isBuyWindowOpen() && cache.getMoney() >= price;
-                    cells.add(new Cell(-1, "拆弹装备", "$" + price, "", ItemStack.EMPTY, affordable));
+                    boolean owned = cache.ownedDefuser();
+                    boolean affordable = !owned && cache.isBuyWindowOpen() && cache.getMoney() >= price;
+                    cells.add(new Cell(-1, "拆弹装备", owned ? "已持有" : "$" + price,
+                            "", ItemStack.EMPTY, affordable));
+                }
+                // 第 1 列固定项（拆弹装备，仅 CT）之后：地图配置的附加商品（服务端已按队伍过滤）
+                if (!serverCols.isEmpty()) {
+                    ShopDataS2CPayload.ColumnData col = serverCols.get(0);
+                    for (int r = 0; r < col.items().size(); r++) {
+                        GlobalConfig.ShopItem item = col.items().get(r);
+                        int buyIndex = flatIndexBase(serverCols, 0) + r;
+                        String name = item.getDisplayName() == null ? "" : item.getDisplayName();
+                        if (name.isEmpty()) {
+                            ItemStack stack = stackOf(item.getItemId());
+                            name = stack.isEmpty()
+                                    ? (item.getItemId() == null ? "" : item.getItemId())
+                                    : stack.getName().getString();
+                        }
+                        name = textRenderer.trimToWidth(name, colWidth - 46);
+                        boolean affordable = cache.isBuyWindowOpen()
+                                && cache.getMoney() >= Math.max(0, item.getPrice());
+                        String priceText = "$" + Math.max(0, item.getPrice());
+                        cells.add(new Cell(buyIndex, name, priceText,
+                                item.getIcon() == null ? "" : item.getIcon(),
+                                stackOf(item.getItemId()), affordable));
+                    }
                 }
             } else {
                 // 服务端下发的列：爆破图 [0]=装备列（空商品），1..4=分类列；死亡竞赛图 0..4=分类列。
@@ -117,7 +142,8 @@ public class ShopScreen extends Screen {
                     for (int r = 0; r < col.items().size(); r++) {
                         GlobalConfig.ShopItem item = col.items().get(r);
                         int buyIndex = flatBase + r;
-                        String name = item.getDisplayName();
+                        // 显示名未填（空/null）→ 回退物品自身名字；物品解析失败再回退 itemId 字符串
+                        String name = item.getDisplayName() == null ? "" : item.getDisplayName();
                         if (name.isEmpty()) {
                             ItemStack stack = stackOf(item.getItemId());
                             name = stack.isEmpty()
@@ -129,7 +155,8 @@ public class ShopScreen extends Screen {
                                 || (cache.isBuyWindowOpen() && cache.getMoney() >= Math.max(0, item.getPrice()));
                         String priceText = bomb || item.getPrice() > 0
                                 ? "$" + Math.max(0, item.getPrice()) : "免费";
-                        cells.add(new Cell(buyIndex, name, priceText, item.getIcon(),
+                        cells.add(new Cell(buyIndex, name, priceText,
+                                item.getIcon() == null ? "" : item.getIcon(),
                                 stackOf(item.getItemId()), affordable));
                     }
                 }
@@ -148,8 +175,8 @@ public class ShopScreen extends Screen {
 
     /**
      * 【作用】计算某分类列首商品的平铺购买索引（与客户端渲染列顺序、服务端平铺列表一致）：
-     *         逐列累加前列商品数。爆破图 columns[0] 为空"装备列"（不占索引，拆弹装备走
-     *         index=-1），死亡竞赛图从 columns[0] 起——空装备列贡献 0，两种模式统一按此计算。
+     *         逐列累加前列商品数。爆破图 columns[0] 为"装备列"：拆弹装备固定走 index=-1，
+     *         其附加商品从索引 0 起（与服务端平铺列表顺序一致）；死亡竞赛图从 columns[0] 起。
      */
     private int flatIndexBase(List<ShopDataS2CPayload.ColumnData> serverCols, int colIdx) {
         int base = 0;

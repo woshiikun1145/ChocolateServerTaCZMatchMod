@@ -77,7 +77,47 @@ public class CstmmClient implements ClientModInitializer {
         // C4 实体渲染器注册（绿色长方体占位外观）
         EntityRendererRegistry.register(ModEntities.C4, BombEntityRenderer::new);
 
+        // ===== 手雷系统（移植 CounterStrikeGrenades，阶段 1） =====
+        // 【作用】客户端钩子注入：common 侧实体/物品经 GrenadeHooks.client 触发纯客户端效果
+        cn.woshiikun_1145.mcmod.choco.cstmm.util.GrenadeHooks.client =
+                new cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.GrenadeClientHooksImpl();
+        // 【作用】手雷实体渲染器注册（*_t 投掷模型 + 自转插值）
+        registerGrenadeRenderers();
+        // 【作用】烟雾粒子工厂注册（cstmm:smoke_particle → SmokeGrenadeParticle.Factory）
+        net.fabricmc.fabric.api.client.particle.v1.ParticleFactoryRegistry.getInstance().register(
+                cn.woshiikun_1145.mcmod.choco.cstmm.particle.ModParticles.SMOKE_PARTICLE,
+                cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.SmokeGrenadeParticle.Factory::new);
+        // 【作用】闪光白屏 overlay 挂 HUD 渲染回调（致盲时序推进 + 绘制）
+        cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.FlashbangBlindEffectRenderer.register();
+        // 【作用】其他玩家被闪白闪粒子（客户端 tick）
+        cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.FlashbangParticleEffectRenderer.register();
+        // 【作用】烟雾粒子生成器逐 tick 推进
+        cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.SmokeRenderManager.register();
+        // 【作用】手雷投掷输入状态机（GLFW 按键轮询 + C2S 投掷包）
+        cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.input.ThrowActionHandler.register();
+        // 【作用】手雷 S2C 数据包接收器（闪光爆闪 / 烟雾扩散方块）
+        cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.GrenadeClientPayloads.register();
+
         LOGGER.info("[CSTMM - Client] Client initialized successfully!");
+    }
+
+    /**
+     * 【作用】注册全部手雷实体的渲染器（泛型工厂逐类型注册）。
+     * 【被谁使用】仅本类 onInitializeClient。
+     */
+    private void registerGrenadeRenderers() {
+        EntityRendererRegistry.register(ModEntities.HEGRENADE,
+                ctx -> new cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.GrenadeEntityRenderer<>(ctx));
+        EntityRendererRegistry.register(ModEntities.FLASHBANG,
+                ctx -> new cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.GrenadeEntityRenderer<>(ctx));
+        EntityRendererRegistry.register(ModEntities.SMOKEGRENADE,
+                ctx -> new cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.GrenadeEntityRenderer<>(ctx));
+        EntityRendererRegistry.register(ModEntities.INCENDIARY,
+                ctx -> new cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.GrenadeEntityRenderer<>(ctx));
+        EntityRendererRegistry.register(ModEntities.MOLOTOV,
+                ctx -> new cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.GrenadeEntityRenderer<>(ctx));
+        EntityRendererRegistry.register(ModEntities.DECOY,
+                ctx -> new cn.woshiikun_1145.mcmod.choco.cstmm.client.grenade.render.GrenadeEntityRenderer<>(ctx));
     }
 
     // 爆破交互按键状态（按住状态翻转时才发包，避免每 tick 刷包）

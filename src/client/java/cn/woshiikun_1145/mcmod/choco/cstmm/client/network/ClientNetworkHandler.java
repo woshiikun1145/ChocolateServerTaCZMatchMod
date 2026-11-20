@@ -213,7 +213,8 @@ public class ClientNetworkHandler {
         // ========== 商店数据接收 ==========
         ClientPlayNetworking.registerGlobalReceiver(ShopDataS2CPayload.ID, (payload, context) -> context.client().execute(() -> {
             ShopDataCache.getInstance().update(payload.eligible(), payload.bombMode(), payload.hasDefuser(),
-                    payload.money(), payload.buyWindowOpen(), payload.defuserPrice(), payload.columns());
+                    payload.money(), payload.buyWindowOpen(), payload.defuserPrice(),
+                    payload.ownedDefuser(), payload.columns());
             // 商店界面已打开时刷新其内容
             if (context.client().currentScreen instanceof ShopScreen screen) {
                 screen.refresh();
@@ -301,9 +302,11 @@ public class ClientNetworkHandler {
 
         // ========== MVP 音乐通知接收 ==========
         // 【作用】收到本回合/本场 MVP 与其选择的音乐名：延迟后加载曲目清单、展示提示并播放
+        //（hintDurationMs 与所配对胜利横幅时长对齐，MVP 栏与获胜信息栏同现同消）
         ClientPlayNetworking.registerGlobalReceiver(MvpMusicPayload.ID, (payload, context) -> context.client().execute(() ->
                 cn.woshiikun_1145.mcmod.choco.cstmm.client.music.MvpMusicClientHandler.onPayload(
-                        payload.mvpName(), payload.musicName(), payload.delayMs(), payload.bombMode())));
+                        payload.mvpName(), payload.musicName(), payload.delayMs(),
+                        payload.durationMs(), payload.bombMode())));
 
         // ========== 战队名提示（Tab 补全数据源） ==========
         // /cstmm data get|edit|delete clan 的建议 provider 在客户端执行，战队数据只在服务端，

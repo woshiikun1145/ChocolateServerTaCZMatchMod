@@ -39,15 +39,18 @@ public final class MvpMusicClientHandler {
 
     /**
      * 【作用】收到服务端 MVP 音乐通知：按 delayMs 延迟后执行（死亡竞赛模式通常 0）。
+     *         hintDurationMs = MVP 提示栏显示时长（服务端与所配对胜利横幅对齐下发），
+     *         <=0 时回退默认时长。
      * 【被谁使用】ClientNetworkHandler 的 MvpMusicPayload 接收器。
      */
-    public static void onPayload(String mvpName, String musicName, int delayMs, boolean bombMode) {
+    public static void onPayload(String mvpName, String musicName, int delayMs, int hintDurationMs, boolean bombMode) {
         if (mvpName == null || mvpName.isEmpty() || musicName == null || musicName.isEmpty()) return;
         int delay = Math.max(0, delayMs);
+        long hintDuration = hintDurationMs > 0 ? hintDurationMs : HUD_HINT_MS;
         if (delay == 0) {
-            begin(mvpName, musicName, bombMode, 0);
+            begin(mvpName, musicName, bombMode, hintDuration, 0);
         } else {
-            SCHEDULER.schedule(() -> begin(mvpName, musicName, bombMode, 0), delay, TimeUnit.MILLISECONDS);
+            SCHEDULER.schedule(() -> begin(mvpName, musicName, bombMode, hintDuration, 0), delay, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -55,7 +58,7 @@ public final class MvpMusicClientHandler {
      * 【作用】准备周期：加载清单并查找曲目；未加载完则延时重试，完成后展示提示并播放。
      * 【被谁使用】onPayload（调度线程）。
      */
-    private static void begin(String mvpName, String musicName, boolean bombMode, int attempt) {
+    private static void begin(String mvpName, String musicName, boolean bombMode, long hintDurationMs, int attempt) {
         if (!ClientHandshakeState.isHandshaked()) return;
         String url = ConfigDataCache.getInstance().getGlobalConfig().getMvpMusicUrl();
         if (url.isEmpty()) {
@@ -67,7 +70,7 @@ public final class MvpMusicClientHandler {
         MvpMusicIndex.Track track = MvpMusicIndex.find(musicName);
         if (track == null) {
             if (MvpMusicIndex.isLoading() && attempt < MAX_INDEX_RETRIES) {
-                SCHEDULER.schedule(() -> begin(mvpName, musicName, bombMode, attempt + 1),
+                SCHEDULER.schedule(() -> begin(mvpName, musicName, bombMode, hintDurationMs, attempt + 1),
                         INDEX_RETRY_MS, TimeUnit.MILLISECONDS);
                 return;
             }
@@ -75,21 +78,21 @@ public final class MvpMusicClientHandler {
                     musicName, MvpMusicIndex.getError());
             return;
         }
-        present(mvpName, track, bombMode);
+        present(mvpName, track, bombMode, hintDurationMs);
     }
 
     /** 【作用】展示提示（死亡竞赛附聊天栏播报）并触发缓存下载与播放（切回客户端主线程）。 */
-    private static void present(String mvpName, MvpMusicIndex.Track track, boolean bombMode) {
+    private static void present(String mvpName, MvpMusicIndex.Track track, boolean bombMode, long hintDurationMs) {
         String musicLine = track.author() + " - " + track.musicName();
         MinecraftClient client = MinecraftClient.getInstance();
         client.execute(() -> {
             if (client.player == null) return;
             if (bombMode) {
-                HudOverlay.showMvpHint(mvpName, musicLine, track, HUD_HINT_MS);
+                HudOverlay.showMvpHint(mvpName, musicLine, track, hintDurationMs);
             } else {
                 client.player.sendMessage(
                         Text.literal("正在播放【" + mvpName + "】的MVP音乐【" + musicLine + "】"), false);
-                HudOverlay.showMvpHint(mvpName, musicLine, track, HUD_HINT_MS);
+                HudOverlay.showMvpHint(mvpName, musicLine, track, hintDurationMs);
             }
             if (!ClientConfig.isMvpMusicEnabled()) return;
             MvpMusicCache.ensureMusic(track, path -> client.execute(() ->

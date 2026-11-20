@@ -54,6 +54,10 @@ final class ConfigScreenSupport {
         if (m.getShopColumnsCT() == null) m.setShopColumnsCT(new ArrayList<>());
         if (m.getBombsites() == null) m.setBombsites(new ArrayList<>());
         if (m.getDefaultGear() == null) m.setDefaultGear(new ArrayList<>());
+        // 爆破模式按回合比分结算：清理死亡竞赛遗留的“出界惩罚加分”配置，避免保存后继续残留
+        if (m.isBombMap() && m.getBoundaryPenaltyKills() != 0) {
+            m.setBoundaryPenaltyKills(0);
+        }
         return m;
     }
 
