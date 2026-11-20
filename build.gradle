@@ -93,6 +93,10 @@ jar {
         rename { "LICENSE-JLAYER-LGPL-2.1.txt" }
     }
     from("THIRD_PARTY_NOTICES.md")
+    // 投掷物移植自 CSG（MIT），随模组分发其许可证全文
+    from("LICENSE_CSG") {
+        rename { "LICENSE-CSG-MIT.txt" }
+    }
 }
 
 // configure the maven publication

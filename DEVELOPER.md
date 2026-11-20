@@ -20,7 +20,7 @@
 8. [配置文件字段参考](#8-配置文件字段参考)
 9. [日志规范](#9-日志规范)
 10. [常见问题排查](#10-常见问题排查)
-11. [第三方依赖与合规（JLayer）](#11-第三方依赖与合规jlayer)
+11. [第三方依赖与合规（JLayer / CSG）](#11-第三方依赖与合规jlayer--csg)
 
 ---
 
@@ -46,11 +46,13 @@
 | `ConfigManager` | 配置加载/校验/落盘（原子写盘）、保存后全服广播 |
 | `InventoryManager` | 竞技模式存包/清包/恢复快照 |
 | `EquipmentManager` | 竞技模式默认装备发放、购买物品发放（双校验）；物品字符串解析统一委托 `util.ItemStrings`（主格式 **/give 格式** `id[minecraft:组件={...}] 数量`，兼容旧完整 SNBT/"id 数量"/纯 ID，**旧版 1.20 tag NBT 自动迁移为 1.21 components**：附魔→levels 映射、Unbreakable、display→custom_name/lore）；`parseAndBuild` 供 EconomyManager 扣费购买复用 |
-| `BombRoundManager` | 爆破模式回合状态机（gameType=BOMB）：多回合赛制（休闲先到 8 分/竞技 MR12+加时 BO6）、攻防转换（第 13 回合/加时第 4 回合）、回合重置（复活/装备/传送/C4 指派/拆弹器发放）、胜负判定（全歼/爆炸/拆除/超时，安放后 T 全灭不结束）、3 分钟重连宽限与整队离线挂起、加时继续投票回调 |
+| `BombRoundManager` | 爆破模式回合状态机（gameType=BOMB）：多回合赛制（休闲先到 8 分/竞技 MR12+加时 BO6）、攻防转换（第 13 回合/加时第 4 回合）、回合重置（复活/装备/传送/C4 指派/拆弹器发放）、**第 1 回合全员清空进服背包/护甲/副手并发放默认装备（休闲、竞技一致）**、胜负判定（全歼/爆炸/拆除/超时，安放后 T 全灭不结束）、3 分钟重连宽限与整队离线挂起、加时继续投票回调 |
 | `EconomyManager` | 爆破图经济系统（价格=匹配内货币非服务器货币，全局可配 `GlobalConfig.BombEconomy`）：起始金 $800/上限 $16000/击杀 $300（休闲减半）/胜利金 3250·3500/败金 1400+连败×500 封顶 3400/安放·拆除个人 $300/T 存活未下包战败 0 败金；购买窗口判定（冻结+开局 20 秒、安放后禁买）与扣费购买（拆弹器 CT 专属、C4 禁购）；补位玩家懒初始化起始金 |
 | `BombInteractionManager` | 爆破交互（每服务器 tick 推进）：安放（T 手持 c4 站包点内**长按右键/使用键**，plantTimeSeconds）与拆除（CT 2.5 格内长按右键，**持拆弹装备 tag `cstmm_defuse_kit` 用 defuseKitSeconds / 裸拆 defuseSeconds**）；条件校验/中断/进度 action bar；C4 实体生成与按 matchId 清理；`/cstmm debug allow_c4 to_be_planted_freely` 开启后跳过全部安放情境限制（任意位置/任意阵营/任意阶段/可重复安放，仅保留存活+手持 C4）；对局结束统一回收拆弹装备 tag |
 | `C4DamageCalculator`（util） | C4 爆炸伤害（《C4爆炸计算.md》模型，参数已 ÷5 到 MC 口径，全部在 `MapConfig.BombSettings` 可配）：双段线性距离衰减（dMax 51→dKill 20 @L1，→0 @L2）、脚/胸/头三采样点取最大、实心遮挡 0 伤/开口方块按 a0 泄漏穿透、背对减伤 dBack、向下取整；伤害以 `genericKill` 源**直接扣除（无视原版盔甲/爆炸保护/抗性/吸收）**；无破坏爆炸视觉 |
 | `item.ModItems` / `entity.ModEntities` | 自定义注册表（命名空间 `cstmm`，非 MOD_ID）：`cstmm:c4` 物品+实体（BombEntity：静止不可推、携带 matchId 隔离清理，挂在创造栏"战斗"；**对局内**由会话驱动倒计时，**对局外自由炸弹**归零先播 `c4_detonation` 引信音、播完 DETONATION_LEAD_MILLIS 后自爆——与对局内同口径，NBT 重载 fuseTicks=0 重置 1 tick 防卡死）。**拆弹装备不是物品**——持有状态 = 玩家 tag `cstmm_defuse_kit`（`BombInteractionManager.DEFUSE_KIT_TAG`） |
+| `entity` / `item`（投掷物） | **投掷物系统移植自 CSG（CounterStrikeGrenades）1.5.2**（原始实现为 Forge 1.20.1 / Kotlin，已改写为 Fabric 1.21.1 / Java）：`GrenadeType` 枚举、`CounterStrikeGrenadeEntity` 基类与 HE/闪光/烟雾/燃烧/莫洛托夫/诱饵六类实体，`CounterStrikeGrenadeItem` 与六个物品（`cstmm:hegrenade` / `flashbang` / `smokegrenade` / `incendiary` / `molotov` / `decoy`）；与 C4 共用 `ModItems` / `ModEntities` 注册（命名空间 `cstmm`） |
+| `util.GrenadeSettings` / `GrenadeMath` / `GrenadeHooks` / `GrenadeDamageTypes` / `api.CSGrenadesAPI` | 投掷物参数与工具（全部为内置静态参数，不暴露配置界面）：`GrenadeSettings` 集中存放数值（投掷冷却 1000ms、强投 1.3 / 中投 1.0 / 弱投 0.4、烟雾半径 6 / 寿命 20s 等）；`GrenadeMath` 视线/距离/背对判定；`GrenadeDamageTypes` 自定义伤害类型；`CSGrenadesAPI` 供外部模组查询与触发投掷物 |
 | `PlayerDataManager` | 战绩记录（仅对局结束时记录一次）与档案持久化；`setMvpMusic` 校验并写入玩家 `mvpMusicName` 档案字段 |
 | `MvpMusicManager` | MVP 判定与下发：死亡竞赛模式在 `MatchManager.endMatch` 后按"击杀最多→死亡少→随机"选 MVP（0 杀不播）；爆破模式在 `BombRoundManager.endRound` 后按胜负原因判定——CT 胜：拆除=拆弹者，歼灭/超时=回合击杀→伤害→随机；T 胜：C4 爆炸=回合击杀（并列取安放者）→伤害→随机，歼灭=击杀→伤害→随机。MVP 未选音乐或 `mvpMusicUrl` 为空时静默跳过；下发 `cstmm:mvp_music`（含延迟：目标类 2500ms/歼灭类 1000ms/普通 0ms 与 bombMode 标记） |
 | `MatchScheduler` | 全局调度 tick，各 manager tick 用独立 try-catch 隔离异常 |
@@ -77,11 +79,12 @@
 | `Base64ImageDecoder` | base64 图片 → GPU 纹理的健壮解码工具（data URI 前缀剥离/空白清理/MIME 降级/非 PNG 经 ImageIO 转换；地图卡片背景与战队徽标共用，`CardTexture` record 在此类中） |
 | `ToastManager` | 提示栏（NVIDIA 风格：深色横条 + 左侧主题色图标块白"！"，从右侧滑入 250ms ease-out → 停留 → 向右滑出 250ms ease-out；单条总宽 ≤ 窗口 1/3，超长自动换行；最多 5 条堆叠）：独立静态方法 `show(message[, durationMs])` 任意线程可调（同文案 3s 去重防刷屏），`dismiss(message)` 移除进行中提示；渲染两路——游戏内经 `HudRenderCallback`（CstmmClient 注册，屏幕右上）、主菜单打开时由 MatchMenuScreen 在内容区右上渲染（二者互斥防重复）；已接管握手成功/失败/超时、正在握手/同步配置/配置同步成功/正在下载MVP音乐/MVP音乐下载完成/打开配置界面/配置已发送/刷新曲目清单/曲目清单加载失败/头像与MVP音乐保存清除反馈/已在队列或游戏中（原弹窗）、你已离开**队列（服务端 `deliverMessage` 支持 `TOAST:` 前缀路由，前缀由客户端 PopupPayload 接收器剥离）等提示；个性化页内联状态文字（setStatus/setMusicStatus）5 秒自动消失 |
 | `LastWordsScreen` + `WhyYouClickThis` | "千万别点"的遗言流程（不可取消：发送/算了/回车/ESC 均发送遗言；崩溃挂起为静态状态，由 CstmmClient 每 tick 抛出；屏幕被其他模组顶号/断线顶掉时 `removed()` 兜底同样触发；被反崩溃模组吞掉异常则改用 `scheduleStop()` 强制退出） |
-| `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新）：右侧分 **地图配置 / 全局配置** 两个标签页（各自独立滚动偏移，切换不丢失位置；全局页内再分装备/参数子标签），地图类型切换（DEATHMATCH/BOMB）、爆破包点编辑（名称/角点1/角点2 两点式长方体 + "在脚下添加包点"与逐行"取点2"可视化取点，仅 BOMB 图显示）、商店分类列编辑器（死亡竞赛图 5 列通用；爆破图 T 方与 CT 方两套独立配置各 4 列，共用 `addShopColumnEditor`，死亡竞赛图额外含限购列；旧单套配置打开时自动复制为两队初始值）+ 购买页实时预览（`ShopPreviewWidget`，爆破图 CT/T 视角各一）、手持添加导出 **/give 格式**（`ItemStrings.fromStack`，含数据组件）、背景图（Base64 ≤327680 字符 / http(s) 图片 URL 无限制，保存时校验 + 物品ID 解析预警告）；`init()` 保留滚动偏移仅钳制（增删行不再跳回顶部），切换地图/重载时显式归零 |
-| `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存：死亡竞赛图与爆破图统一 **5 列一页式网格**（列头编号+名称；商品格=图标/名称/价格；列内超出鼠标滚轮逐列滚动）。爆破图第 1 列固定"装备"列（拆弹装备购买项仅 CT，T 方空列；分类列按玩家队伍下发 T/CT 独立配置），顶部余额+购买窗口信息栏，余额不足/窗口关闭置灰；死亡竞赛图 5 列分类网格免费发放 |
-| `ShopPreviewWidget` | 配置界面的购买页实时预览（5 列网格，随编辑刷新；爆破图按 tTeam 参数分别渲染 CT 视角（含拆弹装备列）与 T 视角（第 1 列空列）），拆弹装备价格取编辑中的全局经济参数 |
+| `ConfigScreen` | OP 配置界面（未保存修改时阻断被动同步刷新）：右侧分 **地图配置 / 全局配置** 两个标签页（各自独立滚动偏移，切换不丢失位置；全局页内再分装备/参数子标签），地图类型切换（DEATHMATCH/BOMB）、爆破包点编辑（名称/角点1/角点2 两点式长方体 + "在脚下添加包点"与逐行"取点2"可视化取点，仅 BOMB 图显示）、商店分类列编辑器（死亡竞赛图 5 列通用；爆破图 T 方与 CT 方两套独立配置各 4 列，共用 `addShopColumnEditor`，死亡竞赛图额外含限购列；旧单套配置打开时自动复制为两队初始值）、爆破图第 1 列附加商品编辑器（`addBombFirstColumnEditor`：首项拆弹装备固定不可编辑，仅编辑其后商品；边界惩罚字段仅在非爆破图显示）+ 购买页实时预览（`ShopPreviewWidget`，爆破图 CT/T 视角各一）、手持添加导出 **/give 格式**（`ItemStrings.fromStack`，含数据组件）、背景图（Base64 ≤327680 字符 / http(s) 图片 URL 无限制，保存时校验 + 物品ID 解析预警告）；`init()` 保留滚动偏移仅钳制（增删行不再跳回顶部），切换地图/重载时显式归零 |
+| `ShopScreen` + `ShopDataCache` | 商店界面与商品数据缓存：死亡竞赛图与爆破图统一 **5 列一页式网格**（列头编号+名称；商品格=图标/名称/价格；列内超出鼠标滚轮逐列滚动）。爆破图第 1 列固定"装备"列（首项拆弹装备仅 CT；其后为地图 `shopColumn1Items` 附加商品，服务端按队伍过滤后下发，未配置时 T 方为空列；第 2~5 列分类列按玩家队伍下发 T/CT 独立配置），顶部余额+购买窗口信息栏，余额不足/窗口关闭置灰；死亡竞赛图 5 列分类网格免费发放 |
+| `ShopPreviewWidget` | 配置界面的购买页实时预览（5 列网格，随编辑刷新；列内商品超出可视行时**鼠标滚轮逐列滚动**，滚动偏移由 ConfigScreen 持有、跨 rebuild 保持；爆破图按 tTeam 参数分别渲染 CT 视角（含拆弹装备列）与 T 视角（第 1 列附加商品按队伍过滤；无商品时显示空列）），拆弹装备价格取编辑中的全局经济参数 |
 | `ItemStrings` | 物品串统一解析/导出工具（服务端发放与客户端预览共用）：主格式 **/give 格式** `id[minecraft:组件={...}] 数量`（组件键不带引号，与 /give 输出一致；括号匹配同时感知 [] 与 {} 嵌套，组件值内含列表如 SpawnPotentials:[] 不会截断；**组件值任意类型**经 `{"v":值}` 包装解析——`NbtHelper.fromNbtProviderString` 只接受复合根），兼容旧完整 SNBT（含 1.20 tag 迁移）与 `id 数量`；`fromStack` 把 ItemStack 导出为 /give 格式（手持添加用）；`isPlausible` 供保存前校验；解码失败记录 `ItemStrings` WARN 日志 |
 | `HudOverlay` | CS2 风格对局 HUD 渲染（顶部队伍栏：己方/敌方玩家卡片 + 中央计分板；淡入淡出动画，断线重置）。爆破对局：回合比分（T x : y CT）、C4 红色爆炸倒计时、计分板下方状态行（安放地点/拆弹警告/重连等待/购买窗口，`drawBombStatusLine`）、CT 拆弹装备卡片标记（roster `kit` 字段）；计分板下方另显示爆破 MVP 音乐金色提示（`drawMvpHint`，5 秒自动消失） |
+| `client.grenade`（投掷物渲染/音效/输入） | **CSG 投掷物的客户端移植**（来源同服务端）：`GrenadeEntityRenderer` 手雷实体渲染、`HEExplosionEffects` 高爆特效、`FlashbangBlindEffectRenderer` + `FlashbangParticleEffectRenderer` + `FlashbangRingSound` 闪光致盲与耳鸣、`SmokeGrenadeParticle` + `SmokeRenderManager` 烟雾云、`FireGrenadeClientRenderer` 燃烧区域、`DecoySoundController` 诱饵枪声；`ThrowActionHandler` 左键强投/右键弱投/双键中投与投掷冷却条，`TaczApiHandler` 反射接入 TACZ（子弹打散烟雾、诱饵模拟枪声，无编译期依赖），`GrenadeClientPayloads` / `GrenadeClientHooksImpl` 处理投掷与爆炸 S2C 包 |
 | `MvpMusicIndex` / `MvpMusicCache` / `MvpMusicPlayer` / `MvpMusicClientHandler` | MVP 音乐客户端链路：`MvpMusicIndex` 拉取并解析 `<mvpMusicUrl>/index_file.json`（`updated_at` + `musics[]`，支持曲目对象内嵌 `path`/`hash` 子对象或平铺字段；拼装出的曲目/图标 URL 会自动把中文等非 ASCII 字符百分号编码，已编码的 `%XX` 不重复编码），失败回退磁盘缓存 `mvp_music/index_<murmur3(url)>.json`；`MvpMusicCache` 按 MurmurHash3_x86_32 下载校验音乐/图标到 `config/cstmm/client/cache/mvp_music/<host_port>/music/` 与 `.../cover/`（按服务器隔离，JOIN 时 `onServer` 切换；临时文件 + ATOMIC_MOVE，失败 60s 冷却；图标经 `iconTexture` 读盘解码并缓存纹理，未提供图标哈希时退回 URL 直连）；`MvpMusicPlayer` 用 JLayer 解码 MP3 → 16-bit LE PCM → `SourceDataLine` 输出（`FloatControl.MASTER_GAIN` 控制音量，守护线程 `cstmm-mvp-music`，支持 stop/当前曲名查询）；`MvpMusicClientHandler` 收到 S2C 包后按 `delayMs` 延迟，先展示提示文案再异步确保缓存并播放，断线停止 |
 
 ### 2.3 关键设计约束
@@ -249,6 +252,8 @@
 | `config/cstmm/data/players/<player_uuid>.json` | 玩家档案（战绩 + 头像绑定 avatarType/avatarId + MVP 音乐名 mvpMusicName，逐玩家一文件，**进服即创建**） | 原子写盘；**损坏档案不加载、不覆盖**，玩家进服收到聊天警告，管理员修复后重启生效 |
 | `config/cstmm/data/bags/<player_uuid>.json` | 对局背包快照（逐玩家一文件） | 原子写盘；已有未恢复快照绝不被覆盖；损坏文件不加载、不覆盖、不删除；恢复 = 清背包 → 恢复 → 成功才删快照（null 字段保护），失败保留可重试；旧版单文件 `bags.json` 启动时自动迁移并重命名为 `bags.json.migrated` |
 | `config/cstmm/data/clans.json` | 战队数据（名称/缩写/徽标 base64/队长/成员/上限） | 原子写盘；损坏时 `loadFailed` 拒绝一切战队变更（创建/加入/退出等全部返回错误提示）且绝不覆盖用户文件，管理员修复后重启生效 |
+| `config/cstmm/debug/logs/fatalerr.log` | 保护模式错误日志（`ModGuardian.engage` 触发时追加写入；保护已启用后再次到达的未包装异常同样追加） | 每条记录含时间、入口位置、异常 `toString` 与完整堆栈；目录不存在自动创建；写盘失败仅记录控制台 WARN，不影响保护流程 |
+| `config/cstmm/download/<服务器名>/<yyyyMMdd-HHmmss>/` | `/cstmm debug get_logs` 的落盘副本目录 | 服务器名取存档关卡名（非法文件名字符替换为下划线，取不到时回退 `server`）；按 `fatalerr` / `latest` / `all` 复制 `fatalerr.log` 与 `logs/latest.log`；保护模式下仍可执行 |
 | **客户端** `config/cstmm/client/config.json` | 客户端个性化配置（界面主题色 themeColor + MVP 音乐开关 mvpMusicEnabled / 音量 mvpMusicVolume（0~4）+ 模组音效音量 soundEffectsVolume（0~4）+ 下载线程数 downloadThreads（1~32）） | 懒加载 + 变更即原子落盘；损坏按默认值兜底 |
 | **客户端** `config/cstmm/client/cache/mvp_music/<host_port>/music/<murmur3>.<ext>` 与 `.../<host_port>/cover/<murmur3>.<ext>` | MVP 音乐与图标磁盘缓存（按服务器隔离，音乐与图标分子目录，按内容 MurmurHash3_x86_32 命名） | `MvpMusicCache` 下载后校验哈希再 ATOMIC_MOVE 落盘；**配置同步完成即**拉取索引并 `prefetchAll` 后台预下载全部资源（不等界面打开/玩家点击；下载池并发=客户端配置 downloadThreads 1~32 默认 3，可实时调整；同资源等待者回调去重；失败弹 ToastManager 提示栏）；失败 60s 冷却；索引回退文件 `mvp_music/index_<murmur3(url)>.json` 存于 mvp_music 根目录 |
 | **客户端** `config/cstmm/client/cache/config_files/<host_port>.json` | 配置磁盘缓存（核心配置 JSON + 哈希，按服务器隔离；标识中冒号等非法字符替换为下划线） | 哈希一致时重连免收全量配置；损坏/缺失静默降级为全量重拉 |
@@ -265,6 +270,10 @@
 | `/cstmm reload` | OP≥2 | 从磁盘重新加载配置 |
 | `/cstmm data restore bags <玩家>` | OP≥2 | 恢复玩家全部已保存背包 |
 | `/cstmm data restore bags <玩家> <槽位>` | OP≥2 | 恢复指定槽位（0-40） |
+| `/cstmm data create player <玩家名\|UUID>` | OP≥2 | 强制创建玩家档案（支持离线玩家，名字经 UserCache 解析 UUID）；档案已存在（内存/损坏标记/磁盘文件任一）时提示已存在且**不覆盖**，需要重置请用 `cover` |
+| `/cstmm data create clan "<战队名>" [缩写] [队长]` | OP≥2 | 强制创建战队（跳过入队限制）：名称必填，缩写缺省自动推导，队长可指定在线/离线玩家（缺省为执行者）；名称或缩写已存在时拒绝并提示，需要重建请用 `cover`。名称含空格须加引号 |
+| `/cstmm data cover player <玩家名\|UUID>` | OP≥2 | 强制覆盖玩家档案：存在则丢弃旧档案（含损坏标记）重置为全新默认档案，不存在则直接创建；写盘并同步在线客户端 |
+| `/cstmm data cover clan "<战队名>" [缩写] [队长]` | OP≥2 | 强制覆盖战队：已存在则清除名称/缩写/成员索引后以全新档案重建（成员、徽标、创建时间等全部重置），不存在则直接创建；落盘并推送成员客户端。名称含空格须加引号 |
 | `/cstmm data get player <玩家名\|UUID> [字段]` | OP≥2 | 查看玩家战绩档案（支持离线玩家，全量输出含头像绑定行）；可选字段输出单值：kills / deaths / matches / wins / penaltydeaths / kd / name / uuid / avatar（未绑定时显示"未绑定"）/ mvpmusic（MVP 音乐名，未选时显示"未选择"）/ bags（背包快照概要：保存时间+非空物品数） |
 | `/cstmm data get clan "<战队名>" [字段]` | OP≥2 | 查看战队信息；可选字段输出单值：name / abbr / limit / leader / members / badge（超长 base64 只回长度与文件位置）/ createdat。**战队名含空格必须加引号**（string() 参数由 Brigadier 原生读引号并剥引号；无引号输入读到空格即停 → 解析失败）；**引号内名字首尾不得有空白**（`" Team Kun"` 不合法，执行器拒绝并提示正确写法 `"Team Kun"`）。Tab 补全：引号输入（`"Te`）→ 建议 `"Team Kun"` 完整引号名；无引号输入 → 裸词候选。字段为独立参数，Tab 裸字段词 |
 | `/cstmm data get map <地图ID> [字段]` | OP≥2 | 查看单张地图配置：省略字段输出全字段摘要；指定字段输出单值（id / displayname / enabled / wincondition / targetkills / maxduration / tierule / boundary / redboundary / blueboundary / redspawns / bluespawns / minplayers / cooldownseconds / minredplayers / minblueplayers / preparetime / boundarywarningtime / boundarypenaltykills / kickcooldownseconds / reinforcementmode / maxredplayers / maxblueplayers / reinforceable / dimension / background / shopitems） |
@@ -282,8 +291,10 @@
 | `/cstmm data edit clan "<战队名>" <字段> <值>` | OP≥2 | 修改战队字段：name / abbr / limit（人数上限）/ leader（转让队长，支持离线成员）/ badge（URL、base64 ≤48KiB 或 clear 清空；游戏内命令 256 字符上限，超长 base64 经服务器控制台输入；改后写盘并推送成员客户端）。**战队名含空格必须加引号**（string() 原生引号解析）；**引号内名字首尾不得有空白**（`" Team Kun"` 不合法）。Tab 补全：引号输入 → `"完整名"`；字段（裸词）→ 值（leader=成员名、badge=clear、limit=常用数字） |
 | `/cstmm debug match_info_hud <t\|f>` | OP≥2 | 调试：强制显示/关闭比赛信息栏（屏幕顶部中央，淡入约 1 秒）。**仅作用于执行者自己的客户端**（信息栏为客户端显示，仅限游戏内玩家执行，不影响其他玩家）。开启后立即向执行者推送一次，此后每秒向其推送首个活跃对局的 HUD；无活跃对局时向执行者发调试预览计分板（地图名"HUD 调试预览"+ 0:0 + 90 秒倒计时，仅中央计分板无队伍卡片，验证显示链路）；关闭时立即向执行者发清空包（inGame=false）复位其 HUD |
 | `/cstmm debug bandwidth start\|stop\|get\|view` | OP≥2 | 调试：服务器带宽记录（Netty 管线最外侧字节计数器，统计每个连接加密压缩后的线路字节，含原版与模组全部流量；玩家 JOIN 时注入）。start=清零并开始逐秒采样；stop=停止并返回时长/总量/峰值汇总；get=当前最近 1 秒出/入站速率；view=总量/均值/峰值摘要 + 最近 15 条逐秒样本。采样线程为常驻 1Hz 守护线程 |
-| `/cstmm debug exception_protect_test [confirm]` | OP≥2 | 调试：全局异常保护链路测试（**危险操作，两步确认**）。不带参数=发起（发出警告并开启 30 秒确认窗口）；`confirm`=窗口内确认后从执行器抛出人为测试异常，经本命令的 guard 包装走与生产完全相同的保护链路（ModGuardian.engage → 控制台完整堆栈 → 全服警告广播 → 活跃对局强制结算 → 模组停用，服务器不崩）。保护已启用时被 guard 拦截并提示；重启服务器恢复 |
+| `/cstmm debug exception_protect_test [confirm]` | OP≥2 | 调试：全局异常保护链路测试（**危险操作，两步确认**）。不带参数=发起（发出警告并开启 30 秒确认窗口）；`confirm`=窗口内确认后从执行器抛出人为测试异常，经本命令的 guard 包装走与生产完全相同的保护链路（ModGuardian.engage → 控制台完整堆栈 → 写入 `config/cstmm/debug/logs/fatalerr.log` → 全服公屏错误摘要 → 活跃对局强制结算 → 模组停用，服务器不崩）。保护已启用时被 guard 拦截并提示；重启服务器恢复 |
 | `/cstmm debug allow_c4 to_be_planted_freely <t\|f>` | OP≥2 | 调试：允许/不允许**任何情况下安放 C4**——对局内跳过全部情境限制（任意位置/任意阵营/任意阶段/可重复安放）；**对局外也可安放**（生成自由炸弹实体：matchId 为空、fuseTicks 自行倒计时、归零先播 c4_detonation 引信音、播完 DETONATION_LEAD_MILLIS 后自爆对附近全员结算伤害，可由任意玩家长按右键拆除，引信窗口内被拆则不爆）。仅内存态开关，重启恢复默认（关闭）；对局外安放/拆除进度存 BombInteractionManager 独立内存表，拆除时间同样按拆弹装备 tag 判定 |
+| `/cstmm debug read_errs` | OP≥2 | 调试：读取服务端日志 `logs/latest.log` **末尾 256KB**（尾部截读，不整读超大日志），解析最近 **3 条 ERROR** 条目按"最新在前"输出——时间 + 线程 + 消息（超长截 256 字符）；堆栈/续行只提示行数不逐行输出。支持控制台执行；文件缺失/不可读/无 ERROR 均有明确提示。行格式按 latest.log 的 `[HH:mm:ss] [线程/级别]: 消息` 识别，堆栈行（非该格式）归入上一条目计数 |
+| `/cstmm debug get_logs <fatalerr\|latest\|all>` | OP≥2 | 调试：把错误日志复制到 `config/cstmm/download/<服务器名>/<yyyyMMdd-HHmmss>/`（fatalerr=`config/cstmm/debug/logs/fatalerr.log`，latest=`logs/latest.log`，all=两者）。**保护模式启用后仍可用**（仅复制文件，不受功能停用拦截）；无匹配文件时提示"保护模式可能尚未触发"；Tab 补全三种目标 |
 
 玩家可用命令见 [README.md](README.md) §五。
 
@@ -307,7 +318,7 @@
 | `reinforcementMode` | string | CONDITIONAL | `CONDITIONAL` / `ALWAYS` |
 | `prepareTime` | int | 5 | 准备阶段秒数 |
 | `boundaryWarningTime` | int | 10 | 边界警告秒数 |
-| `boundaryPenaltyKills` | int | 5 | 越界处决惩罚击杀 |
+| `boundaryPenaltyKills` | int | 5 | 越界处决惩罚击杀（**仅死亡竞赛图生效**；爆破图不结算该分数，`setGameType` 切换为 BOMB 时自动清零，配置界面隐藏该项） |
 | `kickCooldownSeconds` | int | 60 | 踢人投票发起冷却 |
 | `dimension` | string | minecraft:overworld | 对局维度 ID（非法值回退主世界） |
 | `boundary` | object | 全 0 | 公共边界 `minX..maxZ` 六个 int |
@@ -316,6 +327,7 @@
 | `shopItems` | 数组 | [] | 旧版平铺本图商品 `{"itemId","price","maxPurchase"}`（未配置 shopColumns 时回退；ShopItem 类保留在 GlobalConfig） |
 | `shopColumns` | 数组 | [] | 死亡竞赛图商店分类列 `{"name","items":[ShopItem]}`（购买页网格 5 列生效；爆破图未配置队伍列时回退；旧键 `bombShopColumns` 自动迁移） |
 | `shopColumnsT` / `shopColumnsCT` | 数组 | [] | 爆破图 T 方 / CT 方购买页分类列，各最多 4 列生效；按玩家队伍下发与购买（未配置回退 shopColumns） |
+| `shopColumn1Items` | 数组 | [] | 爆破图购买页第 1 列（装备列）附加商品 `[ShopItem]`，排在固定首项拆弹装备之后；服务端按商品 `team`（T/CT/BOTH）过滤后下发，未配置时 T 方为空列 |
 | `bombsites` | 数组 | [] | 包点 `{"name","x1","y1","z1","x2","y2","z2"}`：两角点定义的**长方体**（三轴取 Min/Max 含边判定，填反自动交换；旧版 `{"name","x","y","z","radius"}` 中心+半径格式由 ConfigManager.loadMaps 自动迁移为两点式，下次保存落盘新格式） |
 | `backgroundBase64` | string | "" | 卡片背景图（PNG 的 Base64） |
 
@@ -330,7 +342,7 @@
 [CSTMM - ClientNetwork] Failed to parse config sync
 ```
 
-模块名与类/职责对应（与代码实际一致）：`Main`、`Network`、`ClientNetwork`、`Client`、`ConfigManager`、`MatchManager`、`QueueManager`、`VoteManager`、`ClanManager`、`InventoryManager`、`PlayerDataManager`、`EquipmentManager`、`EventListener`、`MatchScheduler`、`BlockPosAdapter`、`Commands`、`MatchMenuScreen`、`ClanCache`、`QueueStatusCache`、`BadgeCache`、`Base64ImageDecoder`。
+模块名与类/职责对应（与代码实际一致）：`Main`、`Network`、`ClientNetwork`、`Client`、`ConfigManager`、`MatchManager`、`QueueManager`、`VoteManager`、`ClanManager`、`InventoryManager`、`PlayerDataManager`、`EquipmentManager`、`EventListener`、`MatchScheduler`、`BlockPosAdapter`、`Commands`、`MatchMenuScreen`、`ClanCache`、`QueueStatusCache`、`BadgeCache`、`Base64ImageDecoder`。保护模式相关日志使用 `[CSTMM - 保护模式]` 前缀（`ModGuardian`）。
 
 ## 10. 常见问题排查
 
@@ -351,15 +363,18 @@
 
 模组全部服务端入口（每秒调度、五个事件监听器、全部 C2S 网络接收器与 JOIN/DISCONNECT 回调、全部 43 个命令执行器、初始化注册与生命周期回调）均经 manager/ModGuardian 包装：
 
-- 任一入口抛出未捕获 Throwable（含 Error）→ **进入保护模式**：完整异常堆栈打印到服务器控制台、向全体在线玩家广播警告、尽力强制结算所有活跃对局（恢复玩家原点/背包/游戏模式），此后模组全部功能停用（各入口直接跳过，命令提示"模组已进入保护模式"），服务器本体继续运行，保护持续到重启；
+- 任一入口抛出未捕获 Throwable（含 Error）→ **进入保护模式**：完整异常堆栈打印到服务器控制台、**追加写入 `config/cstmm/debug/logs/fatalerr.log`**、**向全体在线玩家公屏广播错误摘要**（发生位置 + 异常信息 + 前 8 行堆栈，超长截断，完整内容见日志文件）、尽力强制结算所有活跃对局（恢复玩家原点/背包/游戏模式），此后模组全部功能停用（各入口直接跳过，命令提示"模组已进入保护模式"），服务器本体继续运行，保护持续到重启；
+- 保护模式启用后 admin 仍可用 `/cstmm debug get_logs <fatalerr|latest|all>` 取出错误日志，或 `/cstmm debug read_errs` 查看 latest.log 最近的 ERROR；
 - 秒级调度不再逐任务吞异常——任一子系统异常即进入保护模式，避免带病运行；
 - 停服保存（SERVER_STOPPING）为独立 try/catch：单项保存失败不跳过另一项（停服阶段保护模式无意义）。
 
 ---
 
-## 11. 第三方依赖与合规（JLayer）
+## 11. 第三方依赖与合规（JLayer / CSG）
 
-客户端 MVP 音乐需要解码 MP3，而 Minecraft 原版音效系统只支持资源包内的 `.ogg`，因此引入纯 Java MP3 解码器 **JLayer**。
+客户端 MVP 音乐需要解码 MP3，而 Minecraft 原版音效系统只支持资源包内的 `.ogg`，因此引入纯 Java MP3 解码器 **JLayer**。投掷物系统则为 **CSG（CounterStrikeGrenades）的源代码移植**（见 11.3）。
+
+### 11.1 JLayer 依赖明细
 
 | 项目 | 内容 |
 |---|---|
@@ -374,7 +389,7 @@
 
 代码引用 JLayer 时必须保持 `javazoom.jl.decoder.*` 包名不变，否则替换库后模组无法链接。
 
-### 11.1 替换 JLayer（LGPL 允许的“可替换库”操作）
+### 11.2 替换 JLayer（LGPL 允许的“可替换库”操作）
 
 1. 解压模组 jar：`unzip chocolate-server-tacz-match-mod-<版本>.jar -d cstmm-unpacked`；
 2. 用自编译的、API 兼容的 JLayer 1.0.1 替换
@@ -385,3 +400,18 @@
 
 > 若修改了 JLayer 源码，按 LGPL 要求必须公开修改后的完整源码；替换后的库仍需保留许可证与版权声明。
 > 离线构建：以上 jar 与源码均已放入 `libs/`，`gradle build --offline` 不依赖外部 Maven 源。
+
+### 11.3 CSG 投掷物（源代码移植，非二进制依赖）
+
+本模组的投掷物系统（高爆手雷 / 闪光弹 / 烟雾弹 / 燃烧弹 / 莫洛托夫 / 诱饵弹）**移植自 CSG（CounterStrikeGrenades）1.5.2**，属于**源代码改写移植**而非二进制依赖：构建产物中不含任何 CSG jar，`libs/` 也不包含 CSG 文件。
+
+| 项目 | 内容 |
+|---|---|
+| 上游项目 | CSG（CounterStrikeGrenades）1.5.2 |
+| 原始形态 | Minecraft Forge 1.20.1 / Kotlin |
+| 本模组形态 | Minecraft Fabric 1.21.1 / Java：服务端 `entity`、`item`、`util.GrenadeSettings` / `GrenadeMath` / `GrenadeHooks` / `GrenadeDamageTypes`、`api.CSGrenadesAPI` 与投掷物网络包；客户端 `client.grenade`（渲染 / 粒子 / 音效 / 输入） |
+| 移植范围 | 六类投掷物的投掷弹道、引信、爆炸 / 燃烧 / 烟雾 / 致盲 / 诱饵行为与客户端表现；玩法数值集中在 `util.GrenadeSettings`（内置静态参数，不暴露配置界面） |
+| 修改说明 | 为适配 Fabric 1.21.1 API、本模组网络层（`GrenadeThrownPayload` / `FlashBangExplodedPayload` / `SmokeSpreadPayload` / `FireGrenadePayload` / `DecoyShotPayload` 等）与 TACZ（反射接入）做了改写，不保证与原 mod 逐行一致 |
+| 版权归属 | 原始创意、代码与美术 / 音效资源版权归 CSG 原作者（TheDarkColour）所有 |
+| 许可证 | **MIT License**（Copyright (c) 2020 TheDarkColour）；全文见仓库根目录 `LICENSE_CSG`，构建时随模组打进 jar 根目录 `LICENSE-CSG-MIT.txt` |
+| 玩家可见声明 | [README.md](README.md) §4.7、[CONFIG.md](CONFIG.md) §8 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 均注明"投掷物移植自 CSG" |

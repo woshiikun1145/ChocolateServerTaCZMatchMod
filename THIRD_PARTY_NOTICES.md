@@ -1,6 +1,51 @@
 # 第三方依赖与许可证声明
 
-本模组包含以下第三方软件。本文档随模组 jar 一起分发（jar 根目录 `THIRD_PARTY_NOTICES.md`）。
+本模组包含以下第三方软件与移植代码。本文档随模组 jar 一起分发（jar 根目录 `THIRD_PARTY_NOTICES.md`）。
+
+---
+
+## CSG（CounterStrikeGrenades）1.5.2 — 投掷物源代码移植
+
+| 项目 | 内容 |
+| --- | --- |
+| 组件 | CSG 投掷物系统（高爆手雷 / 闪光弹 / 烟雾弹 / 燃烧弹 / 莫洛托夫 / 诱饵弹） |
+| 版本 | 1.5.2 |
+| 上游形态 | Minecraft Forge 1.20.1 / Kotlin |
+| 引入方式 | **源代码改写移植**（改写为 Minecraft Fabric 1.21.1 / Java 并接入本模组），**不以二进制依赖形式打包**；本模组 jar 内不含 CSG 的 jar 或类文件 |
+| 移植内容 | 六类投掷物的投掷弹道、引信、爆炸 / 燃烧 / 烟雾 / 致盲 / 诱饵行为，以及客户端渲染、粒子与音效；数值集中在 `GrenadeSettings` |
+| 修改说明 | 为适配 Fabric 1.21.1 API、本模组网络层与 TACZ（反射接入）已做改写，不保证与原 mod 逐行一致 |
+| 版权归属 | 原始创意、代码与美术 / 音效资源版权归 CSG 原作者（TheDarkColour）所有 |
+| 许可证 | **MIT License**（Copyright (c) 2020 TheDarkColour），全文见下方「原始许可证」 |
+| 许可证文件 | 仓库根目录 `LICENSE_CSG`；随模组分发为 jar 根目录 `LICENSE-CSG-MIT.txt` |
+
+> 本模组仅移植投掷物玩法逻辑与表现，物品命名空间统一为 `cstmm`（`cstmm:hegrenade`、`cstmm:flashbang`、`cstmm:smokegrenade`、`cstmm:incendiary`、`cstmm:molotov`、`cstmm:decoy`），与原 mod 的物品 ID 不通用。
+> 原项目地址请以其公开发布页为准；玩家可见说明见 `README.md` §4.7。
+
+### 原始许可证（完整保留）
+
+```text
+MIT License
+
+Copyright (c) 2020 TheDarkColour
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ---
 
