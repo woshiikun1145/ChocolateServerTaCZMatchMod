@@ -224,15 +224,21 @@ public class EventListener {
             PlayerDataManager.getInstance().addKill(killerUuid);
             PlayerDataManager.getInstance().addDeath(killedUuid);
 
-            // 向对局内全体在线玩家广播击杀消息（含最新比分）
+            // 向对局内全体在线玩家广播击杀消息。
+            // 死亡竞赛附带最新红/蓝比分；爆破模式按回合计分、红/蓝击杀数无意义，
+            // 不再残留死亡竞赛式的"击杀加分信息"（2026-11-12 修复）
             var server = killer.getServer();
             if (server == null) return;
-            String message = String.format("§c%s §7击杀了 §9%s §7! (§c%d §7- §9%d§7)",
-                    killer.getName().getString(),
-                    killed.getName().getString(),
-                    session.getRedKills(),
-                    session.getBlueKills()
-            );
+            String message = session.isBombMode()
+                    ? String.format("§c%s §7击杀了 §9%s§7!",
+                            killer.getName().getString(),
+                            killed.getName().getString())
+                    : String.format("§c%s §7击杀了 §9%s §7! (§c%d §7- §9%d§7)",
+                            killer.getName().getString(),
+                            killed.getName().getString(),
+                            session.getRedKills(),
+                            session.getBlueKills()
+                    );
             for (UUID uuid : session.getAllPlayers()) {
                 ServerPlayerEntity p = server.getPlayerManager().getPlayer(uuid);
                 if (p != null) {

@@ -82,11 +82,14 @@ final class BoundaryChecker {
                 // 【作用】超出警告时限：处决玩家、给对方队伍加罚分击杀、记惩罚死亡并清零计时
                 if (warningTime >= warningTimeLimit) {
                     player.kill();
-                    int team = session.getPlayerTeam(uuid);
-                    if (team == 1) {
-                        session.addBlueKills(penaltyKills);
-                    } else if (team == 2) {
-                        session.addRedKills(penaltyKills);
+                    // 爆破模式按回合胜负结算，出界处决不计对方加分（避免死亡竞赛配置残留影响比分/HUD）
+                    if (!session.isBombMode()) {
+                        int team = session.getPlayerTeam(uuid);
+                        if (team == 1) {
+                            session.addBlueKills(penaltyKills);
+                        } else if (team == 2) {
+                            session.addRedKills(penaltyKills);
+                        }
                     }
                     PlayerDataManager.getInstance().addPenaltyDeath(uuid);
                     session.resetBoundaryWarningTime(uuid);

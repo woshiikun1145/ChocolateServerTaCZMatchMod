@@ -21,6 +21,7 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 
@@ -113,6 +114,13 @@ public class NetworkHandler {
         PayloadTypeRegistry.playS2C().register(BadgePayload.ID, BadgePayload.CODEC);
         PayloadTypeRegistry.playS2C().register(ClanHintsPayload.ID, ClanHintsPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(MvpMusicPayload.ID, MvpMusicPayload.CODEC);
+        // 【作用】手雷系统 S2C（移植 CounterStrikeGrenades，阶段 1）：闪光爆闪广播 + 烟雾扩散方块广播
+        PayloadTypeRegistry.playS2C().register(FlashBangExplodedPayload.ID, FlashBangExplodedPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(SmokeSpreadPayload.ID, SmokeSpreadPayload.CODEC);
+        // 【作用】手雷系统 S2C（阶段 2）：燃烧类事件广播（落地起火/空中自爆/被烟雾熄灭）
+        PayloadTypeRegistry.playS2C().register(FireGrenadePayload.ID, FireGrenadePayload.CODEC);
+        // 【作用】手雷系统 S2C（阶段 3）：诱饵弹枪声广播（客户端定位实体后播枪声 + 枪口焰粒子）
+        PayloadTypeRegistry.playS2C().register(DecoyShotPayload.ID, DecoyShotPayload.CODEC);
 
         PayloadTypeRegistry.playC2S().register(MatchActionPayload.ID, MatchActionPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(ConfigUpdatePayload.ID, ConfigUpdatePayload.CODEC);
@@ -124,6 +132,15 @@ public class NetworkHandler {
         PayloadTypeRegistry.playC2S().register(BadgeKnownPayload.ID, BadgeKnownPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(SetFacePayload.ID, SetFacePayload.CODEC);
         PayloadTypeRegistry.playC2S().register(SetMvpMusicPayload.ID, SetMvpMusicPayload.CODEC);
+        // 【作用】手雷投掷请求 C2S（移植 CounterStrikeGrenades）：客户端 ThrowActionHandler 发起
+        PayloadTypeRegistry.playC2S().register(GrenadeThrownPayload.ID, GrenadeThrownPayload.CODEC);
+
+        // 【作用】手雷投掷接收器：校验手持物品类型与冷却后生成对应手雷实体并扣减数量（原版反作弊：不扣不减）
+        ServerPlayNetworking.registerGlobalReceiver(GrenadeThrownPayload.ID, (payload, context) -> {
+            ServerPlayerEntity player = context.player();
+            if (player == null) return;
+            context.server().execute(() -> handleGrenadeThrown(payload, player));
+        });
 
         // ===== C2S 接收器（服务端处理客户端请求） =====
         // 【作用】注册客户端→服务端（C2S）各数据包的编解码器与全局接收器，回调统一转服务端主线程执行
@@ -808,7 +825,7 @@ public class NetworkHandler {
                 MatchSession session = MatchManager.getInstance().getPlayerSession(player.getUuid());
                 if (session == null || session.getPhase() == MatchSession.GamePhase.ENDED) {
                     ServerPlayNetworking.send(player, ShopDataS2CPayload.create(
-                            false, false, false, 0, false, 0, List.of()));
+                            false, false, false, 0, false, 0, false, List.of()));
                     return;
                 }
                 sendShopData(player, session);
@@ -827,8 +844,8 @@ public class NetworkHandler {
 
     /**
      * 【作用】向单玩家下发商店数据（REQUEST_SHOP 响应与 BUY_ITEM 成功后订阅制推送共用）：
-     *         爆破图组装 1+4 列（第 1 列固定"装备"列：CT 携带拆弹装备购买项、T 方空列，
-     *         第 2~5 列为分类列）；死亡竞赛图组装 5 列分类网格（免费发放）。
+     *         爆破图组装 1+4 列（第 1 列固定"装备"列：CT 首项为拆弹装备，其后为地图可配置
+     *         附加商品；第 2~5 列为分类列）；死亡竞赛图组装 5 列分类网格（免费发放）。
      *         分类列未配置时回退旧版平铺 shopItems 单列。仅服务端。
      * 【被谁使用】handleMatchAction 的 REQUEST_SHOP/BUY_ITEM 分支、sendShopDataToTeam。
      */
@@ -839,13 +856,18 @@ public class NetworkHandler {
         List<ShopDataS2CPayload.ColumnData> columns = new ArrayList<>();
         boolean hasDefuser = false;
         int defuserPrice = 0;
+        // 玩家是否已持有拆弹装备（tag 态）：限购配套，客户端据此把购买项置灰显示"已持有"
+        boolean ownedDefuser = false;
 
         if (bombMap && map != null) {
-            // 第 1 列：装备列（仅 CT 显示拆弹装备购买项；T 方空列，购买走 EconomyManager index=-1）
+            // 第 1 列：装备列（拆弹装备仅 CT，固定 index=-1；附加商品从 index=0 起按队伍过滤下发）
             boolean playerIsT = session.isTTeam(session.getPlayerTeam(player.getUuid()));
             hasDefuser = !playerIsT;
+            ownedDefuser = player.getCommandTags().contains(BombInteractionManager.DEFUSE_KIT_TAG);
             defuserPrice = EconomyManager.getInstance().economy().getDefuserPrice();
-            columns.add(new ShopDataS2CPayload.ColumnData("装备", List.of()));
+            // 第 1 列：装备列（第 1 项固定拆弹装备由客户端按 hasDefuser 渲染；后续为地图可配置附加商品）
+            columns.add(new ShopDataS2CPayload.ColumnData("装备",
+                    List.copyOf(map.getShopColumn1ItemsForTeam(playerIsT))));
             // 分类列按玩家队伍下发（T/红 与 CT/蓝 独立配置）
             appendShopColumns(columns, map, 4, playerIsT);
         } else if (eligible && map != null) {
@@ -856,7 +878,7 @@ public class NetworkHandler {
         boolean windowOpen = bombMap && EconomyManager.getInstance().isBuyWindowOpen(session, map);
         int money = bombMap ? session.getPlayerMoney(player.getUuid()) : 0;
         ServerPlayNetworking.send(player, ShopDataS2CPayload.create(
-                eligible, bombMap, hasDefuser, money, windowOpen, defuserPrice, columns));
+                eligible, bombMap, hasDefuser, money, windowOpen, defuserPrice, ownedDefuser, columns));
     }
 
     /**
@@ -1435,5 +1457,89 @@ public class NetworkHandler {
      */
     public static void sendOpenConfigScreen(ServerPlayerEntity player) {
         ServerPlayNetworking.send(player, new OpenConfigScreenPayload());
+    }
+
+    // ===== 手雷投掷（移植 CounterStrikeGrenades，阶段 1） =====
+
+    /** 玩家上次投掷手雷的服务端时间戳（毫秒）：key: 玩家 UUID，服务端侧冷却镜像（防止客户端绕过冷却刷包） */
+    private static final Map<UUID, Long> grenadeLastThrow = new ConcurrentHashMap<>();
+
+    /**
+     * 【作用】处理手雷投掷请求（C2S GrenadeThrownPayload，主线程执行）：
+     *         校验手持物品类型匹配 → 服务端冷却镜像校验 → 按类型生成手雷实体
+     *         （设置所有者/位置/投掷速度）→ 非创造模式扣减主手数量。
+     *         阶段 1 支持 HE/闪光/烟雾；燃烧弹、莫洛托夫、诱饵弹在阶段 2/3 接入。
+     * 【被谁使用】NetworkHandler.register 注册的 C2S 接收器。
+     */
+    private static void handleGrenadeThrown(GrenadeThrownPayload payload, ServerPlayerEntity player) {
+        // 【作用】反作弊前置：手持物品必须是手雷且类型与包内一致（不扣不减，直接忽略）
+        if (!(player.getMainHandStack().getItem()
+                instanceof cn.woshiikun_1145.mcmod.choco.cstmm.item.CounterStrikeGrenadeItem grenadeItem)) {
+            return;
+        }
+        if (grenadeItem.grenadeType != payload.type()) {
+            return;
+        }
+
+        // 【作用】服务端冷却镜像：与客户端 GRENADE_THROW_COOLDOWN_MS 相同口径，越线直接忽略
+        long now = System.currentTimeMillis();
+        Long last = grenadeLastThrow.get(player.getUuid());
+        if (last != null && now - last
+                < cn.woshiikun_1145.mcmod.choco.cstmm.util.GrenadeSettings.GRENADE_THROW_COOLDOWN_MS) {
+            return;
+        }
+        grenadeLastThrow.put(player.getUuid(), now);
+
+        ServerWorld world = player.getServerWorld();
+        cn.woshiikun_1145.mcmod.choco.cstmm.entity.CounterStrikeGrenadeEntity entity =
+                createGrenadeEntity(payload.type(), world);
+        if (entity == null) {
+            return;
+        }
+
+        entity.setOwner(player);
+        // 【作用】诱饵弹（阶段 3）：投掷时从投掷者背包查找第一把 TACZ 枪械设置射击数据
+        //         （原版 GrenadeThrownMessage 服务端处理），并透传自定义音效
+        if (entity instanceof cn.woshiikun_1145.mcmod.choco.cstmm.entity.DecoyGrenadeEntity decoy) {
+            decoy.findAndSetTaczGunIdOnThrow();
+            if (payload.customSound() != null && !payload.customSound().isBlank()) {
+                decoy.setCustomSound(payload.customSound());
+            }
+        }
+        entity.setPosition(payload.position());
+        // 【作用】按客户端发来的俯仰/偏航角与速度赋初速度（roll=0、散布=0，与原 mod 一致）
+        entity.setVelocity(player, payload.pitch(), payload.yaw(), 0.0f, (float) payload.speed(), 0.0f);
+        world.spawnEntity(entity);
+        // 【作用】投掷破风声（原 mod 在实体 onAddedToWorld 播放；yarn 无对应钩子，改为生成后广播）
+        world.playSound(null, entity.getX(), entity.getY(), entity.getZ(),
+                entity.throwSound, net.minecraft.sound.SoundCategory.AMBIENT, 0.2f, 1.0f);
+
+        // 【作用】非创造模式扣减主手一个手雷（原 mod 仅扣主手，移植保持一致）
+        if (!player.isCreative()) {
+            player.getMainHandStack().decrement(1);
+        }
+    }
+
+    /**
+     * 【作用】按手雷类型生成对应投掷物实体实例。
+     * 【被谁使用】handleGrenadeThrown；阶段 2/3 扩展 INCENDIARY/MOLOTOV/DECOY 分支。
+     */
+    private static cn.woshiikun_1145.mcmod.choco.cstmm.entity.CounterStrikeGrenadeEntity createGrenadeEntity(
+            cn.woshiikun_1145.mcmod.choco.cstmm.entity.GrenadeType type, ServerWorld world) {
+        return switch (type) {
+            case FLASH_BANG -> new cn.woshiikun_1145.mcmod.choco.cstmm.entity.FlashBangEntity(
+                    cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities.FLASHBANG, world);
+            case SMOKE_GRENADE -> new cn.woshiikun_1145.mcmod.choco.cstmm.entity.SmokeGrenadeEntity(
+                    cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities.SMOKEGRENADE, world);
+            case HEGRENADE -> new cn.woshiikun_1145.mcmod.choco.cstmm.entity.HEGrenadeEntity(
+                    cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities.HEGRENADE, world);
+            case INCENDIARY -> new cn.woshiikun_1145.mcmod.choco.cstmm.entity.IncendiaryEntity(
+                    cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities.INCENDIARY, world);
+            case MOLOTOV -> new cn.woshiikun_1145.mcmod.choco.cstmm.entity.MolotovEntity(
+                    cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities.MOLOTOV, world);
+            // 【作用】诱饵弹（阶段 3）：落地后按持枪者射速模式模拟枪声，结束小爆炸
+            case DECOY_GRENADE -> new cn.woshiikun_1145.mcmod.choco.cstmm.entity.DecoyGrenadeEntity(
+                    cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities.DECOY, world);
+        };
     }
 }

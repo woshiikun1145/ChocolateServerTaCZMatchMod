@@ -1,6 +1,7 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm.network.payload;
 
 import cn.woshiikun_1145.mcmod.choco.cstmm.data.config.GlobalConfig;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
@@ -28,6 +29,8 @@ public record ShopDataS2CPayload(
         int money,
         boolean buyWindowOpen,
         int defuserPrice,
+        // 玩家是否已持有拆弹装备（tag 态，2026-11-12 限购配套）：true 时客户端把购买项置灰显示"已持有"
+        boolean ownedDefuser,
         List<ColumnData> columns
 ) implements CustomPayload {
 
@@ -51,13 +54,20 @@ public record ShopDataS2CPayload(
                 buf.writeVarInt(Math.max(0, payload.money()));
                 buf.writeBoolean(payload.buyWindowOpen());
                 buf.writeVarInt(Math.max(0, payload.defuserPrice()));
+                buf.writeBoolean(payload.ownedDefuser());
                 List<ColumnData> cols = payload.columns() == null ? List.of() : payload.columns();
                 buf.writeVarInt(cols.size());
                 for (ColumnData col : cols) {
                     buf.writeString(truncUtf8(col.name(), 64), 64);
                     List<GlobalConfig.ShopItem> items = col.items() == null ? List.of() : col.items();
-                    buf.writeVarInt(items.size());
+                    // 先数非空条目再写（null 元素跳过，计数与实际写入一致防客户端读包错位）
+                    int count = 0;
                     for (GlobalConfig.ShopItem item : items) {
+                        if (item != null) count++;
+                    }
+                    buf.writeVarInt(count);
+                    for (GlobalConfig.ShopItem item : items) {
+                        if (item == null) continue;
                         writeItem(buf, item);
                     }
                 }
@@ -69,6 +79,7 @@ public record ShopDataS2CPayload(
                 int money = Math.max(0, buf.readVarInt());
                 boolean buyWindowOpen = buf.readBoolean();
                 int defuserPrice = Math.max(0, buf.readVarInt());
+                boolean ownedDefuser = buf.readBoolean();
                 int colCount = Math.max(0, buf.readVarInt());
                 List<ColumnData> columns = new ArrayList<>(colCount);
                 for (int c = 0; c < colCount; c++) {
@@ -81,23 +92,31 @@ public record ShopDataS2CPayload(
                     columns.add(new ColumnData(name, List.copyOf(items)));
                 }
                 return new ShopDataS2CPayload(eligible, bombMode, hasDefuser, money, buyWindowOpen,
-                        defuserPrice, List.copyOf(columns));
+                        defuserPrice, ownedDefuser, List.copyOf(columns));
             }
     );
 
-    // 【作用】写单个商品条目（物品串/价格/限购 + 队伍/显示名/图标，超长防御截断防断连）
+    // 【作用】物品串线路上限（UTF-16 字符数，两端 codec 共用此常量）：
+    //        /give 格式带组件的物品串（custom_name/lore/block_entity_data 等）可远超 256 字符，
+    //        1.21.1 writeString 第一道校验是"字符数 > 上限即抛 EncoderException"，
+    //        未截断会直接炸掉服务端编码器导致玩家断连（2026-11-12 shop_data EncoderException 根因）。
+    //        线路副本仅供客户端预览图标/名称，服务端发放仍用配置原件，截断只影响预览不影响购买。
+    public static final int ITEM_ID_MAX_CHARS = 2048;
+
+    // 【作用】写单个商品条目（物品串/价格/限购 + 队伍/显示名/图标，全部经 UTF-8 安全截断防断连）
     private static void writeItem(PacketByteBuf buf, GlobalConfig.ShopItem item) {
-        buf.writeString(item.getItemId() == null ? "" : item.getItemId(), 256);
+        buf.writeString(NetworkHandler.truncateByUtf8Bytes(
+                item.getItemId() == null ? "" : item.getItemId(), ITEM_ID_MAX_CHARS), ITEM_ID_MAX_CHARS);
         buf.writeVarInt(Math.max(0, item.getPrice()));
         buf.writeVarInt(Math.max(0, item.getMaxPurchase()));
-        buf.writeString(truncUtf8(item.getTeam(), 8), 8);
-        buf.writeString(truncUtf8(item.getDisplayName(), 256), 256);
-        buf.writeString(truncUtf8(item.getIcon(), 32000), 32000);
+        buf.writeString(NetworkHandler.truncateByUtf8Bytes(item.getTeam(), 8), 8);
+        buf.writeString(NetworkHandler.truncateByUtf8Bytes(item.getDisplayName(), 256), 256);
+        buf.writeString(NetworkHandler.truncateByUtf8Bytes(item.getIcon(), 32000), 32000);
     }
 
     // 【作用】读单个商品条目（与 writeItem 一一对应）
     private static GlobalConfig.ShopItem readItem(PacketByteBuf buf) {
-        String itemId = buf.readString(256);
+        String itemId = buf.readString(ITEM_ID_MAX_CHARS);
         int price = buf.readVarInt();
         int maxPurchase = buf.readVarInt();
         String team = buf.readString(8);
@@ -106,11 +125,11 @@ public record ShopDataS2CPayload(
         return new GlobalConfig.ShopItem(itemId, price, maxPurchase, team, displayName, icon);
     }
 
-    /** 按 UTF-8 字节数截断（防 writeString 超上限抛异常断连；切断多字节产生的残字符仅影响显示） */
+    /** 按 UTF-8 字节数截断（防 writeString 超上限抛异常断连；null 一律按空串写，切断多字节产生的残字符仅影响显示） */
     private static String truncUtf8(String s, int maxBytes) {
-        byte[] b = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        if (b.length <= maxBytes) return s;
-        return new String(b, 0, maxBytes, java.nio.charset.StandardCharsets.UTF_8);
+        // 【作用】统一委托 NetworkHandler.truncateByUtf8Bytes（不切断多字节字符的实现，
+        //        本类原字节硬切实现会在多字节边界回涨出替换字符，已被替换）
+        return NetworkHandler.truncateByUtf8Bytes(s, maxBytes);
     }
 
     /**
@@ -119,10 +138,10 @@ public record ShopDataS2CPayload(
      */
     public static ShopDataS2CPayload create(boolean eligible, boolean bombMode, boolean hasDefuser,
                                             int money, boolean buyWindowOpen, int defuserPrice,
-                                            List<ColumnData> columns) {
+                                            boolean ownedDefuser, List<ColumnData> columns) {
         List<ColumnData> safeCols = columns == null ? List.of() : columns;
         return new ShopDataS2CPayload(eligible, bombMode, hasDefuser, money, buyWindowOpen,
-                defuserPrice, safeCols);
+                defuserPrice, ownedDefuser, safeCols);
     }
 
     @Override

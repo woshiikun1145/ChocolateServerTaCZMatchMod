@@ -62,6 +62,92 @@ public class ModSounds {
     public static final RegistryEntry.Reference<SoundEvent> ROUND_DRAW =
             register("round_draw", SoundEvent.of(Identifier.of("cstmm", "round_draw")));
 
+    // ===== 手雷系统音效（移植自 CounterStrikeGrenades，命名空间改为 cstmm） =====
+
+    /** 手雷通用碰撞声（所有手雷落地/弹开共用，音量按距离衰减由客户端计算） */
+    public static final RegistryEntry.Reference<SoundEvent> GRENADE_HIT =
+            register("grenade.hit", SoundEvent.of(Identifier.of("cstmm", "grenade.hit")));
+
+    /** 手雷通用投掷出手的破风声 */
+    public static final RegistryEntry.Reference<SoundEvent> GRENADE_THROW =
+            register("grenade.throw", SoundEvent.of(Identifier.of("cstmm", "grenade.throw")));
+
+    /** HE 手雷拔销/持握音 */
+    public static final RegistryEntry.Reference<SoundEvent> HEGRENADE_DRAW =
+            register("hegrenade.draw", SoundEvent.of(Identifier.of("cstmm", "hegrenade.draw")));
+
+    /** HE 手雷弹跳碰撞声（比通用碰撞声更金属） */
+    public static final RegistryEntry.Reference<SoundEvent> HEGRENADE_BOUNCE =
+            register("hegrenade.bounce", SoundEvent.of(Identifier.of("cstmm", "hegrenade.bounce")));
+
+    /** HE 手雷爆炸声（近距离） */
+    public static final RegistryEntry.Reference<SoundEvent> HEGRENADE_EXPLODE =
+            register("hegrenade.explode", SoundEvent.of(Identifier.of("cstmm", "hegrenade.explode")));
+
+    /** HE 手雷爆炸声（远距离回响） */
+    public static final RegistryEntry.Reference<SoundEvent> HEGRENADE_EXPLODE_DISTANT =
+            register("hegrenade.explode_distant", SoundEvent.of(Identifier.of("cstmm", "hegrenade.explode_distant")));
+
+    /** 闪光弹拔销/持握音 */
+    public static final RegistryEntry.Reference<SoundEvent> FLASHBANG_DRAW =
+            register("flashbang.draw", SoundEvent.of(Identifier.of("cstmm", "flashbang.draw")));
+
+    /** 闪光弹爆炸声（近距离） */
+    public static final RegistryEntry.Reference<SoundEvent> FLASHBANG_EXPLODE =
+            register("flashbang.explode", SoundEvent.of(Identifier.of("cstmm", "flashbang.explode")));
+
+    /** 闪光弹爆炸声（远距离） */
+    public static final RegistryEntry.Reference<SoundEvent> FLASHBANG_EXPLODE_DISTANT =
+            register("flashbang.explode_distant", SoundEvent.of(Identifier.of("cstmm", "flashbang.explode_distant")));
+
+    /** 闪光弹致盲后的耳鸣声（FlashbangRingSound 循环播放） */
+    public static final RegistryEntry.Reference<SoundEvent> FLASHBANG_EXPLOSION_RING =
+            register("flashbang.explosion_ring", SoundEvent.of(Identifier.of("cstmm", "flashbang.explosion_ring")));
+
+    /** 烟雾弹拔销/持握音 */
+    public static final RegistryEntry.Reference<SoundEvent> SMOKE_GRENADE_DRAW =
+            register("smokegrenade.draw", SoundEvent.of(Identifier.of("cstmm", "smokegrenade.draw")));
+
+    /** 烟雾弹开始发烟声（近距离） */
+    public static final RegistryEntry.Reference<SoundEvent> SMOKE_EMIT =
+            register("smokegrenade.smoke_emmit", SoundEvent.of(Identifier.of("cstmm", "smokegrenade.smoke_emmit")));
+
+    /** 烟雾弹开始发烟声（远距离嘶嘶回响） */
+    public static final RegistryEntry.Reference<SoundEvent> SMOKE_EXPLODE_DISTANT =
+            register("smokegrenade.smoke_explode_distant", SoundEvent.of(Identifier.of("cstmm", "smokegrenade.smoke_explode_distant")));
+
+    /** 燃烧类手雷拔销/持握音（燃烧弹与莫洛托夫共用，原 mod 无 molotov.draw） */
+    public static final RegistryEntry.Reference<SoundEvent> INCENDIARY_DRAW =
+            register("incendiary.draw", SoundEvent.of(Identifier.of("cstmm", "incendiary.draw")));
+
+    /** 燃烧类手雷投掷出手的破风声 */
+    public static final RegistryEntry.Reference<SoundEvent> INCENDIARY_THROW =
+            register("incendiary.throw", SoundEvent.of(Identifier.of("cstmm", "incendiary.throw")));
+
+    /** 燃烧类手雷碰撞声 */
+    public static final RegistryEntry.Reference<SoundEvent> INCENDIARY_BOUNCE =
+            register("incendiary.bounce", SoundEvent.of(Identifier.of("cstmm", "incendiary.bounce")));
+
+    /** 燃烧弹落地起火声（近距离） */
+    public static final RegistryEntry.Reference<SoundEvent> INCENDIARY_EXPLODE =
+            register("incendiary.explode", SoundEvent.of(Identifier.of("cstmm", "incendiary.explode")));
+
+    /** 燃烧类手雷空中自爆爆燃声（近距离） */
+    public static final RegistryEntry.Reference<SoundEvent> INCENDIARY_EXPLODE_AIR =
+            register("incendiary.explode_air", SoundEvent.of(Identifier.of("cstmm", "incendiary.explode_air")));
+
+    /** 燃烧弹落地起火声（远距离回响） */
+    public static final RegistryEntry.Reference<SoundEvent> INCENDIARY_EXPLODE_DISTANT =
+            register("incendiary.explode_distant", SoundEvent.of(Identifier.of("cstmm", "incendiary.explode_distant")));
+
+    /** 燃烧类手雷被烟雾/水浇灭的噗声 */
+    public static final RegistryEntry.Reference<SoundEvent> INCENDIARY_POP =
+            register("incendiary.pop", SoundEvent.of(Identifier.of("cstmm", "incendiary.pop")));
+
+    /** 诱饵弹拔销/持握音 */
+    public static final RegistryEntry.Reference<SoundEvent> DECOY_DRAW =
+            register("decoy.draw", SoundEvent.of(Identifier.of("cstmm", "decoy.draw")));
+
     /** 注册音效事件并返回注册表引用。 */
     private static RegistryEntry.Reference<SoundEvent> register(String name, SoundEvent event) {
         return Registry.registerReference(Registries.SOUND_EVENT, Identifier.of("cstmm", name), event);

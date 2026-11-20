@@ -164,7 +164,8 @@ public class EconomyManager {
 
     /**
      * 【作用】爆破图商店扣费购买：校验购买窗口与余额 → 扣钱 → 发放；
-     *         cstmm:bomb_defuser（拆弹装备）仅 CT 可购，购买后打玩家 tag（不是物品，不入背包）；
+     *         cstmm:bomb_defuser（拆弹装备）仅 CT 可购且每人限购一个（持有 tag 时拒绝重复购买），
+     *         购买后打玩家 tag（不是物品，不入背包）；
      *         cstmm:c4 不可通过商店购买（由回合开始系统指派）。其余商品解析发放（失败退款）。
      *         购买成功后返回 true（NetworkHandler 据此重发商店数据）。
      * 【被谁使用】NetworkHandler BUY_ITEM 爆破分支。仅服务端。
@@ -179,11 +180,16 @@ public class EconomyManager {
         UUID uuid = player.getUuid();
         boolean playerIsT = session.isTTeam(session.getPlayerTeam(uuid));
 
-        // 购买页第 1 列固定项（itemIndex=-1）：拆弹装备（仅 CT，tag 化不入背包）
+        // 购买页第 1 列固定项（itemIndex=-1）：拆弹装备（仅 CT，tag 化不入背包；每人限购一个）
         if (itemIndex < 0) {
             int price = economy().getDefuserPrice();
             if (playerIsT) {
                 player.sendMessage(Text.literal("§c拆弹装备仅 CT 方可购买"), false);
+                return false;
+            }
+            // 【作用】限购校验：已持有拆弹装备 tag 时拒绝重复购买（再多买无效果且白花钱）
+            if (player.getCommandTags().contains(BombInteractionManager.DEFUSE_KIT_TAG)) {
+                player.sendMessage(Text.literal("§c你已持有拆弹装备，无法重复购买"), false);
                 return false;
             }
             int money = session.getPlayerMoney(uuid);
@@ -198,7 +204,7 @@ public class EconomyManager {
             return true;
         }
 
-        // 分类列平铺列表（与该队伍购买页下发顺序一致：T/CT 独立配置的列顺序拼接；
+        // 平铺列表（与该队伍购买页下发顺序一致：第 1 列装备列附加商品 → T/CT 分类列顺序拼接；
         // 未配置队伍列时回退通用列/旧版平铺 shopItems）
         List<GlobalConfig.ShopItem> items = map.getBombFlatShopItems(playerIsT);
         if (itemIndex >= items.size()) return false;

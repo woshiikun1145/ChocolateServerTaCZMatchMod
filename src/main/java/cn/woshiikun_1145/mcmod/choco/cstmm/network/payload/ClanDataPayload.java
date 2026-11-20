@@ -1,5 +1,6 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm.network.payload;
 
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
@@ -26,8 +27,8 @@ public record ClanDataPayload(
     // 【作用】编解码器：kind（上限 16 字符）+ 快照 JSON（上限 65536 字节）与 PacketByteBuf 互转
     public static final PacketCodec<PacketByteBuf, ClanDataPayload> CODEC = PacketCodec.of(
             (payload, buf) -> {
-                buf.writeString(payload.kind(), 16);
-                buf.writeString(payload.json(), 65536);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.kind(), 16), 16);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.json(), 65536), 65536);
             },
             buf -> new ClanDataPayload(
                     buf.readString(16),

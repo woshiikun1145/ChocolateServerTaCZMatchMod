@@ -4,6 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 
 /**
  * C2S 配置更新包（分包）。
@@ -30,7 +31,7 @@ public record ConfigUpdatePayload(
             (payload, buf) -> {
                 buf.writeVarInt(payload.partIndex());
                 buf.writeVarInt(payload.totalParts());
-                buf.writeString(payload.data(), 32767);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.data(), 32767), 32767);
             },
             buf -> new ConfigUpdatePayload(
                     buf.readVarInt(),

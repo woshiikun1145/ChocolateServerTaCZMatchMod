@@ -114,7 +114,10 @@ public class BombRoundManager {
         }
 
         // ---- 回合状态重置（清空死亡名单/死亡位置/C4/拆弹状态）----
-        // 上一回合的死亡名单先取出来，用于"阵亡玩家回默认装备、存活者保留装备"的判定
+        // 上一回合的死亡名单先取出来，用于"阵亡玩家回默认装备、存活者保留装备"的判定；
+        // 第 1 回合全员按阵亡处理：不论休闲/竞技都清空进服背包并发放本图默认装备
+        // （进服真实背包已在 MatchManager.startMatch 存快照，整场结束恢复）
+        boolean firstRound = session.getRoundNumber() == 1;
         Set<UUID> previousDead = new HashSet<>(session.getDeadThisRound());
         session.resetRoundState();
         session.setRedKills(0);
@@ -138,7 +141,7 @@ public class BombRoundManager {
             ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
             if (player == null) continue;
 
-            boolean wasDead = previousDead.contains(uuid);
+            boolean wasDead = firstRound || previousDead.contains(uuid);
             if (wasDead && player.isDead()) {
                 // 服务端主动复活：走原版 onClientStatus(PERFORM_RESPAWN) 路径（同步触发
                 // AFTER_RESPAWN → handleBombRespawn）
@@ -306,19 +309,23 @@ public class BombRoundManager {
      * 战斗阶段每秒：全歼判定（CS 规则）→ 回合/C4 计时 → 边界检查。
      */
     private void tickFighting(MatchSession session, MapConfig config) {
-        // ---- 全歼判定（安放炸弹后 T 方被全歼不结束回合，必须拆弹或等待爆炸）----
+        // ---- 全歼判定（CS 规则，2026-11-12 修复安放后误判）----
+        // 未安放：任一队全灭即对方胜。
+        // 已安放：T 方全灭【不】结束回合（C4 已下包，CT 必须拆除或承受爆炸——CS 规则）；
+        //         仅 CT 全灭（无人可拆）判 T 胜。此前 checkElimination 在安放后仍生效，
+        //         导致 CT 全歼 T 即直接赢下回合，绕过了拆弹环节。
         if (session.getRoundEndCounter() <= 0) {
-            int elimWinner = checkElimination(session);
-            if (elimWinner != 0) {
-                endRound(session, config, elimWinner, elimWinner == session.getTTeam()
-                        ? "CT 方被全歼" : "T 方被全歼");
-                return;
-            }
-            // 炸弹已安放且 CT 全灭：T 立即胜（无人可拆）
             if (session.isBombPlanted()) {
                 int ctTeam = session.getOppositeTeam(session.getTTeam());
                 if (isTeamWiped(session, ctTeam)) {
                     endRound(session, config, session.getTTeam(), "炸弹已安放且 CT 全灭");
+                    return;
+                }
+            } else {
+                int elimWinner = checkElimination(session);
+                if (elimWinner != 0) {
+                    endRound(session, config, elimWinner, elimWinner == session.getTTeam()
+                            ? "CT 方被全歼" : "T 方被全歼");
                     return;
                 }
             }
@@ -348,7 +355,7 @@ public class BombRoundManager {
         BoundaryChecker.checkBoundaries(session, config);
     }
 
-    /** 全歼判定（未安放阶段）：任一队全灭即对方胜；返回 0=未分胜负。 */
+    /** 全歼判定（仅限未安放阶段调用）：任一队全灭即对方胜；返回 0=未分胜负。 */
     private int checkElimination(MatchSession session) {
         int tTeam = session.getTTeam();
         int ctTeam = session.getOppositeTeam(tTeam);
@@ -375,8 +382,11 @@ public class BombRoundManager {
     public void endRound(MatchSession session, MapConfig config, int winnerTeam, String reason) {
         if (session.getPhase() == MatchSession.GamePhase.ENDED || session.getRoundEndCounter() > 0) return;
 
-        // 回合经本方法结束（全歼/超时等）→ 取消尚未结算的 C4 起爆（引信音播放中回合已被他途结束）
-        pendingDetonation.remove(session.getSessionId());
+        // 回合经本方法结束（全歼/超时等）→ 取消尚未结算的 C4 起爆（引信音播放中回合已被他途结束）；
+        // 引信窗口内被取消时炸弹视为失效，同步解除安放状态（否则 HUD 红色倒计时滞留整个间歇）
+        if (pendingDetonation.remove(session.getSessionId())) {
+            session.setBombPlanted(false);
+        }
 
         // 回合胜负播报音效（占位，仅对局内单播）：
         // T 胜——全歼类立刻播放；C4 爆炸在爆炸音效响起 EXPLOSION_WIN_DELAY_MILLIS 后播放
@@ -411,6 +421,11 @@ public class BombRoundManager {
             session.addOtWin(winnerTeam);
         }
 
+        // 【作用】整场胜负判定先行：本回合若决出整场胜者，MVP 播报不在此发（最终回合的 MVP
+        //        延迟到整场结算 endMatch 时与获胜横幅同现同消，2026-11-12）；未决出则照常随回合横幅播报
+        decideSeriesState(session, config);
+        boolean seriesDecided = pendingSeriesWinner.containsKey(session.getSessionId());
+
         // 【作用】HUD 胜利横幅（CS2 风格顶部横幅，显示至回合间歇结束）
         if (winnerTeam != 0) {
             session.setBanner(winnerTeam, teamDisplayName(session, winnerTeam) + " 胜利", "回合结束",
@@ -432,10 +447,26 @@ public class BombRoundManager {
         // 订阅制商店推送：回合结算改钱（胜败金/连败金），全员余额刷新
         cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler.sendShopDataToTeam(session);
 
-        // 【MVP 音乐】按本回合胜负方式判定 MVP 并向对局内全员下发（未选择音乐则静默跳过）
-        MvpMusicManager.onBombRoundEnd(session, winnerTeam, reason);
+        // 【MVP 音乐】按本回合胜负方式判定 MVP 并向对局内全员下发（未选择音乐则静默跳过）；
+        // 整场已决出胜负的最终回合不在此发——延迟到 endMatch 与获胜横幅同现同消
+        if (!seriesDecided) {
+            MvpMusicManager.onBombRoundEnd(session, winnerTeam, reason, intermission * 1000L);
+        } else {
+            finalRoundMvpReasons.put(session.getSessionId(), reason);
+        }
+    }
 
-        decideSeriesState(session, config);
+    /** 最终回合 MVP 判定上下文：key=sessionId，value=回合胜负原因（整场结算 endMatch 时消费） */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> finalRoundMvpReasons =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * 【作用】取走最终回合的 MVP 判定原因（整场结算 endMatch 时调用）；无上下文返回 null
+     *         （强制结束/断线结算等异常路径不播 MVP）。
+     * 【被谁使用】MatchManager#endMatch（爆破对局结算，服务端）。
+     */
+    public String consumeFinalRoundMvpReason(String sessionId) {
+        return finalRoundMvpReasons.remove(sessionId);
     }
 
     /**

@@ -123,9 +123,17 @@ public class MatchManager implements MatchApi {
 
     // ==================== 玩家映射操作 ====================
 
-    // 将玩家移出会话映射（VoteManager 踢人投票通过后调用）
+    /**
+     * 【作用】将对局中被移出的玩家移出会话映射，并同步清理其头顶名字前缀计分板队伍。
+     *         被移出的玩家已不在 session 的红/蓝队伍集合中，endMatch 的 clearNameTagTeams
+     *         （按 getAllPlayers 遍历）覆盖不到此人，必须在移除时同步清理，
+     *         否则其 c+12hex 队伍残留 scoreboard.dat，玩家重进服仍带 [T]/[红][蓝] 前缀直到重启。
+     * 【被谁使用】VoteManager（投票踢出目标）、BombRoundManager（重连超时移出对局）；仅服务端。
+     */
     public void removePlayerFromSession(UUID playerUuid) {
         playerSessionMap.remove(playerUuid);
+        // 【作用】对局中被移出会话的玩家不参与整场结束的逐会话前缀清理，此处同步移除其专属队伍
+        clearNameTagTeam(playerUuid);
     }
 
     // 返回玩家-会话映射的只读视图（项目内暂无调用方）
@@ -213,9 +221,12 @@ public class MatchManager implements MatchApi {
             playerSessionMap.put(player.getUuid(), session.getSessionId());
             OriginManager.saveOrigin(player);
             playerOriginalGameMode.putIfAbsent(player.getUuid(), player.interactionManager.getGameMode());
-            // 仅竞技模式保存背包（休闲模式不动玩家背包）
+            // 竞技模式保存背包；休闲爆破同样存快照（2026-11-12：死亡玩家回合开始被清包换
+            // 默认装备，整场结束恢复进对局时的真实背包——休闲死亡竞赛不动背包，死亡掉落原版处理）
             if (competitive) {
                 InventoryManager.getInstance().setCompetitive(player.getUuid(), true);
+            }
+            if (competitive || config.isBombMap()) {
                 InventoryManager.getInstance().saveInventory(player);
             }
         }
@@ -226,6 +237,8 @@ public class MatchManager implements MatchApi {
             playerOriginalGameMode.putIfAbsent(player.getUuid(), player.interactionManager.getGameMode());
             if (competitive) {
                 InventoryManager.getInstance().setCompetitive(player.getUuid(), true);
+            }
+            if (competitive || config.isBombMap()) {
                 InventoryManager.getInstance().saveInventory(player);
             }
         }
@@ -344,10 +357,13 @@ public class MatchManager implements MatchApi {
         playerSessionMap.put(uuid, session.getSessionId());
         OriginManager.saveOrigin(player);
         playerOriginalGameMode.putIfAbsent(uuid, player.interactionManager.getGameMode());
-        // 仅竞技模式保存背包（休闲模式不动玩家背包）
-        if (session.isCompetitive()) {
-            InventoryManager.getInstance().setCompetitive(uuid, true);
+        // 竞技模式与休闲爆破保存背包（2026-11-12：休闲爆破死亡玩家回合开始被清包换默认装备，
+        // 整场结束恢复真实背包）；休闲死亡竞赛不动背包（死亡掉落原版处理）
+        if (session.isCompetitive() || session.isBombMode()) {
             InventoryManager.getInstance().saveInventory(player);
+            if (session.isCompetitive()) {
+                InventoryManager.getInstance().setCompetitive(uuid, true);
+            }
         }
         setupPlayer(session, player);
     }
@@ -549,7 +565,9 @@ public class MatchManager implements MatchApi {
     // ==================== 结束对局 ====================
 
     /**
-     * 【作用】结束对局：记录地图冷却起点、广播结算消息、按胜负更新玩家战绩、恢复全员原点/背包/游戏模式并清理会话映射，最后下发 HUD 清除包。
+     * 【作用】结束对局：先置 ENDED（防结算异常导致 tick 每秒重试）→ 记录地图冷却起点、广播结算消息、
+     *         按胜负更新玩家战绩、恢复全员原点/背包/游戏模式（逐玩家隔离，异常不中断收尾）、
+     *         清理头顶前缀计分板队伍（必达）并清理会话映射，最后下发 HUD 清除包。
      * 【被谁使用】checkWinCondition/#handleTimerEnd/#onPlayerDisconnect（服务端内部）；VoteManager（加时投票未通过、踢人后单侧无人等结算）、ModCommands（管理员强制结束）；服务端。
      */
     public void endMatch(MatchSession session, String message, int winnerTeam) {
@@ -567,16 +585,41 @@ public class MatchManager implements MatchApi {
                 : (winnerTeam == 1 ? "红队胜利" : winnerTeam == 2 ? "蓝队胜利" : "比赛结束");
         session.setBanner(winnerTeam, bannerText, "比赛结束", System.currentTimeMillis() + 6000);
 
-        // 【MVP 音乐】死亡竞赛模式对局结算播报（爆破模式由每回合结束单独触发，此处跳过）
-        MvpMusicManager.onNormalMatchEnd(session);
+        // 【MVP 音乐】对局结算播报：死亡竞赛按全场击杀判定；爆破取最终回合上下文
+        // （无上下文 = 强制结束/断线结算等异常结束，不播）——与获胜横幅同现同消（2026-11-12）
+        if (session.isBombMode()) {
+            String finalReason = BombRoundManager.getInstance().consumeFinalRoundMvpReason(session.getSessionId());
+            if (finalReason != null) {
+                MvpMusicManager.onBombMatchEnd(session, winnerTeam, finalReason);
+            }
+        } else {
+            MvpMusicManager.onNormalMatchEnd(session);
+        }
 
-        updatePlayerProfiles(session, winnerTeam);
-        // 结算时因死亡被跳过恢复的玩家：快照/原点/原游戏模式保留，待 AFTER_RESPAWN 补恢复
-        Set<UUID> pendingRespawnRestore = restoreAllPlayers(session);
-
+        // 【作用】先置 ENDED 再结算：结算/恢复若抛异常，tick 不再每秒重试 endMatch——
+        //        否则结算消息已广播但 phase 永远到不了 ENDED，前缀队伍永不清理（2026-11-12
+        //        "死亡竞赛结束后不清理队伍"的根因）；失败不重试，异常经日志暴露
         session.setPhase(MatchSession.GamePhase.ENDED);
         session.setStartTime(System.currentTimeMillis());
-        // 头顶名字前缀清理（per-player 计分板队伍移除）
+
+        // 结算时因死亡被跳过恢复的玩家：快照/原点/原游戏模式保留，待 AFTER_RESPAWN 补恢复
+        Set<UUID> pendingRespawnRestore = new HashSet<>();
+        boolean settlementFailed = false;
+        try {
+            updatePlayerProfiles(session, winnerTeam);
+            pendingRespawnRestore = restoreAllPlayers(session);
+        } catch (Throwable t) {
+            // 【作用】结算/恢复失败不得中断收尾：保留全部原始游戏模式映射（死亡玩家
+            //        重生补恢复仍能取到），不误清；前缀清理与对局收尾继续执行
+            settlementFailed = true;
+            Cstmm.LOGGER.error("[CSTMM - MatchManager] Settlement failed for match {}, forcing cleanup",
+                    session.getSessionId(), t);
+        }
+        // 【作用】记录结算结果：失败标记供保护模式重启（/cstmm debug restart_cstmm）补结算
+        //        ——对局已 ENDED 后 tick 不再重试，重启前的常规路径永远不会再恢复这些玩家
+        session.setSettlementFailed(settlementFailed);
+
+        // 头顶名字前缀清理（per-player 计分板队伍移除）：结算异常时也必达
         clearNameTagTeams(session);
         if (session.isBombMode()) {
             // 爆破对局：清理回合状态机的挂起结算标记等
@@ -586,8 +629,9 @@ public class MatchManager implements MatchApi {
         for (UUID uuid : session.getAllPlayers()) {
             playerSessionMap.remove(uuid);
             // 死亡未重生的玩家保留原游戏模式映射（重生补恢复时才移除），
-            // 防止其在重生前重新排队进新对局时被当前（冒险）模式覆盖真实原模式
-            if (!pendingRespawnRestore.contains(uuid)) {
+            // 防止其在重生前重新排队进新对局时被当前（冒险）模式覆盖真实原模式；
+            // 结算异常时全部保留（分不清哪些玩家已完整恢复，宁可多留不误清）
+            if (!settlementFailed && !pendingRespawnRestore.contains(uuid)) {
                 playerOriginalGameMode.remove(uuid);
             }
             InventoryManager.getInstance().setCompetitive(uuid, false);
@@ -609,7 +653,39 @@ public class MatchManager implements MatchApi {
     }
 
     /**
-     * 【作用】对局结束时恢复全体在线玩家：回原点、还原背包（竞技模式）、恢复原游戏模式并清空计分板队伍。
+     * 【作用】补结算"整场结算失败"的已结束对局（保护模式重启模组服务时调用）：
+     *         endMatch 结算异常时对局仍会置 ENDED（防 tick 重试死循环），常规路径此后
+     *         不会再恢复这批玩家——他们滞留对局地图/冒险模式/对局装备直到本方法补做。
+     *         只重跑 {@link #restoreAllPlayers}（逐玩家隔离、快照消费后重跑无副作用），
+     *         不重跑 updatePlayerProfiles（战绩场次会双计）。补结算成功后清除失败标记并
+     *         按 endMatch 同口径清理已恢复玩家的原游戏模式映射（死亡未重生者保留）。
+     * 【被谁使用】ModGuardian#restartServices。仅服务端。
+     */
+    public void retryFailedSettlements() {
+        for (MatchSession session : getAllActiveSessions()) {
+            if (session.getPhase() != MatchSession.GamePhase.ENDED || !session.isSettlementFailed()) {
+                continue;
+            }
+            Cstmm.LOGGER.info("[CSTMM - MatchManager] Retrying failed settlement for match {}", session.getSessionId());
+            try {
+                Set<UUID> stillPendingRespawn = restoreAllPlayers(session);
+                session.setSettlementFailed(false);
+                for (UUID uuid : session.getAllPlayers()) {
+                    if (!stillPendingRespawn.contains(uuid)) {
+                        playerOriginalGameMode.remove(uuid);
+                    }
+                }
+            } catch (Throwable t) {
+                // 补结算失败：保留失败标记（下次重启可再试），日志暴露
+                Cstmm.LOGGER.error("[CSTMM - MatchManager] Retry settlement failed for match {}",
+                        session.getSessionId(), t);
+            }
+        }
+    }
+
+    /**
+     * 【作用】对局结束时恢复全体在线玩家：回原点、还原背包（竞技与休闲爆破有快照，无快照时
+     *         restoreInventory 内部 no-op）、恢复原游戏模式并清空计分板队伍。
      *         处于死亡状态（死亡界面未重生）的玩家跳过恢复：向重生后即被丢弃的旧实体恢复快照
      *         会导致快照被消费而新实体为空背包（原物品永久丢失），故保留全部待恢复状态，
      *         由 handleRespawn 在其重生时补做。
@@ -626,25 +702,33 @@ public class MatchManager implements MatchApi {
             if (player == null) {
                 continue;
             }
+            // 【作用】逐玩家隔离恢复：单个玩家恢复异常只跳过该玩家并保留其待恢复状态，
+            //        不中断其余玩家恢复（否则后半场玩家会滞留冒险模式+对局装备直到手动恢复）
+            try {
+                // 死亡界面未重生的玩家：跳过原点/背包/游戏模式恢复（旧实体重生后即被丢弃），
+                // 仅清除计分板队伍（队伍按玩家名记录、跨重生保留，必须清）；其余由重生补恢复；
+                // 先登记待重生集合再清理，清理抛异常时不丢失补恢复标记
+                if (player.isDead()) {
+                    pendingRespawn.add(uuid);
+                    Objects.requireNonNull(player.getServer()).getScoreboard().clearTeam(player.getName().getString());
+                    continue;
+                }
 
-            // 死亡界面未重生的玩家：跳过原点/背包/游戏模式恢复（旧实体重生后即被丢弃），
-            // 仅清除计分板队伍（队伍按玩家名记录、跨重生保留，必须清）；其余由重生补恢复
-            if (player.isDead()) {
-                Objects.requireNonNull(player.getServer()).getScoreboard().clearTeam(player.getName().getString());
-                pendingRespawn.add(uuid);
-                continue;
-            }
+                OriginManager.restoreOrigin(player);
 
-            OriginManager.restoreOrigin(player);
-
-            if (session.isCompetitive()) {
+                // 恢复背包：竞技与休闲爆破有快照（2026-11-12 休闲爆破死亡玩家回合开始被清包
+                // 换默认装备，整场结束还原进对局时的真实背包）；无快照时内部直接返回（休闲死亡竞赛 no-op）
                 InventoryManager.getInstance().restoreInventory(player);
+
+                GameMode originalMode = playerOriginalGameMode.getOrDefault(uuid, GameMode.SURVIVAL);
+                player.changeGameMode(originalMode);
+
+                Objects.requireNonNull(player.getServer()).getScoreboard().clearTeam(player.getName().getString());
+            } catch (Throwable t) {
+                // 恢复失败：该玩家保留对局内状态（原点/快照/模式映射均不动），可由 /cstmm data restore bags 手动恢复
+                Cstmm.LOGGER.error("[CSTMM - MatchManager] Failed to restore player {} at match end, retained pending state",
+                        player.getName().getString(), t);
             }
-
-            GameMode originalMode = playerOriginalGameMode.getOrDefault(uuid, GameMode.SURVIVAL);
-            player.changeGameMode(originalMode);
-
-            Objects.requireNonNull(player.getServer()).getScoreboard().clearTeam(player.getName().getString());
         }
         return pendingRespawn;
     }
@@ -794,6 +878,11 @@ public class MatchManager implements MatchApi {
      * 引用的战队徽标经 ensureHudBadge 保证分片先行下发。
      */
     private void broadcastHudData(MatchSession session) {
+        // 【作用】会话在本 tick 推进过程中已结束（KILLS 结算/时间截止/爆破系列结算触发 endMatch）时
+        //         不再广播：endMatch 已清空头顶名字前缀队伍，此处 applyNameTagTeams 会把队伍原样
+        //         重建，而 ENDED 会话随后被 tick 跳过，重建的队伍永远无人清理（表现为对局结束后
+        //         玩家头顶 [T]/[CT]/[红]/[蓝] 前缀与 TAB 队伍残留）
+        if (session.getPhase() == MatchSession.GamePhase.ENDED) return;
         MinecraftServer server = Cstmm.getServer();
         if (server == null) return;
 
@@ -1049,7 +1138,10 @@ public class MatchManager implements MatchApi {
             o.addProperty("tTeam", session.getTTeam());
             o.addProperty("ot", session.isInOvertime());
             o.addProperty("otRound", session.getOvertimeRoundInSet());
-            o.addProperty("planted", session.isBombPlanted());
+            // planted 下发口径：仅"倒计时进行中"。引信已点燃（c4_detonation 音播放中）时置 false，
+            // 客户端立即停掉红色倒计时与"C4 已安放"状态行——先倒计时，再起爆，后爆炸（2026-11-12 修复）
+            o.addProperty("planted", session.isBombPlanted()
+                    && !BombRoundManager.getInstance().isDetonationPending(session.getSessionId()));
             o.addProperty("bombTimer", session.getBombTimerSeconds());
             // 购买窗口：冻结时间 + 开局后 N 秒（与 EconomyManager 购买判定同源）
             MapConfig hudMap = ConfigManager.getInstance().getMap(session.getMapName());
@@ -1100,13 +1192,13 @@ public class MatchManager implements MatchApi {
                     + (clan != null && clan.name != null && !clan.name.isEmpty() ? "§7[" + clan.name + "]" : "")
                     + "§f ";
             // 队伍名仅允许字母数字_-且 ≤16 字符：c + uuid 去 - 前 12 位十六进制，对局内唯一
-            String teamName = "c" + uuid.toString().replace("-", "").substring(0, 12);
+            String teamName = nametagTeamName(uuid);
             net.minecraft.scoreboard.Team team = sb.getTeam(teamName);
             if (team == null) team = sb.addTeam(teamName);
             if (!team.getPrefix().getString().equals(prefix)) {
                 team.setPrefix(net.minecraft.text.Text.literal(prefix));
                 team.setColor(net.minecraft.util.Formatting.valueOf(
-                        bomb ? (session.isTTeam(teamNo) ? "GOLD" : "BLUE") : (teamNo == 1 ? "RED" : "BLUE")));
+                        bomb ? (session.isTTeam(teamNo) ? "YELLOW" : "BLUE") : (teamNo == 1 ? "RED" : "BLUE")));
             }
             String playerName = player.getName().getString();
             if (!team.getPlayerList().contains(playerName)) {
@@ -1115,18 +1207,69 @@ public class MatchManager implements MatchApi {
         }
     }
 
-    /** 【作用】整场结束移除头顶名字前缀（清理 per-player 计分板队伍）。仅服务端。 */
-    private void clearNameTagTeams(MatchSession session) {
+    /**
+     * 【作用】构造玩家专属的头顶名字前缀计分板队伍名（c + UUID 去 - 前 12 位十六进制，
+     *         ≤16 字符、全服唯一，不会误伤其他模组的队伍）。
+     * 【被谁使用】applyNameTagTeams（创建/刷新）、clearNameTagTeam（单玩家清理）；仅服务端。
+     */
+    private static String nametagTeamName(UUID playerUuid) {
+        return "c" + playerUuid.toString().replace("-", "").substring(0, 12);
+    }
+
+    /**
+     * 【作用】移除单个玩家的头顶名字前缀计分板队伍（成员与队伍本体一并移除，玩家可离线）。
+     *         对局中被移出会话的玩家（投票踢出/爆破重连超时移出）不在整场结束的
+     *         clearNameTagPlayers 清理范围内，必须在其移出时同步调用（见 removePlayerFromSession）；
+     *         本方法幂等，队伍不存在时静默返回。
+     * 【被谁使用】removePlayerFromSession（对局中移除玩家的统一入口）、clearNameTagTeams（逐会话清理复用）；仅服务端。
+     */
+    public void clearNameTagTeam(UUID playerUuid) {
         MinecraftServer server = Cstmm.getServer();
         if (server == null) return;
         net.minecraft.scoreboard.ServerScoreboard sb = server.getScoreboard();
+        net.minecraft.scoreboard.Team team = sb.getTeam(nametagTeamName(playerUuid));
+        if (team == null) return;
+        for (String member : new java.util.ArrayList<>(team.getPlayerList())) {
+            sb.removeScoreHolderFromTeam(member, team);
+        }
+        sb.removeTeam(team);
+    }
+
+    /** 【作用】整场结束移除头顶名字前缀（遍历会话全体玩家逐个清理 per-player 计分板队伍）。仅服务端。 */
+    private void clearNameTagTeams(MatchSession session) {
         for (UUID uuid : session.getAllPlayers()) {
-            net.minecraft.scoreboard.Team team = sb.getTeam("c" + uuid.toString().replace("-", "").substring(0, 12));
+            clearNameTagTeam(uuid);
+        }
+    }
+
+    /**
+     * 【作用】兜底清理全部本模组头顶名字前缀队伍（按队伍名模式识别：c + 12 位十六进制，全服唯一）。
+     *         常规路径：对局结束 endMatch → clearNameTagTeams 逐会话清理；
+     *         异常路径：对局进行中停服/崩溃——计分板队伍会持久化到 scoreboard.dat，
+     *         不清理则重启后玩家头顶仍带 [T][战队] 前缀。
+     * 【被谁使用】Cstmm#registerServerEvents（SERVER_STARTED 清残留 / SERVER_STOPPING 兜底）。仅服务端。
+     */
+    public static void clearAllNameTagTeams() {
+        MinecraftServer server = Cstmm.getServer();
+        if (server == null) return;
+        net.minecraft.scoreboard.ServerScoreboard sb = server.getScoreboard();
+        java.util.List<String> stale = new java.util.ArrayList<>();
+        for (String teamName : sb.getTeamNames()) {
+            if (teamName != null && teamName.length() == 13 && teamName.charAt(0) == 'c'
+                    && teamName.substring(1).matches("[0-9a-f]{12}")) {
+                stale.add(teamName);
+            }
+        }
+        for (String teamName : stale) {
+            net.minecraft.scoreboard.Team team = sb.getTeam(teamName);
             if (team == null) continue;
             for (String member : new java.util.ArrayList<>(team.getPlayerList())) {
                 sb.removeScoreHolderFromTeam(member, team);
             }
             sb.removeTeam(team);
+        }
+        if (!stale.isEmpty()) {
+            Cstmm.LOGGER.info("[CSTMM - MatchManager] Cleared {} stale name-tag team(s)", stale.size());
         }
     }
 

@@ -80,6 +80,11 @@ public class MapConfig {
     private List<ShopColumn> shopColumnsT;
     /** 爆破图购买页 CT 方（蓝队）分类列（第 1 列固定拆弹装备列，第 2~5 列可配，最多 4 列） */
     private List<ShopColumn> shopColumnsCT;
+    /**
+     * 爆破图购买页第 1 列（装备列）附加商品：第 1 项固定为拆弹装备（仅 CT），
+     * 本列表为其后可配置商品（按商品队伍规则过滤，T/CT 各自可见）。
+     */
+    private List<GlobalConfig.ShopItem> shopColumn1Items;
     /** 爆破图包点列表（死亡竞赛图为空列表；包点数量无上限） */
     private List<Bombsite> bombsites;
     /** 爆破图炸弹参数（全局可调；死亡竞赛图忽略） */
@@ -122,6 +127,7 @@ public class MapConfig {
         this.shopColumns = new ArrayList<>();
         this.shopColumnsT = new ArrayList<>();
         this.shopColumnsCT = new ArrayList<>();
+        this.shopColumn1Items = new ArrayList<>();
         this.bombsites = new ArrayList<>();
         this.bombSettings = new BombSettings();
         this.defaultGear = new ArrayList<>();
@@ -200,6 +206,9 @@ public class MapConfig {
         // 切为死亡竞赛图时清空包点，避免残留数据在误改回死亡竞赛图时被引用
         if (!isBombMap()) {
             this.bombsites = new ArrayList<>();
+        } else {
+            // 爆破模式按回合比分结算，出界惩罚加分不生效：切换为爆破图时清零，避免配置残留
+            this.boundaryPenaltyKills = 0;
         }
     }
 
@@ -238,6 +247,30 @@ public class MapConfig {
 
     public void setShopColumnsCT(List<ShopColumn> shopColumnsCT) { this.shopColumnsCT = shopColumnsCT; }
 
+    /** 爆破图购买页第 1 列附加商品（Gson 兜底：缺失/null 返回空列表） */
+    public List<GlobalConfig.ShopItem> getShopColumn1Items() {
+        return shopColumn1Items == null ? List.of() : shopColumn1Items;
+    }
+
+    public void setShopColumn1Items(List<GlobalConfig.ShopItem> shopColumn1Items) {
+        this.shopColumn1Items = shopColumn1Items;
+    }
+
+    /** 按队伍筛选第 1 列附加商品（BOTH 双方可见；T/CT 仅对应队伍可见），保证下发与购买索引一致 */
+    public List<GlobalConfig.ShopItem> getShopColumn1ItemsForTeam(boolean tTeam) {
+        List<GlobalConfig.ShopItem> configured = getShopColumn1Items();
+        if (configured.isEmpty()) return List.of();
+        String want = tTeam ? "T" : "CT";
+        List<GlobalConfig.ShopItem> out = new ArrayList<>();
+        for (GlobalConfig.ShopItem item : configured) {
+            String team = item.getTeam();
+            if ("BOTH".equals(team) || want.equals(team)) {
+                out.add(item);
+            }
+        }
+        return out;
+    }
+
     /**
      * 【作用】爆破图按队伍取购买页分类列（NetworkHandler 下发与 EconomyManager 购买共用，
      *         保证两端的列/索引一一对应）：T 方取 shopColumnsT、CT 方取 shopColumnsCT；
@@ -271,14 +304,12 @@ public class MapConfig {
      * 【被谁使用】EconomyManager.tryPurchase（按购买索引发放）、ConfigScreen 保存前预校验。
      */
     public List<GlobalConfig.ShopItem> getBombFlatShopItems(boolean tTeam) {
+        List<GlobalConfig.ShopItem> flat = new ArrayList<>(getShopColumn1ItemsForTeam(tTeam));
         List<ShopColumn> cols = getBombShopColumnsForTeam(tTeam);
-        if (!cols.isEmpty()) {
-            List<GlobalConfig.ShopItem> flat = new ArrayList<>();
-            for (ShopColumn col : cols) {
-                flat.addAll(col.getItems());
-            }
-            if (!flat.isEmpty()) return flat;
+        for (ShopColumn col : cols) {
+            flat.addAll(col.getItems());
         }
+        if (!flat.isEmpty()) return flat;
         return getShopItems();
     }
 

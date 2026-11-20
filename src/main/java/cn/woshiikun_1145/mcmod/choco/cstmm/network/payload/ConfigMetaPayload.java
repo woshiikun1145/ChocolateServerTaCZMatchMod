@@ -4,6 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 
 /**
  * 【作用】配置元数据包（S2C，小包）：携带当前核心配置（maps+global）的 SHA-256 哈希与
@@ -28,8 +29,8 @@ public record ConfigMetaPayload(
     // 【作用】编解码器：哈希（≤128 字符，SHA-256 hex 为 64）+ inUseMaps JSON（≤32767 字节）与 PacketByteBuf 互转
     public static final PacketCodec<PacketByteBuf, ConfigMetaPayload> CODEC = PacketCodec.of(
             (payload, buf) -> {
-                buf.writeString(payload.configHash(), 128);
-                buf.writeString(payload.inUseMapsJson(), 32767);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.configHash(), 128), 128);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.inUseMapsJson(), 32767), 32767);
             },
             buf -> new ConfigMetaPayload(
                     buf.readString(128),

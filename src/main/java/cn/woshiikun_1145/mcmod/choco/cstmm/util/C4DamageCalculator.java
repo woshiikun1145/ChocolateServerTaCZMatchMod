@@ -99,7 +99,9 @@ public class C4DamageCalculator {
         }
 
         for (ServerPlayerEntity player : targets) {
-            if (player.isDead() || player.isSpectator()) continue;
+            // 【作用】创造模式玩家免疫 C4：genericKill 伤害源在原版语义下可穿透创造保护
+            //         （/kill 同款），PlayerEntity.damage 不会拦截，须在此显式跳过
+            if (player.isDead() || player.isSpectator() || player.isCreative()) continue;
 
             applyKnockback(player, center);
 

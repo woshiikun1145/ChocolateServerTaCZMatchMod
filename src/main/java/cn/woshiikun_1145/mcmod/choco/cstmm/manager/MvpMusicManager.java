@@ -30,6 +30,8 @@ public final class MvpMusicManager {
     private static final int OBJECTIVE_DELAY_MS = 2500;
     /** 全歼/超时胜利时短暂延后，避开回合结果播报 */
     private static final int ELIMINATION_DELAY_MS = 1000;
+    /** 整场获胜横幅时长（与 MatchManager#endMatch 的 setBanner 6000ms 保持一致） */
+    private static final long MATCH_BANNER_MS = 6000;
 
     private MvpMusicManager() {}
 
@@ -39,32 +41,51 @@ public final class MvpMusicManager {
      * @param reason     回合结束原因（"炸弹已被拆除"/"C4 爆炸"/"CT 方被全歼"/"时间耗尽" 等）
      * 【被谁使用】BombRoundManager#endRound（服务端）。
      */
-    public static void onBombRoundEnd(MatchSession session, int winnerTeam, String reason) {
-        if (session == null || winnerTeam != 1 && winnerTeam != 2) return;
-        String reasonText = reason == null ? "" : reason;
+    public static void onBombRoundEnd(MatchSession session, int winnerTeam, String reason, long bannerDurationMs) {
+        UUID mvp = pickRoundMvp(session, winnerTeam, reason);
+        if (mvp == null) return;
+        int delay = delayFor(session, winnerTeam, reason);
+        // 【作用】提示栏与回合胜利横幅同时消失：显示时长 = 横幅总时长 − 播报延迟（下限 1 秒）；
+        //        出现时刻随播报延迟顺延（避开胜利音效/语音播报）
+        long duration = Math.max(1000L, bannerDurationMs - delay);
+        sendIfPresent(session, mvp, delay, (int) duration, true);
+    }
 
-        UUID mvp = null;
-        int delay;
+    /**
+     * 【作用】爆破整场结算的 MVP 播报（最终回合上下文由 BombRoundManager 传入）：
+     *         立即出现、显示时长与整场获胜横幅（6 秒）一致——MVP 栏与获胜信息栏同现同消。
+     * 【被谁使用】MatchManager#endMatch（爆破对局结算，服务端）。
+     */
+    public static void onBombMatchEnd(MatchSession session, int winnerTeam, String reason) {
+        sendIfPresent(session, pickRoundMvp(session, winnerTeam, reason), 0, (int) MATCH_BANNER_MS, true);
+    }
+
+    /**
+     * 【作用】按回合胜负方式挑选 MVP（回合结束与整场结算共用）：
+     *         CT 胜-拆除=拆除者，CT 胜-其余=击杀最多（并列取伤害）；T 胜-爆炸=击杀最多（安放者并列优先），
+     *         T 胜-其余=击杀最多（并列取伤害）。
+     */
+    private static UUID pickRoundMvp(MatchSession session, int winnerTeam, String reason) {
+        if (session == null || winnerTeam != 1 && winnerTeam != 2) return null;
+        String reasonText = reason == null ? "" : reason;
         if (winnerTeam != session.getTTeam()) {
-            // CT 胜利
             if (reasonText.contains("拆除")) {
-                mvp = session.getRoundDefuser();
-                delay = OBJECTIVE_DELAY_MS;
-            } else {
-                mvp = pickTopKillsDamage(session, winnerTeam);
-                delay = ELIMINATION_DELAY_MS;
+                return session.getRoundDefuser();
             }
-        } else {
-            // T 胜利
-            if (reasonText.contains("C4 爆炸")) {
-                mvp = pickTopKillsWithPlanterTieBreak(session, winnerTeam);
-                delay = OBJECTIVE_DELAY_MS;
-            } else {
-                mvp = pickTopKillsDamage(session, winnerTeam);
-                delay = ELIMINATION_DELAY_MS;
-            }
+            return pickTopKillsDamage(session, winnerTeam);
         }
-        sendIfPresent(session, mvp, delay, true);
+        if (reasonText.contains("C4 爆炸")) {
+            return pickTopKillsWithPlanterTieBreak(session, winnerTeam);
+        }
+        return pickTopKillsDamage(session, winnerTeam);
+    }
+
+    /** 【作用】回合胜负播报对应的 MVP 播报延迟（避开胜利音效/语音播报）。 */
+    private static int delayFor(MatchSession session, int winnerTeam, String reason) {
+        String reasonText = reason == null ? "" : reason;
+        boolean objective = (winnerTeam != session.getTTeam())
+                ? reasonText.contains("拆除") : reasonText.contains("C4 爆炸");
+        return objective ? OBJECTIVE_DELAY_MS : ELIMINATION_DELAY_MS;
     }
 
     /**
@@ -95,7 +116,7 @@ public final class MvpMusicManager {
                 best.add(uuid);
             }
         }
-        sendIfPresent(session, best.isEmpty() ? null : best.get(randomIndex(best.size())), 0, false);
+        sendIfPresent(session, best.isEmpty() ? null : best.get(randomIndex(best.size())), 0, (int) MATCH_BANNER_MS, false);
     }
 
     // ==================== 判定辅助 ====================
@@ -191,9 +212,10 @@ public final class MvpMusicManager {
 
     /**
      * 【作用】读取 MVP 档案中的音乐选择并广播 MvpMusicPayload；MVP 为空 / 未选音乐 / 服务端
-     *         无在线玩家时静默跳过（不发送空包）。
+     *         无在线玩家时静默跳过（不发送空包）。durationMs = MVP 提示栏显示时长（与所配对
+     *         胜利横幅对齐，实现同现同消）。
      */
-    private static void sendIfPresent(MatchSession session, UUID mvp, int delayMs, boolean bombMode) {
+    private static void sendIfPresent(MatchSession session, UUID mvp, int delayMs, int durationMs, boolean bombMode) {
         if (mvp == null) return;
         PlayerProfile profile = PlayerDataManager.getInstance().getProfile(mvp);
         if (profile == null) return;
@@ -207,7 +229,7 @@ public final class MvpMusicManager {
         MinecraftServer server = Cstmm.getServer();
         if (server == null) return;
 
-        MvpMusicPayload payload = new MvpMusicPayload(mvpName, musicName, delayMs, bombMode);
+        MvpMusicPayload payload = new MvpMusicPayload(mvpName, musicName, delayMs, durationMs, bombMode);
         for (UUID uuid : session.getAllPlayers()) {
             ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
             if (player != null) {

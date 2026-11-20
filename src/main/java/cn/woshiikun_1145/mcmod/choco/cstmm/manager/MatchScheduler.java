@@ -41,6 +41,16 @@ public class MatchScheduler {
     }
 
     /**
+     * 【作用】清空全部挂起的延迟任务（保护模式重启模组服务用）：保护模式触发时对局已被
+     *         强制结算，队列中残留的任务（C4 起爆结算、延迟试听等）目标会话/玩家状态已失效，
+     *         重启服务后放行会误触发，须一并丢弃。
+     * 【被谁使用】ModGuardian#restartServices。仅服务端主线程。
+     */
+    public void clearPendingTasks() {
+        delayedTasks.clear();
+    }
+
+    /**
      * 【作用】服务端每 tick 回调入口：累计 tick 计数，每满 20 tick（1 秒）触发一次秒级调度。
      *         整体经 ModGuardian.run 包装——保护模式启用时跳过；秒级调度内任意子系统
      *         抛出未捕获异常时进入保护模式（禁用模组）而非击穿到服务器崩溃。

@@ -98,6 +98,9 @@ public class BombInteractionManager {
      */
     private void tickBombBeep(MatchSession session) {
         if (!session.isBombPlanted()) return;
+        // 引信已点燃（倒计时归零、c4_detonation 引信音播放中）：倒计时哔声立即停止，
+        // 不与起爆音重叠（2026-11-12 修复"起爆和倒计时同时进行"——先倒计时，再起爆，后爆炸）
+        if (BombRoundManager.getInstance().isDetonationPending(session.getSessionId())) return;
         int[] pos = session.getPlantedPos();
         if (pos == null) return;
         String key = session.getSessionId();
@@ -233,13 +236,17 @@ public class BombInteractionManager {
         tickFreeDefusing(server);
         for (MatchSession session : MatchManager.getInstance().getAllActiveSessions()) {
             if (!session.isBombMode() || session.getPhase() == MatchSession.GamePhase.ENDED) continue;
-            if (!freePlantingAllowed && (session.getPhase() != MatchSession.GamePhase.FIGHTING
-                    || session.getRoundEndCounter() > 0)) continue;
+            if (!freePlantingAllowed && session.getPhase() != MatchSession.GamePhase.FIGHTING) continue;
             MapConfig config = ConfigManager.getInstance().getMap(session.getMapName());
             if (config == null || !config.isBombMap()) continue;
+            // 回合间隙（roundEndCounter>0，阶段仍为战斗）：仅推进安放进度（2026-11-12 间隙可安放），
+            // 拆除维持原限制（条件校验本身也拦间隙）；哔声仅在炸弹已安放时响，间隙自然静默
+            boolean intermission = !freePlantingAllowed && session.getRoundEndCounter() > 0;
             tickBombBeep(session);
             tickPlanting(server, session, config);
-            tickDefusing(server, session, config);
+            if (!intermission) {
+                tickDefusing(server, session, config);
+            }
         }
     }
 
@@ -311,7 +318,7 @@ public class BombInteractionManager {
         BlockPos pos = player.getBlockPos();
         ServerWorld world = player.getServerWorld();
         BombEntity bomb = new BombEntity(ModEntities.C4, world);
-        bomb.setPosition(pos.getX() + 0.5, pos.getY() + 0.2, pos.getZ() + 0.5);
+        bomb.setPosition(pos.getX() + 0.5, pos.getY() + 0.01, pos.getZ() + 0.5);
         bomb.setMatchId(""); // 自由炸弹：无对局归属
         bomb.setFuseTicks(settings.getC4TimerSeconds() * 20);
         world.spawnEntity(bomb);
@@ -410,7 +417,7 @@ public class BombInteractionManager {
         discardBombs(server, session);
         ServerWorld world = player.getServerWorld();
         BombEntity bomb = new BombEntity(ModEntities.C4, world);
-        bomb.setPosition(pos.getX() + 0.5, pos.getY() + 0.2, pos.getZ() + 0.5);
+        bomb.setPosition(pos.getX() + 0.5, pos.getY() + 0.01, pos.getZ() + 0.5);
         bomb.setMatchId(session.getSessionId());
         world.spawnEntity(bomb);
         // 安放完成确认音（双响上行）
@@ -476,10 +483,11 @@ public class BombInteractionManager {
             return null;
         }
         if (player == null || player.isDead()
-                || session.getPhase() != MatchSession.GamePhase.FIGHTING
-                || session.getRoundEndCounter() > 0) {
+                || session.getPhase() != MatchSession.GamePhase.FIGHTING) {
             return "§c安放中断";
         }
+        // 回合间隙（roundEndCounter>0）允许安放（2026-11-12 用户要求：间隙内 T 也可下包）；
+        // C4 倒计时在 tickFighting 中推进，间隙期间不走战斗 tick，爆炸计时自然暂停至下一回合开始
         if (session.isBombPlanted()) return "§c炸弹已安放，无法重复安放";
         if (!session.isTTeam(session.getPlayerTeam(player.getUuid()))) return "§c只有 T 方能安放 C4";
         if (starting ? !player.getMainHandStack().isOf(ModItems.C4) : !containsC4(player)) {

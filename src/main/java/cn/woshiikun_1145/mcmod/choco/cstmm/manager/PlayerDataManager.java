@@ -137,6 +137,39 @@ public class PlayerDataManager {
         }
     }
 
+    // ==================== 管理员强制创建/覆盖 ====================
+
+    /**
+     * 【作用】该玩家是否已有档案数据（内存档案 / 损坏标记 / 磁盘文件任一存在）。
+     * 【被谁使用】ModCommands（/cstmm data create player 已存在提示）。仅服务端。
+     */
+    public boolean hasProfileData(UUID uuid) {
+        return profiles.containsKey(uuid)
+                || corruptedProfiles.contains(uuid)
+                || Files.exists(dataDir.resolve(uuid.toString() + ".json"));
+    }
+
+    /**
+     * 【作用】强行创建玩家档案文件（调用前需自行确认不存在）：写入全新默认档案并落盘/同步。
+     * 【被谁使用】ModCommands（/cstmm data create player）。仅服务端。
+     */
+    public void createProfile(UUID uuid, String playerName) {
+        profiles.put(uuid, new PlayerProfile(uuid, playerName));
+        saveProfile(uuid);
+        syncProfile(uuid);
+    }
+
+    /**
+     * 【作用】强行覆盖玩家档案文件（不存在则创建）：丢弃旧档案（含损坏标记），写入全新默认档案。
+     * 【被谁使用】ModCommands（/cstmm data cover player）。仅服务端。
+     */
+    public void overwriteProfile(UUID uuid, String playerName) {
+        corruptedProfiles.remove(uuid);
+        profiles.put(uuid, new PlayerProfile(uuid, playerName));
+        saveProfile(uuid);
+        syncProfile(uuid);
+    }
+
     // ==================== 数据更新 ====================
 
     /**

@@ -4,7 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
-
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import java.util.regex.Pattern;
 
 /**
@@ -48,10 +48,10 @@ public record BadgePayload(
     // 【作用】编解码器：分片信息 + 分片数据与 PacketByteBuf 互转
     public static final PacketCodec<PacketByteBuf, BadgePayload> CODEC = PacketCodec.of(
             (payload, buf) -> {
-                buf.writeString(payload.badgeId(), 8);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.badgeId(), 8), 8);
                 buf.writeVarInt(payload.partIndex());
                 buf.writeVarInt(payload.totalParts());
-                buf.writeString(payload.data(), MAX_PART_CHARS);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.data(), MAX_PART_CHARS), MAX_PART_CHARS);
             },
             buf -> new BadgePayload(
                     buf.readString(8),

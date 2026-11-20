@@ -4,6 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 
 /**
  * 【作用】MVP 音乐通知包（S2C）：告诉对局内全体玩家本场/本回合的 MVP 是谁、其选择的音乐名，
@@ -17,6 +18,9 @@ public record MvpMusicPayload(
         String mvpName,
         String musicName,
         int delayMs,
+        // MVP 提示栏（HUD 横幅）显示时长毫秒：服务端按所配对的胜利横幅时长下发，
+        // 保证 MVP 栏与获胜信息栏一起出现、一起消失（2026-11-12）；<=0 时客户端回退默认时长
+        int durationMs,
         boolean bombMode
 ) implements CustomPayload {
 
@@ -25,16 +29,17 @@ public record MvpMusicPayload(
             Identifier.of("cstmm", "mvp_music")
     );
 
-    // 【作用】编解码器：MVP 名（≤64 字符）+ 音乐名（≤256 字符）+ 延迟毫秒 + 是否爆破模式
+    // 【作用】编解码器：MVP 名（≤64 字符）+ 音乐名（≤256 字符）+ 延迟毫秒 + 提示栏时长毫秒 + 是否爆破模式
     public static final PacketCodec<PacketByteBuf, MvpMusicPayload> CODEC = PacketCodec.of(
             (payload, buf) -> {
-                buf.writeString(payload.mvpName(), 64);
-                buf.writeString(payload.musicName(), 256);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.mvpName(), 64), 64);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.musicName(), 256), 256);
                 buf.writeVarInt(Math.max(0, payload.delayMs()));
+                buf.writeVarInt(Math.max(0, payload.durationMs()));
                 buf.writeBoolean(payload.bombMode());
             },
             buf -> new MvpMusicPayload(buf.readString(64), buf.readString(256),
-                    buf.readVarInt(), buf.readBoolean())
+                    buf.readVarInt(), buf.readVarInt(), buf.readBoolean())
     );
 
     @Override

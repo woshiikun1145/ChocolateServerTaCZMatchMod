@@ -4,6 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 
 /**
  * 服务端弹窗通知（S2C）：替代部分聊天栏提示（如"配置已保存！"/战队加入结果），
@@ -24,7 +25,7 @@ public record PopupPayload(
 
     // 【作用】编解码器：弹窗消息（上限 256 字符）与 PacketByteBuf 互转
     public static final PacketCodec<PacketByteBuf, PopupPayload> CODEC = PacketCodec.of(
-            (payload, buf) -> buf.writeString(payload.message(), 256),
+            (payload, buf) -> buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.message(), 256), 256),
             buf -> new PopupPayload(buf.readString(256))
     );
 

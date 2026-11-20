@@ -4,6 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 
 /**
  * 配置同步（S2C）：核心配置 JSON（{"hash":..,"maps":[..],"global":{..}}，不含 inUseMaps）
@@ -31,7 +32,7 @@ public record ConfigSyncPayload(
             (payload, buf) -> {
                 buf.writeVarInt(payload.partIndex());
                 buf.writeVarInt(payload.totalParts());
-                buf.writeString(payload.data(), 32767);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.data(), 32767), 32767);
             },
             buf -> new ConfigSyncPayload(
                     buf.readVarInt(),

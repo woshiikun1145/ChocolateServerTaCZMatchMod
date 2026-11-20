@@ -60,6 +60,9 @@ public class MatchSession {
     // ==================== 爆破模式回合状态（仅爆破图对局使用） ====================
     // 是否爆破对局（地图 gameType=BOMB 时由 MatchManager 开局时置位）
     private boolean bombMode;
+    // 整场结算是否失败（endMatch 恢复玩家异常时置位）：对局已 ENDED 但部分玩家未恢复
+    // 原点/背包/游戏模式，重启模组服务时按此标记补结算（仅重跑恢复，不重跑战绩防双计）
+    private boolean settlementFailed = false;
     // 已完成的回合数（含加时回合；回合从 1 开始计）
     private int roundNumber = 0;
     // 队伍回合胜场（跟随队伍，不随攻防转换：1=红队 2=蓝队）
@@ -311,6 +314,10 @@ public class MatchSession {
     public void incrementRoundNumber() { this.roundNumber++; }
     public int getTeam1RoundWins() { return team1RoundWins; }
     public int getTeam2RoundWins() { return team2RoundWins; }
+
+    /** 整场结算是否失败（对局已 ENDED 但玩家恢复未完成；重启模组服务时补结算用）。 */
+    public boolean isSettlementFailed() { return settlementFailed; }
+    public void setSettlementFailed(boolean settlementFailed) { this.settlementFailed = settlementFailed; }
 
     /** 队伍回合胜场 +1（winnerTeam=1/2）。 */
     public void addRoundWin(int winnerTeam) {

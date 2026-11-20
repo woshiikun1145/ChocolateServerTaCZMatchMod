@@ -4,6 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 
 /**
  * 【作用】客户端徽标缓存上报（C2S）：客户端进服后把本机磁盘缓存中已有的徽标 id 列表
@@ -31,7 +32,7 @@ public record BadgeKnownPayload(
 
     // 【作用】编解码器：逗号分隔的徽标 id 列表字符串与 PacketByteBuf 互转
     public static final PacketCodec<PacketByteBuf, BadgeKnownPayload> CODEC = PacketCodec.of(
-            (payload, buf) -> buf.writeString(payload.badgeIds(), MAX_WIRE_CHARS),
+            (payload, buf) -> buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.badgeIds(), MAX_WIRE_CHARS), MAX_WIRE_CHARS),
             buf -> new BadgeKnownPayload(buf.readString(MAX_WIRE_CHARS))
     );
 

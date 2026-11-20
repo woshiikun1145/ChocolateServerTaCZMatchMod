@@ -24,6 +24,7 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.command.CommandRegistryAccess;
 import net.minecraft.command.argument.EntityArgumentType;
 import net.minecraft.item.ItemStack;
@@ -37,13 +38,22 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 【作用】/cstmm 命令树的注册与全部子命令执行逻辑（服务端 Brigadier 命令）。
@@ -54,8 +64,8 @@ import java.util.concurrent.CompletableFuture;
  * /cstmm match    status / list / forceend &lt;ID&gt;（forceend 需 OP≥2）
  * /cstmm vote     kick &lt;玩家&gt; / kickyes / kickno
  * /cstmm config / reload                                             （OP≥2）
- * /cstmm data     get player|clan|map|global / edit player|clan|map|global / restore bags / delete player|clan|map   （OP≥2，支持离线玩家）
- * /cstmm debug    match_info_hud &lt;t|f&gt; / bandwidth start|stop|get|view / allow_c4 to_be_planted_freely &lt;t|f&gt; / audio_test &lt;c4_defuse|c4_explosion|t_win|ct_win&gt;  （OP≥2 调试）
+ * /cstmm data     get player|clan|map|global / edit player|clan|map|global / create player|clan / cover player|clan / restore bags / delete player|clan|map   （OP≥2，支持离线玩家）
+ * /cstmm debug    hud_test &lt;mvp_banner|victory_banner|match_info_hud&gt; &lt;t|f&gt; / bandwidth start|stop|get|view / exception_protect_test [confirm] / allow_c4 to_be_planted_freely &lt;t|f&gt; / item_parse_test &lt;物品串&gt; / audio_test &lt;c4_defuse|c4_explosion|t_win|ct_win&gt; / read_errs（保护模式可用）/ get_logs &lt;fatalerr|latest|all&gt;（保护模式可用）/ restart_cstmm（仅保护模式可用）  （OP≥2 调试）
  * </pre>
  * 每个节点按 registerXxx 方法拆分注册，执行逻辑为独立静态方法，便于增删子命令。
  */
@@ -176,7 +186,7 @@ public class ModCommands {
     private static void registerDebug(LiteralArgumentBuilder<ServerCommandSource> cstmm) {
         var debug = CommandManager.literal("debug")
                 .requires(source -> source.hasPermissionLevel(2))
-                .executes(usage("/cstmm debug hud_test <mvp_banner|victory_banner|match_info_hud> <t|f> | bandwidth start|stop|get|view | exception_protect_test [confirm] | audio_test <c4_defuse|c4_explosion|t_win|ct_win>"));
+                .executes(usage("/cstmm debug hud_test <mvp_banner|victory_banner|match_info_hud> <t|f> | bandwidth start|stop|get|view | exception_protect_test [confirm] | audio_test <c4_defuse|c4_explosion|t_win|ct_win> | read_errs（查看日志最近 ERROR，保护模式可用） | get_logs <fatalerr|latest|all>（下载错误日志） | restart_cstmm（保护模式下重启模组服务）"));
 
         // ----- hud_test：HUD 显示调试（横幅/比赛信息栏，演示数据，仅作用于执行者自己的客户端） -----
         debug.then(CommandManager.literal("hud_test")
@@ -235,6 +245,23 @@ public class ModCommands {
                 .executes(guard("debug.audio_test.ct_win", ctx -> debugTestSound(ctx, "ct_win"))));
         debug.then(audioTest);
 
+        // ----- read_errs：读取服务端日志（logs/latest.log）最近的 ERROR 条目 -----
+        // 保护模式启用后仍可用（只读日志，与 get_logs 同为救急排障命令）
+        debug.then(CommandManager.literal("read_errs")
+                .executes(guardAllowProtected("debug.read_errs", ModCommands::debugReadErrors)));
+
+        // ----- restart_cstmm：保护模式下强制重启模组服务（解除保护并重载配置与数据） -----
+        debug.then(CommandManager.literal("restart_cstmm")
+                .executes(guardAllowProtected("debug.restart_cstmm", ModCommands::debugRestartCstmm)));
+
+        // ----- get_logs：下载错误日志到 config/cstmm/download/<服务器名>/<时间戳>/ -----
+        // 保护模式启用后仍需可用（仅复制文件，不走普通 guard 的停用拦截）
+        debug.then(CommandManager.literal("get_logs")
+                .executes(usage("/cstmm debug get_logs <fatalerr|latest|all>（下载错误日志到 config/cstmm/download/<服务器名>/<时间戳>/）"))
+                .then(CommandManager.argument("log", StringArgumentType.word())
+                        .suggests(ModCommands::suggestLogNames)
+                        .executes(guardAllowProtected("debug.get_logs", ModCommands::debugGetLogs))));
+
         cstmm.then(debug);
     }
 
@@ -279,6 +306,176 @@ public class ModCommands {
         }
         player.sendMessage(Text.literal("§a已模拟战局播报: §f" + which), false);
         return 1;
+    }
+
+    /** 日志尾部最多读取的字节数（约 2000 行，覆盖常规排障窗口，避免整读超大日志） */
+    private static final int READ_ERRS_TAIL_BYTES = 256 * 1024;
+    /** latest.log 行格式：[HH:mm:ss] [线程/级别]: 消息（级别捕获组用于筛 ERROR；不匹配的行视为上一条目的堆栈/续行） */
+    private static final Pattern READ_ERRS_LINE = Pattern.compile(
+            "^\\[(\\d{1,2}:\\d{2}:\\d{2})\\] \\[([^/\\]]+)/(\\w+)\\]: (.*)$");
+
+    /**
+     * debug read_errs：读取服务端日志 logs/latest.log 末尾（最多 256KB），解析最近 3 条 ERROR
+     * 级别条目并按"最新在前"输出：时间 + 线程 + 消息（超长截断 256 字符），堆栈/续行只提示行数
+     * 不逐行输出（避免刷屏，完整内容引导查看 logs/latest.log）。
+     * 支持控制台执行；日志文件缺失或不可读时给出明确提示。
+     * 【被谁使用】registerDebug 的 read_errs 分支。
+     */
+    private static int debugReadErrors(CommandContext<ServerCommandSource> ctx) {
+        Path logPath = FabricLoader.getInstance().getGameDir().resolve("logs").resolve("latest.log");
+        if (!Files.exists(logPath)) {
+            ctx.getSource().sendMessage(Text.literal("§c未找到日志文件: §f" + logPath));
+            return 0;
+        }
+
+        // 【作用】尾部截读：只读文件末尾 READ_ERRS_TAIL_BYTES 字节，避免整读随运行时间无限增长的 latest.log
+        String tail;
+        try (FileChannel channel = FileChannel.open(logPath, StandardOpenOption.READ)) {
+            long size = channel.size();
+            int readBytes = (int) Math.min(size, READ_ERRS_TAIL_BYTES);
+            channel.position(size - readBytes);
+            ByteBuffer buffer = ByteBuffer.allocate(readBytes);
+            while (buffer.hasRemaining()) {
+                if (channel.read(buffer) < 0) break;
+            }
+            tail = new String(buffer.array(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            ctx.getSource().sendMessage(Text.literal("§c读取日志失败: §f" + e.getMessage()));
+            return 0;
+        }
+
+        // 【作用】逐行解析日志条目：行首匹配 [时间] [线程/级别]: 的为条目头，
+        //        仅 ERROR 级别计入结果；不匹配的行是上一条目的堆栈/续行（上一条为 ERROR 时累加计数）
+        List<String> headers = new ArrayList<>();   // ERROR 条目 "时间|线程"
+        List<String> messages = new ArrayList<>();  // 对应消息正文
+        List<Integer> stackCounts = new ArrayList<>(); // 对应堆栈/续行行数
+        String[] lines = tail.split("\n", -1);
+        boolean prevIsError = false;
+        for (int i = 1; i < lines.length; i++) { // 首行可能从字节截断处开始，跳过
+            String line = lines[i];
+            if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
+            Matcher m = READ_ERRS_LINE.matcher(line);
+            if (m.matches()) {
+                prevIsError = "ERROR".equals(m.group(3));
+                if (prevIsError) {
+                    headers.add(m.group(1) + "|" + m.group(2));
+                    messages.add(m.group(4));
+                    stackCounts.add(0);
+                }
+            } else if (prevIsError && !headers.isEmpty()) {
+                stackCounts.set(stackCounts.size() - 1, stackCounts.get(stackCounts.size() - 1) + 1);
+            }
+        }
+
+        if (headers.isEmpty()) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§a日志尾部无 ERROR 记录（扫描范围：logs/latest.log 末尾 256KB）"));
+            return 0;
+        }
+
+        int total = headers.size();
+        ctx.getSource().sendMessage(Text.literal(
+                "§6=== 日志最近 ERROR（logs/latest.log，尾部共 " + total + " 条，显示最新 3 条，最新在前）==="));
+        int from = Math.max(0, total - 3);
+        int shown = 0;
+        for (int i = total - 1; i >= from; i--) {
+            shown++;
+            String[] meta = headers.get(i).split("\\|", 2);
+            String msg = NetworkHandler.truncateByUtf8Bytes(messages.get(i), 256);
+            String stack = stackCounts.get(i) > 0 ? " §7（含 " + stackCounts.get(i) + " 行堆栈）" : "";
+            ctx.getSource().sendMessage(Text.literal(
+                    "§6#" + shown + " §7[" + meta[0] + "] §8[" + meta[1] + "]§r §c" + msg + stack));
+        }
+        return 1;
+    }
+
+    /**
+     * debug restart_cstmm：保护模式下强制重启模组服务（仅保护模式可用）。
+     * 执行内容见 {@link ModGuardian#restartServices}：清空调度器挂起任务 → 解除保护模式 →
+     * 兜底结算残留对局 → 重载配置/玩家数据/背包存储 → 清理残留头顶前缀队伍。
+     * 重启过程中任一步再次异常会自动重新进入保护模式（日志与公屏均有提示）。
+     * 支持控制台执行。
+     * 【被谁使用】registerDebug 的 restart_cstmm 分支。
+     */
+    private static int debugRestartCstmm(CommandContext<ServerCommandSource> ctx) {
+        if (!ModGuardian.isDisabled()) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§7模组运行正常，本命令仅在保护模式（模组因内部错误停用）下可用"));
+            return 0;
+        }
+        ctx.getSource().sendMessage(Text.literal("§e[CSTMM] 正在重启模组服务……"));
+        ModGuardian.restartServices();
+        if (ModGuardian.isDisabled()) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§c[CSTMM] 重启过程中再次发生异常，已重新进入保护模式，完整堆栈见 fatalerr.log（/cstmm debug get_logs fatalerr 可下载）"));
+        } else {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§a[CSTMM] 模组服务重启完成。"));
+        }
+        return 1;
+    }
+
+    /**
+     * debug get_logs <fatalerr|latest|all>：把指定错误日志复制到
+     * config/cstmm/download/&lt;服务器名&gt;/&lt;yyyyMMdd-HHmmss&gt;/ 下（"下载"即服务端落盘副本，
+     * 便于管理员从服主目录取走）。保护模式启用后依然可用（guardAllowProtected）。
+     * 【被谁使用】registerDebug 的 get_logs 分支。
+     */
+    private static int debugGetLogs(CommandContext<ServerCommandSource> ctx) {
+        String which = StringArgumentType.getString(ctx, "log").trim().toLowerCase();
+        List<Path> sources = new ArrayList<>();
+        if (which.equals("fatalerr") || which.equals("all")) {
+            sources.add(ModGuardian.fatalErrorLogPath());
+        }
+        if (which.equals("latest") || which.equals("all")) {
+            sources.add(FabricLoader.getInstance().getGameDir().resolve("logs").resolve("latest.log"));
+        }
+        if (sources.isEmpty()) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§c未知日志类型: " + which + "（可选: fatalerr latest all）"));
+            return 0;
+        }
+        List<Path> existing = new ArrayList<>();
+        for (Path path : sources) {
+            if (Files.exists(path)) existing.add(path);
+        }
+        if (existing.isEmpty()) {
+            ctx.getSource().sendMessage(Text.literal("§e未找到可下载的日志文件（保护模式可能尚未触发）"));
+            return 0;
+        }
+
+        String serverName = serverNameForDownload(ctx);
+        Path dir = FabricLoader.getInstance().getConfigDir()
+                .resolve("cstmm").resolve("download").resolve(serverName)
+                .resolve(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")));
+        try {
+            Files.createDirectories(dir);
+            List<String> copied = new ArrayList<>();
+            for (Path source : existing) {
+                Path target = dir.resolve(source.getFileName().toString());
+                Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+                copied.add(target.getFileName().toString());
+            }
+            ctx.getSource().sendMessage(Text.literal(
+                    "§a已下载日志到: §f" + dir + " §7(" + String.join(", ", copied) + ")"));
+            return 1;
+        } catch (IOException e) {
+            ctx.getSource().sendMessage(Text.literal("§c下载日志失败: §f" + e.getMessage()));
+            return 0;
+        }
+    }
+
+    /** 下载目录的服务器名（取存档/关卡名；非法文件名字符替换为下划线） */
+    private static String serverNameForDownload(CommandContext<ServerCommandSource> ctx) {
+        String name = null;
+        try {
+            name = ctx.getSource().getServer().getSaveProperties().getLevelName();
+        } catch (Throwable ignored) {
+            // 部分环境取不到存档名时回退 server
+        }
+        if (name == null || name.isBlank()) name = "server";
+        name = name.replaceAll("[\\\\/:*?\"<>|\\s]", "_");
+        return name.length() > 64 ? name.substring(0, 64) : name;
     }
 
     /**
@@ -638,7 +835,43 @@ public class ModCommands {
     private static void registerData(LiteralArgumentBuilder<ServerCommandSource> cstmm) {
         var data = CommandManager.literal("data")
                 .requires(source -> source.hasPermissionLevel(2))
-                .executes(usage("/cstmm data get player|clan|map|global <名称> [字段] | raw_file maps|global|clans（JSON 文件原文） / edit player|clan|map|global <名称> <字段> <值> / restore bags <玩家> [槽位] / delete player|clan|map <名称> [数据类型]"));
+                .executes(usage("/cstmm data get player|clan|map|global <名称> [字段] | raw_file maps|global|clans（JSON 文件原文） / edit player|clan|map|global <名称> <字段> <值> / create player|clan ... / cover player|clan ... / restore bags <玩家> [槽位] / delete player|clan|map <名称> [数据类型]"));
+
+        // ----- create：强行创建指定对象的数据文件（已存在则提示） -----
+        // create player <玩家名|UUID>
+        // create clan "<战队名>" [缩写] [队长]（缩写/队长可省略；含空格战队名必须加引号）
+        data.then(CommandManager.literal("create")
+                .executes(usage("/cstmm data create player <玩家名|UUID> | clan \"<战队名>\" [缩写] [队长]（强行创建数据文件，已存在则提示）"))
+                .then(CommandManager.literal("player")
+                        .then(CommandManager.argument("player", StringArgumentType.string())
+                                .suggests(ModCommands::suggestProfileNames)
+                                .executes(guard("data.create.player", ctx -> dataCreatePlayer(ctx, false)))))
+                .then(CommandManager.literal("clan")
+                        .then(CommandManager.argument("clan", StringArgumentType.string())
+                                .suggests(ModCommands::suggestClanNames)
+                                .executes(guard("data.create.clan", ctx -> dataCreateClan(ctx, false)))
+                                .then(CommandManager.argument("abbr", StringArgumentType.word())
+                                        .executes(guard("data.create.clan", ctx -> dataCreateClan(ctx, false)))
+                                        .then(CommandManager.argument("leader", StringArgumentType.string())
+                                                .suggests(ModCommands::suggestProfileNames)
+                                                .executes(guard("data.create.clan", ctx -> dataCreateClan(ctx, false))))))));
+
+        // ----- cover：强行覆盖指定对象的数据文件（不存在则强行创建） -----
+        data.then(CommandManager.literal("cover")
+                .executes(usage("/cstmm data cover player <玩家名|UUID> | clan \"<战队名>\" [缩写] [队长]（强行覆盖数据文件，不存在则创建）"))
+                .then(CommandManager.literal("player")
+                        .then(CommandManager.argument("player", StringArgumentType.string())
+                                .suggests(ModCommands::suggestProfileNames)
+                                .executes(guard("data.cover.player", ctx -> dataCreatePlayer(ctx, true)))))
+                .then(CommandManager.literal("clan")
+                        .then(CommandManager.argument("clan", StringArgumentType.string())
+                                .suggests(ModCommands::suggestClanNames)
+                                .executes(guard("data.cover.clan", ctx -> dataCreateClan(ctx, true)))
+                                .then(CommandManager.argument("abbr", StringArgumentType.word())
+                                        .executes(guard("data.cover.clan", ctx -> dataCreateClan(ctx, true)))
+                                        .then(CommandManager.argument("leader", StringArgumentType.string())
+                                                .suggests(ModCommands::suggestProfileNames)
+                                                .executes(guard("data.cover.clan", ctx -> dataCreateClan(ctx, true))))))));
 
         // ----- restore bags（保留原有能力） -----
         data.then(CommandManager.literal("restore")
@@ -646,7 +879,15 @@ public class ModCommands {
                         .then(CommandManager.argument("player", EntityArgumentType.player())
                                 .executes(guard("data.restore.bags", ctx -> {
                                     ServerPlayerEntity target = EntityArgumentType.getPlayer(ctx, "player");
-                                    boolean restored = InventoryManager.getInstance().restoreInventory(target);
+                                    boolean restored;
+                                    try {
+                                        restored = InventoryManager.getInstance().restoreInventory(target);
+                                    } catch (Exception e) {
+                                        // 恢复属于救急操作：失败只回报给执行者，不触发全局保护模式
+                                        Cstmm.LOGGER.error("[CSTMM - Commands] /cstmm data restore bags failed for {}", target.getUuid(), e);
+                                        ctx.getSource().sendMessage(Text.literal("§c恢复失败：" + e.getClass().getSimpleName() + "（详见服务端日志）"));
+                                        return 0;
+                                    }
                                     if (restored) {
                                         ctx.getSource().sendMessage(Text.literal("§a已恢复 " + target.getName() + " 的全部背包"));
                                     } else {
@@ -658,7 +899,15 @@ public class ModCommands {
                                         .executes(guard("data.restore.bags.slot", ctx -> {
                                             ServerPlayerEntity target = EntityArgumentType.getPlayer(ctx, "player");
                                             int slot = IntegerArgumentType.getInteger(ctx, "slot");
-                                            boolean restored = InventoryManager.getInstance().restoreSlot(target, slot);
+                                            boolean restored;
+                                            try {
+                                                restored = InventoryManager.getInstance().restoreSlot(target, slot);
+                                            } catch (Exception e) {
+                                                // 单格恢复同样按救急命令处理：不触发全局保护模式
+                                                Cstmm.LOGGER.error("[CSTMM - Commands] /cstmm data restore bags slot {} failed for {}", slot, target.getUuid(), e);
+                                                ctx.getSource().sendMessage(Text.literal("§c恢复失败：" + e.getClass().getSimpleName() + "（详见服务端日志）"));
+                                                return 0;
+                                            }
                                             if (restored) {
                                                 ctx.getSource().sendMessage(Text.literal("§a已恢复 " + target.getName() + " 的槽位 " + slot));
                                             } else {
@@ -1126,16 +1375,38 @@ public class ModCommands {
         return 1;
     }
 
-    /** data get player bags 的快照概要：保存时间 + 非空物品件数 */
+    /**
+     * data get player bags 的快照概要：内存快照状态 + 磁盘文件核对（bags/<uuid>.json 是否
+     * 存在/大小/写入时间）——验证"内存+磁盘"双份保存（磁盘文件在对局期间存在、恢复后清理，
+     * 休闲模式不动背包故两者皆无属正常）。
+     */
     private static String bagSummary(UUID uuid) {
+        // 【作用】磁盘核对：bag 文件存在性/大小/最后写入时间
+        java.nio.file.Path diskFile = InventoryManager.getInstance().getBagFile(uuid);
+        String diskState;
+        try {
+            if (!Files.exists(diskFile)) {
+                diskState = "磁盘无文件";
+            } else {
+                diskState = "磁盘已写入 " + Files.size(diskFile) + "B（"
+                        + CREATED_AT_FORMAT.format(java.time.Instant.ofEpochMilli(
+                                Files.getLastModifiedTime(diskFile).toMillis())) + " 落盘）";
+            }
+        } catch (IOException e) {
+            diskState = "磁盘状态读取失败: " + e.getMessage();
+        }
+
         InventorySnapshot snap = InventoryManager.getInstance().getSnapshot(uuid);
-        if (snap == null) return "无快照";
+        if (snap == null) {
+            return "内存无快照（已恢复/未开局/休闲不动背包） | " + diskState;
+        }
         int count = 0;
         // 统计主背包 + 盔甲 + 副手中的非空物品
         for (ItemStack st : snap.getMainInventory()) if (st != null && !st.isEmpty()) count++;
         for (ItemStack st : snap.getArmor()) if (st != null && !st.isEmpty()) count++;
         if (!snap.getOffhand().isEmpty()) count++;
-        return "有快照（" + CREATED_AT_FORMAT.format(Instant.ofEpochMilli(snap.getSavedAt())) + " 保存，非空物品 " + count + " 件）";
+        return "内存有快照（" + CREATED_AT_FORMAT.format(Instant.ofEpochMilli(snap.getSavedAt()))
+                + " 保存，非空物品 " + count + " 件） | " + diskState;
     }
 
     // ==================== data get/edit/delete map（地图配置命令侧管理） ====================
@@ -1968,6 +2239,147 @@ public class ModCommands {
         return 1;
     }
 
+    // ==================== data create / cover（管理员强行创建/覆盖数据文件） ====================
+
+    /** 玩家身份解析结果（UUID + 展示名） */
+    private record ProfileIdentity(UUID uuid, String name) {}
+
+    /**
+     * data create|cover player：强行创建/覆盖玩家档案文件（支持在线玩家、离线玩家名、UUID）。
+     * create 已存在时提示；cover 无条件重置为全新默认档案（不存在则创建）。
+     */
+    private static int dataCreatePlayer(CommandContext<ServerCommandSource> ctx, boolean overwrite) {
+        String input = StringArgumentType.getString(ctx, "player").trim();
+        ProfileIdentity identity = resolveProfileIdentity(ctx.getSource(), input);
+        if (identity == null) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§c未找到玩家: §f" + input + " §7（离线玩家需曾进入服务器，或直接输入 UUID）"));
+            return 0;
+        }
+        PlayerDataManager manager = PlayerDataManager.getInstance();
+        if (!overwrite && manager.hasProfileData(identity.uuid())) {
+            ctx.getSource().sendMessage(Text.literal(
+                    "§e该玩家的数据文件已存在: §f" + identity.name() + " §7(" + identity.uuid() + ")"));
+            return 0;
+        }
+        if (overwrite) {
+            manager.overwriteProfile(identity.uuid(), identity.name());
+            ctx.getSource().sendMessage(Text.literal(
+                    "§a已强行覆盖玩家数据文件: §f" + identity.name() + " §7(" + identity.uuid() + ") §7（战绩已重置）"));
+        } else {
+            manager.createProfile(identity.uuid(), identity.name());
+            ctx.getSource().sendMessage(Text.literal(
+                    "§a已强行创建玩家数据文件: §f" + identity.name() + " §7(" + identity.uuid() + ")"));
+        }
+        return 1;
+    }
+
+    /**
+     * data create|cover clan：强行创建/覆盖战队档案（名称必填，缩写/队长可选）。
+     * 缩写省略时：覆盖已有战队沿用原缩写，否则取名称前 4 个字符；队长支持在线玩家名/离线玩家名/UUID，
+     * 省略时不指定队长（空战队档案）。
+     * create 名称或缩写已存在时提示；cover 已存在则重置成员/徽标/创建时间后重建。
+     */
+    private static int dataCreateClan(CommandContext<ServerCommandSource> ctx, boolean overwrite) {
+        String name = StringArgumentType.getString(ctx, "clan");
+        String abbr = "";
+        try {
+            abbr = StringArgumentType.getString(ctx, "abbr").trim();
+        } catch (IllegalArgumentException ignored) {
+            // 未提供缩写参数
+        }
+        String nameErr = checkClanNameFormat(name);
+        if (nameErr != null) {
+            ctx.getSource().sendMessage(Text.literal(nameErr));
+            return 0;
+        }
+        String leaderInput = "";
+        try {
+            leaderInput = StringArgumentType.getString(ctx, "leader").trim();
+        } catch (IllegalArgumentException ignored) {
+            // 未提供队长参数
+        }
+        UUID leaderUuid = null;
+        String leaderName = "";
+        if (!leaderInput.isEmpty()) {
+            ProfileIdentity leader = resolveProfileIdentity(ctx.getSource(), leaderInput);
+            if (leader == null) {
+                ctx.getSource().sendMessage(Text.literal(
+                        "§c未找到队长: §f" + leaderInput + " §7（离线玩家需曾进入服务器，或直接输入 UUID）"));
+                return 0;
+            }
+            leaderUuid = leader.uuid();
+            leaderName = leader.name();
+        }
+        ClanManager clans = ClanManager.getInstance();
+        Clan existing = clans.getClan(name);
+        if (!overwrite && existing != null) {
+            ctx.getSource().sendMessage(Text.literal("§e该战队的数据文件已存在: §f" + name.trim()));
+            return 0;
+        }
+        if (abbr.isEmpty()) {
+            abbr = existing != null ? existing.abbreviation : deriveClanAbbr(name);
+        }
+        String err = overwrite
+                ? clans.overwriteByAdmin(name, abbr, leaderUuid, leaderName)
+                : clans.createByAdmin(name, abbr, leaderUuid, leaderName);
+        if (err != null) {
+            ctx.getSource().sendMessage(Text.literal(err));
+            return 0;
+        }
+        String leaderSuffix = leaderUuid == null ? " §7（未指定队长）" : " §7队长: §f" + leaderName;
+        ctx.getSource().sendMessage(Text.literal(
+                (overwrite ? "§a已强行覆盖战队数据文件: §f" : "§a已强行创建战队数据文件: §f")
+                        + name.trim() + " §7(缩写 " + abbr + ")" + leaderSuffix));
+        return 1;
+    }
+
+    /** 未指定战队缩写时按名称推导：仅保留中英文/数字，取前 4 个字符（不足则原样） */
+    private static String deriveClanAbbr(String name) {
+        String cleaned = name.replaceAll("[^\\p{L}\\p{N}]", "");
+        if (cleaned.isEmpty()) cleaned = "CLAN";
+        return cleaned.length() > 4 ? cleaned.substring(0, 4) : cleaned;
+    }
+
+    /**
+     * 解析玩家身份：在线玩家 → 玩家名/UUID；离线 → 用户缓存（曾进服）；纯 UUID → 缓存名兜底 UUID 字符串。
+     * @return null 表示无法解析（用户缓存与在线列表均无此玩家）
+     */
+    private static ProfileIdentity resolveProfileIdentity(ServerCommandSource source, String input) {
+        if (input.isEmpty()) return null;
+        var server = source.getServer();
+        var onlineByName = server.getPlayerManager().getPlayer(input);
+        if (onlineByName != null) {
+            return new ProfileIdentity(onlineByName.getUuid(), onlineByName.getName().getString());
+        }
+        UUID uuid = null;
+        try {
+            uuid = UUID.fromString(input);
+        } catch (IllegalArgumentException ignored) {
+            // 非 UUID：按玩家名查询用户缓存
+        }
+        var userCache = server.getUserCache();
+        if (uuid != null) {
+            var onlineByUuid = server.getPlayerManager().getPlayer(uuid);
+            if (onlineByUuid != null) {
+                return new ProfileIdentity(uuid, onlineByUuid.getName().getString());
+            }
+            String name = null;
+            if (userCache != null) {
+                var cached = userCache.getByUuid(uuid);
+                if (cached != null && cached.isPresent()) name = cached.get().getName();
+            }
+            return new ProfileIdentity(uuid, name == null ? input : name);
+        }
+        if (userCache != null) {
+            var cached = userCache.findByName(input);
+            if (cached != null && cached.isPresent()) {
+                return new ProfileIdentity(cached.get().getId(), cached.get().getName());
+            }
+        }
+        return null;
+    }
+
     /**
      * data get raw_file maps|global|clans：读取磁盘上的 JSON 原文（原 get maps|clans|global 无字段行为）。
      * 小内容直接聊天输出；大内容（含 base64 背景图/徽标的文件可达数 MB）只回
@@ -2053,6 +2465,21 @@ public class ModCommands {
                 ctx.getSource().sendMessage(Text.literal("§c[CSTMM] 模组已进入保护模式（内部错误停用），该命令不可用"));
                 return 0;
             }
+            try {
+                return inner.run(ctx);
+            } catch (Throwable t) {
+                ModGuardian.engage("命令 /cstmm " + where, t);
+                return 0;
+            }
+        };
+    }
+
+    /**
+     * 【作用】与 {@link #guard} 相同，但保护模式启用后仍允许执行——用于只读/救急类命令
+     *         （如 debug get_logs：保护模式触发后正需要下载 fatalerr.log）。
+     */
+    private static Command<ServerCommandSource> guardAllowProtected(String where, Command<ServerCommandSource> inner) {
+        return ctx -> {
             try {
                 return inner.run(ctx);
             } catch (Throwable t) {
@@ -2350,6 +2777,16 @@ public class ModCommands {
         String remaining = builder.getRemaining().toLowerCase();
         if ("true".startsWith(remaining)) builder.suggest("t");
         if ("false".startsWith(remaining)) builder.suggest("f");
+        return builder.buildFuture();
+    }
+
+    /** debug get_logs 的日志类型补全：fatalerr / latest / all */
+    private static CompletableFuture<Suggestions> suggestLogNames(CommandContext<ServerCommandSource> ctx,
+                                                                  SuggestionsBuilder builder) {
+        String remaining = builder.getRemaining().toLowerCase();
+        for (String option : List.of("fatalerr", "latest", "all")) {
+            if (option.startsWith(remaining)) builder.suggest(option);
+        }
         return builder.buildFuture();
     }
 

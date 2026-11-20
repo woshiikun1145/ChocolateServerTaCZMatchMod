@@ -1,5 +1,6 @@
 package cn.woshiikun_1145.mcmod.choco.cstmm.network.payload;
 
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
@@ -52,9 +53,9 @@ public record ClanActionPayload(
     public static final PacketCodec<PacketByteBuf, ClanActionPayload> CODEC = PacketCodec.of(
             (payload, buf) -> {
                 buf.writeEnumConstant(payload.action());
-                buf.writeString(payload.text1(), 192);
-                buf.writeString(payload.text2(), 16);
-                buf.writeString(payload.badge(), MAX_PART_CHARS);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.text1(), 192), 192);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.text2(), 16), 16);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.badge(), MAX_PART_CHARS), MAX_PART_CHARS);
                 buf.writeInt(payload.number());
                 buf.writeVarInt(payload.badgePartIndex());
                 buf.writeVarInt(payload.badgeTotalParts());

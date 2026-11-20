@@ -4,6 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 
 /**
  * 【作用】玩家档案同步包，jsonData 为 PlayerProfile 的 JSON 序列化（战绩/库存/货币等）。
@@ -22,7 +23,7 @@ public record PlayerProfilePayload(
 
     // 【作用】编解码器：JSON 字符串（上限 65536 字节）与 PacketByteBuf 互转
     public static final PacketCodec<PacketByteBuf, PlayerProfilePayload> CODEC = PacketCodec.of(
-            (payload, buf) -> buf.writeString(payload.jsonData(), 65536),
+            (payload, buf) -> buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.jsonData(), 65536), 65536),
             buf -> new PlayerProfilePayload(buf.readString(65536))
     );
 

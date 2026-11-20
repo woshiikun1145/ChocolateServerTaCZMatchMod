@@ -326,6 +326,100 @@ public class ClanManager {
         return null;
     }
 
+    /**
+     * 【作用】管理员强行创建战队（/cstmm data create clan）：跳过入队限制，直接生成指定名称/缩写
+     *         的战队档案；可选指定队长（在线/离线均可）。名称或缩写已存在时拒绝。
+     * 【被谁使用】ModCommands（/cstmm data create clan 命令）。仅服务端。
+     * @return null 表示成功；否则为可直接发给玩家的错误消息
+     */
+    public String createByAdmin(String name, String abbr, UUID leaderUuid, String leaderName) {
+        if (loadFailed) return LOAD_FAILED_MSG;
+        name = name == null ? "" : name.trim();
+        abbr = abbr == null ? "" : abbr.trim();
+        String nameError = validateClanName(name);
+        if (nameError != null) return nameError;
+        String abbrError = validateAbbr(abbr);
+        if (abbrError != null) return abbrError;
+        if (clansByName.containsKey(name.toLowerCase())) return "§c该战队名称已存在！";
+        if (clansByAbbr.containsKey(abbr.toLowerCase())) return "§c该战队缩写已存在！";
+        if (leaderUuid != null && clanByMember.containsKey(leaderUuid)) {
+            return "§c该玩家已加入其他战队，无法作为新战队队长！";
+        }
+        Clan clan = buildClan(name, abbr, leaderUuid, leaderName);
+        registerClan(clan);
+        save();
+        if (leaderUuid != null) NetworkHandler.sendClanMineTo(leaderUuid);
+        pushMineToClan(clan);
+        Cstmm.LOGGER.info("[CSTMM - ClanManager] Clan {} created by admin (leader={})", name, leaderName);
+        return null;
+    }
+
+    /**
+     * 【作用】管理员强行覆盖战队档案（/cstmm data cover clan）：已存在则清除名称/缩写/成员索引后
+     *         以全新档案重建（成员、徽标、创建时间等全部重置），不存在则直接创建。
+     * 【被谁使用】ModCommands（/cstmm data cover clan 命令）。仅服务端。
+     * @return null 表示成功；否则为可直接发给玩家的错误消息
+     */
+    public String overwriteByAdmin(String name, String abbr, UUID leaderUuid, String leaderName) {
+        if (loadFailed) return LOAD_FAILED_MSG;
+        name = name == null ? "" : name.trim();
+        abbr = abbr == null ? "" : abbr.trim();
+        String nameError = validateClanName(name);
+        if (nameError != null) return nameError;
+        String abbrError = validateAbbr(abbr);
+        if (abbrError != null) return abbrError;
+
+        Clan existing = getClan(name);
+        if (leaderUuid != null) {
+            Clan current = clanByMember.get(leaderUuid);
+            if (current != null && current != existing) {
+                return "§c该玩家已加入其他战队，无法作为该战队队长！";
+            }
+        }
+        Clan byAbbr = clansByAbbr.get(abbr.toLowerCase());
+        if (byAbbr != null && byAbbr != existing) return "§c该战队缩写已存在！";
+
+        if (existing != null) {
+            notifyAllOnline(existing, "§c战队「" + existing.name + "」已被管理员强制覆盖重建");
+            removeClan(existing);
+            pushMineToClan(existing);
+        }
+        Clan clan = buildClan(name, abbr, leaderUuid, leaderName);
+        registerClan(clan);
+        save();
+        if (leaderUuid != null) NetworkHandler.sendClanMineTo(leaderUuid);
+        pushMineToClan(clan);
+        Cstmm.LOGGER.info("[CSTMM - ClanManager] Clan {} overwritten by admin (leader={})", name, leaderName);
+        return null;
+    }
+
+    /** 构造一个全新战队档案（不落盘、不建索引） */
+    private Clan buildClan(String name, String abbr, UUID leaderUuid, String leaderName) {
+        Clan clan = new Clan();
+        clan.name = name;
+        clan.abbreviation = abbr;
+        clan.setBadgeBase64("");
+        clan.leader = leaderUuid == null ? "" : leaderUuid.toString();
+        clan.memberLimit = 0;
+        clan.createdAt = System.currentTimeMillis();
+        if (leaderUuid != null) {
+            clan.members.add(new Clan.Member(leaderUuid.toString(), leaderName == null ? "" : leaderName));
+        }
+        return clan;
+    }
+
+    /** 把新战队登记进名称/缩写/成员三个索引（不含落盘） */
+    private void registerClan(Clan clan) {
+        clansByName.put(clan.name.toLowerCase(), clan);
+        clansByAbbr.put(clan.abbreviation.toLowerCase(), clan);
+        for (Clan.Member m : clan.members) {
+            try {
+                clanByMember.put(UUID.fromString(m.getUuid()), clan);
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+    }
+
     /** 转让队长（仅队长，目标须为战队成员）
      * 【被谁使用】NetworkHandler（处理客户端 ClanActionPayload 的 TRANSFER 操作）。仅服务端。 */
     public String transfer(ServerPlayerEntity player, String targetName) {

@@ -48,6 +48,7 @@ public class Cstmm implements ModInitializer {
         ModGuardian.run("注册物品", cn.woshiikun_1145.mcmod.choco.cstmm.item.ModItems::initialize);
         ModGuardian.run("注册实体", cn.woshiikun_1145.mcmod.choco.cstmm.entity.ModEntities::initialize);
         ModGuardian.run("注册音效", cn.woshiikun_1145.mcmod.choco.cstmm.sound.ModSounds::initialize);
+        ModGuardian.run("注册粒子", cn.woshiikun_1145.mcmod.choco.cstmm.particle.ModParticles::initialize);
         ModGuardian.run("注册网络通道", NetworkHandler::register);
         ModGuardian.run("注册指令", this::registerCommands);
         ModGuardian.run("注册事件监听", EventListener::register);
@@ -73,6 +74,9 @@ public class Cstmm implements ModInitializer {
             PlayerDataManager.getInstance().loadAll();
             // initialize 内部会设置 RegistryLookup 并调用 loadBags，无需单独调用
             InventoryManager.initialize(server.getRegistryManager());
+            // 兜底清理：清掉上次运行残留的头顶名字前缀队伍（对局中崩溃/强杀时
+            // 计分板队伍已持久化到 scoreboard.dat，不清理则重启后玩家头顶仍带前缀）
+            cn.woshiikun_1145.mcmod.choco.cstmm.manager.MatchManager.clearAllNameTagTeams();
         }));
 
         // 服务器即将关闭：持久化玩家数据与背包存储，防止数据丢失。
@@ -90,6 +94,13 @@ public class Cstmm implements ModInitializer {
             } catch (Throwable t) {
                 LOGGER.error("[CSTMM - Main] Failed to save bags", t);
             }
+            // 兜底清理头顶名字前缀队伍（对局进行中停服时 endMatch 未走，防止前缀随计分板持久化；
+            // 本清理先于世界保存执行，scoreboard.dat 落盘即为干净状态）
+            try {
+                cn.woshiikun_1145.mcmod.choco.cstmm.manager.MatchManager.clearAllNameTagTeams();
+            } catch (Throwable t) {
+                LOGGER.error("[CSTMM - Main] Failed to clear name-tag teams", t);
+            }
         });
 
         // 服务器已完全停止：清除缓存实例，避免悬挂引用
@@ -102,6 +113,8 @@ public class Cstmm implements ModInitializer {
     // 调度体内部的异常由 MatchScheduler.onTick 的 ModGuardian 包装统一处理
     private void registerTickListener() {
         ServerTickEvents.END_SERVER_TICK.register(MatchScheduler.getInstance()::onTick);
+        // 【作用】手雷公共 API：每 tick 递减闪光致盲剩余时长（原版 CSGrenadesAPI.onServerTick）
+        ServerTickEvents.END_SERVER_TICK.register(server -> cn.woshiikun_1145.mcmod.choco.cstmm.api.CSGrenadesAPI.onServerTick());
     }
 
     /** 【作用】获取当前服务器实例，供各管理器访问玩家/世界/注册表（服务端）。 */

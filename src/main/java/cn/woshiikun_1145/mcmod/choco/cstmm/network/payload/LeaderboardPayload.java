@@ -4,6 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 
 /**
  * 全服履历排行（S2C）：紧凑 JSON（{"players":[{"name":..,"kills":..,"deaths":..,"matches":..,"wins":..},...]}）
@@ -30,7 +31,7 @@ public record LeaderboardPayload(
             (payload, buf) -> {
                 buf.writeVarInt(payload.partIndex());
                 buf.writeVarInt(payload.totalParts());
-                buf.writeString(payload.data(), 32767);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.data(), 32767), 32767);
             },
             buf -> new LeaderboardPayload(
                     buf.readVarInt(),

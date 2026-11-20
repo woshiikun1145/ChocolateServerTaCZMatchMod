@@ -4,6 +4,7 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
+import cn.woshiikun_1145.mcmod.choco.cstmm.network.NetworkHandler;
 
 /**
  * 【作用】对局状态广播包（状态类型/提示消息/红蓝比分），驱动客户端的对局提示与比分展示；
@@ -28,7 +29,7 @@ public record MatchStatusPayload(
     public static final PacketCodec<PacketByteBuf, MatchStatusPayload> CODEC = PacketCodec.of(
             (payload, buf) -> {
                 buf.writeEnumConstant(payload.type());
-                buf.writeString(payload.message(), 128);
+                buf.writeString(NetworkHandler.truncateByUtf8Bytes(payload.message(), 128), 128);
                 buf.writeInt(payload.redKills());
                 buf.writeInt(payload.blueKills());
             },

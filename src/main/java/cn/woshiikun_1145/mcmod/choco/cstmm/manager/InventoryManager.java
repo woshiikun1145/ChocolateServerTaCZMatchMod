@@ -52,8 +52,10 @@ public class InventoryManager {
     private final Set<String> unloadableFiles = new HashSet<>();
     private final Gson gson;
     private final AtomicInteger saveCounter = new AtomicInteger(0);
-    /** 自动落盘间隔（tick）：每 300 tick（15 秒）随 MatchScheduler 调用 autoSave 落盘一次 */
-    private static final int AUTO_SAVE_INTERVAL = 300;
+    /** 自动落盘间隔（秒）：autoSave 由 MatchScheduler 每秒调用一次，每 15 秒落盘一次。
+     *  （2026-11-12 修复：旧值 300 按"每 300 tick"语义注释，但调用方实为每秒一次，
+     *   导致落盘周期实际为 5 分钟——短对局的快照在内存里生生死死，bags/<uuid>.json 根本没被写过） */
+    private static final int AUTO_SAVE_INTERVAL_SECONDS = 15;
 
     private static RegistryWrapper.WrapperLookup registryLookup;
     private boolean loaded = false;
@@ -104,19 +106,26 @@ public class InventoryManager {
     // ===== 核心业务方法 =====
 
     /**
-     * 【作用】保存玩家当前整套背包为快照（进对局前调用）；已有未恢复快照时拒绝覆盖（防原物品丢失）。
+     * 【作用】保存玩家当前整套背包为快照（进对局前调用）；已有未恢复快照时先恢复再保存
+     * （自愈历史遗留快照：调用方均为"进入新对局"场景，把快照内容还原成当前背包后重新保存，
+     * 保证本次对局必定正常存包——2026-11-12 修复"背包无法正常保存"：旧实现直接拒绝并保留快照，
+     * 玩家当前背包被装备清空后无处可退，结算时回滚到陈旧快照）。
      * 【被谁使用】MatchManager（对局开始传送玩家入地图前）。仅服务端。
      */
     public void saveInventory(ServerPlayerEntity player) {
         UUID uuid = player.getUuid();
 
-        // 已有未恢复的快照时不得覆盖：旧快照才是玩家真正的原背包，
-        // 覆盖会导致原物品永久丢失（如上次对局异常退出未恢复的场景）
+        // 已有未恢复的快照：先恢复（把真实原背包还给玩家）再走正常保存，快照内容不丢失；
+        // 恢复失败（异常路径保留快照供重试）时仍拒绝覆盖，维持"不覆盖未恢复快照"的底线保护
         if (savedInventories.containsKey(uuid)) {
-            Cstmm.LOGGER.warn("[CSTMM - InventoryManager] {} already has an unrestored snapshot, keeping it",
+            Cstmm.LOGGER.warn("[CSTMM - InventoryManager] {} has a stale snapshot, restoring it before saving",
                     player.getName());
-            competitivePlayers.put(uuid, true);
-            return;
+            if (!restoreInventory(player)) {
+                Cstmm.LOGGER.warn("[CSTMM - InventoryManager] {} stale snapshot restore failed, refusing to overwrite",
+                        player.getName());
+                competitivePlayers.put(uuid, true);
+                return;
+            }
         }
 
         ItemStack[] main = new ItemStack[36];
@@ -132,6 +141,10 @@ public class InventoryManager {
         InventorySnapshot snapshot = new InventorySnapshot(main, armor, offhand);
         savedInventories.put(uuid, snapshot);
         competitivePlayers.put(uuid, true);
+
+        // 立即落盘（与 restoreSlot 同理由）：开局存包后若崩溃且未到自动保存周期，
+        // 磁盘上没有该快照，重启后玩家原背包永久丢失
+        saveBags();
 
         Cstmm.LOGGER.debug("[CSTMM - InventoryManager] Saved inventory for {}", player.getName());
     }
@@ -149,13 +162,12 @@ public class InventoryManager {
             return false;
         }
 
-        // 第一步：清空玩家背包
-        player.getInventory().clear();
-        player.getInventory().armor.clear();
-        player.getInventory().offHand.clear();
-
-        // 第二步：从快照（内存 map，服务启动时已从 bags/<uuid>.json 载入）读取数组并恢复
+        // 清空并恢复：任一步异常都保留快照条目以便下次重试，绝不上抛触发保护模式
         try {
+            player.getInventory().clear();
+            player.getInventory().armor.clear();
+            player.getInventory().offHand.clear();
+
             for (int i = 0; i < Math.min(36, snapshot.getMainInventory().length); i++) {
                 ItemStack stack = snapshot.getMainInventory()[i];
                 player.getInventory().setStack(i, stack != null ? stack.copy() : ItemStack.EMPTY);
@@ -175,9 +187,16 @@ public class InventoryManager {
             return false;
         }
 
-        // 恢复成功后才移除内存快照条目
+        // 恢复成功后才移除内存快照条目；立即落盘清除磁盘残留——
+        // 若崩溃时磁盘仍是旧快照文件，重启加载后玩家会同时获得 player.dat 物品 + 快照物品（复制）
         savedInventories.remove(uuid);
         competitivePlayers.remove(uuid);
+        // 落盘失败不应让恢复本身失败，更不能上抛触发保护模式（快照条目已移除，内存状态正确）
+        try {
+            saveBags();
+        } catch (RuntimeException e) {
+            Cstmm.LOGGER.error("[CSTMM - InventoryManager] Failed to persist bags after restore for {}", uuid, e);
+        }
         Cstmm.LOGGER.debug("[CSTMM - InventoryManager] Restored inventory for {}", player.getName());
         return true;
     }
@@ -214,8 +233,12 @@ public class InventoryManager {
         }
 
         // 立即落盘：快照已被消费，若延迟到自动保存，崩溃后磁盘上仍是旧物品，
-        // 重启加载后可再次恢复同一物品（复制）
-        saveBags();
+        // 重启加载后可再次恢复同一物品（复制）。落盘异常不影响本次单格恢复结果。
+        try {
+            saveBags();
+        } catch (RuntimeException e) {
+            Cstmm.LOGGER.error("[CSTMM - InventoryManager] Failed to persist bags after slot restore for {}", uuid, e);
+        }
 
         Cstmm.LOGGER.debug("[CSTMM - InventoryManager] Restored slot {} for {}", slotIndex, player.getName());
         return true;
@@ -224,6 +247,15 @@ public class InventoryManager {
     // 查询玩家是否有未恢复的快照（EventListener 断线/重连时判断是否需要恢复）
     public boolean hasSavedInventory(UUID uuid) {
         return savedInventories.containsKey(uuid);
+    }
+
+    /**
+     * 【作用】玩家 bag 磁盘文件路径（bags/<uuid>.json），供管理命令核对"内存快照 + 磁盘文件"
+     *         双份保存状态（磁盘文件在 saveInventory/saveBags 落盘后存在、恢复后清理）。
+     * 【被谁使用】ModCommands（data get player bags 概要）。仅服务端。
+     */
+    public Path getBagFile(UUID uuid) {
+        return bagsDir.resolve(uuid + ".json");
     }
 
     /**
@@ -267,10 +299,10 @@ public class InventoryManager {
         return competitivePlayers.getOrDefault(uuid, false);
     }
 
-    // 【作用】计数器达到 AUTO_SAVE_INTERVAL（300 tick）时触发一次落盘（MatchScheduler 每 tick 调用）
+    // 【作用】计数器达到 AUTO_SAVE_INTERVAL_SECONDS（15 秒）时触发一次落盘（MatchScheduler 每秒调用）
     public void autoSave() {
         int count = saveCounter.incrementAndGet();
-        if (count % AUTO_SAVE_INTERVAL == 0) {
+        if (count % AUTO_SAVE_INTERVAL_SECONDS == 0) {
             saveBags();
         }
     }
@@ -287,7 +319,9 @@ public class InventoryManager {
             Path tmp = file.resolveSibling(file.getFileName().toString() + ".tmp");
             try (Writer writer = new OutputStreamWriter(Files.newOutputStream(tmp), StandardCharsets.UTF_8)) {
                 gson.toJson(entry.getValue(), writer);
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
+                // Gson 写入失败会抛 JsonIOException（RuntimeException），一并兜住：
+                // 单文件落盘失败只记录日志，绝不上抛触发全局保护模式
                 Cstmm.LOGGER.error("[CSTMM - InventoryManager] Failed to save {}", file.getFileName(), e);
                 continue;
             }
@@ -313,7 +347,8 @@ public class InventoryManager {
                     Files.deleteIfExists(file);
                 }
             }
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            // Files.list 的迭代在读取目录失败时会抛 UncheckedIOException（RuntimeException）
             Cstmm.LOGGER.error("[CSTMM - InventoryManager] Failed to clean up bags directory", e);
         }
         Cstmm.LOGGER.debug("[CSTMM - InventoryManager] Saved {} inventories to bags/", savedInventories.size());
