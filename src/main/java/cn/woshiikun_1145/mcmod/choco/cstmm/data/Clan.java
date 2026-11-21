@@ -1,0 +1,86 @@
+package cn.woshiikun_1145.mcmod.choco.cstmm.data;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 战队数据（Gson 持久化到 config/cstmm/data/clans.json）。
+ * name 为全服唯一键（不区分大小写）；members 按加入顺序排列（最早在前，队长在首位），
+ * 顺序用于队长退出时的自动转让（转让给最早加入的成员）。
+ * 徽标为图片 Base64 或图片 URL（http/https，客户端自行下载；留空 = 黑色实心正方形）；
+ * base64 解码后上限 48KiB（ClanManager.validateBadge 校验）；memberLimit 0 = 无上限。
+ */
+public class Clan {
+
+    /** 成员条目：uuid + 最近一次可见的玩家名（支持离线后按名踢出/展示） */
+    public static class Member {
+        public String uuid;
+        // 最近一次见到的玩家名（上线时由 ClanManager 刷新）
+        public String name;
+
+        public Member() {}
+
+        public Member(String uuid, String name) {
+            this.uuid = uuid;
+            this.name = name;
+        }
+
+        public String getUuid() { return uuid; }
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+    }
+
+    // 全服唯一战队名（不区分大小写），ClanManager 以此为键建图
+    public String name;
+    // 战队缩写（聊天/计分板展示用）
+    public String abbreviation;
+    // 徽标内容：图片 Base64 或 http(s) URL，空串表示默认黑色方块
+    public String badgeBase64 = "";
+    // 队长的玩家 UUID（members 首位成员）
+    public String leader;
+    // 人数上限，0 = 无上限
+    public int memberLimit;
+    // 创建时间戳（毫秒）
+    public long createdAt;
+    // 成员列表，按加入顺序排列（最早在前，队长在首位）
+    public List<Member> members = new ArrayList<>();
+
+    public String getName() { return name; }
+    public String getAbbreviation() { return abbreviation; }
+    // JSON 显式 null（手改 clans.json）会覆盖字段默认值空串，getter 兜底避免下游 isEmpty()/digest() NPE
+    public String getBadgeBase64() { return badgeBase64 != null ? badgeBase64 : ""; }
+
+    /** 徽标变更时必须调用：失效内容寻址 id 缓存 */
+    public void setBadgeBase64(String badge) {
+        this.badgeBase64 = badge == null ? "" : badge;
+        this.badgeIdCache = null;
+    }
+    public String getLeader() { return leader; }
+    public int getMemberLimit() { return memberLimit; }
+    public long getCreatedAt() { return createdAt; }
+    public List<Member> getMembers() { return members; }
+
+    // 徽标内容寻址 id 缓存（transient：不随 Gson 持久化，按需计算）
+    private transient String badgeIdCache = null;
+
+    /**
+     * 徽标内容寻址 id：徽标 base64 的 MurmurHash3 32 位哈希（8 字符小写 hex）。
+     * 用于 S2C 分片下发的重组键与缓存键（相同徽标跨战队可复用）；
+     * 编辑徽标后内容变化 → id 变化，旧 id 缓存自然失效。
+     */
+    public String getBadgeId() {
+        // 懒加载：首次调用时计算 MurmurHash3 并缓存，后续直接返回
+        if (badgeIdCache == null) {
+            badgeIdCache = String.format("%08x",
+                    cn.woshiikun_1145.mcmod.choco.cstmm.util.MurmurHash3
+                            .hash32(getBadgeBase64().getBytes(StandardCharsets.UTF_8), 0));
+        }
+        return badgeIdCache;
+    }
+
+    /** 是否已满员（memberLimit 0 = 无上限） */
+    public boolean isFull() {
+        return memberLimit > 0 && members.size() >= memberLimit;
+    }
+}
