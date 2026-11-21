@@ -1,0 +1,7 @@
+{
+  "message_id": "cstmm.molotov_fire",
+  "scaling": "never",
+  "exhaustion": 0.1,
+  "effects": "burning",
+  "death_message_type": "default"
+}

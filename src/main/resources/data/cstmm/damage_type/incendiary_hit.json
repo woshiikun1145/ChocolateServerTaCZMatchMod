@@ -1,0 +1,7 @@
+{
+  "message_id": "cstmm.incendiary_hit",
+  "scaling": "never",
+  "exhaustion": 0.1,
+  "death_message_type": "default",
+  "bypasses_knockback": true
+}

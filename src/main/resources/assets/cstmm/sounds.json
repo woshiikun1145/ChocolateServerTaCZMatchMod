@@ -1,0 +1,232 @@
+{
+    "otto":  {
+                 "sounds":  [
+                                {
+                                    "name":  "cstmm:otto",
+                                    "stream":  false
+                                }
+                            ]
+             },
+    "wt_rwr":  {
+                   "sounds":  [
+                                  {
+                                      "name":  "cstmm:wt_rwr",
+                                      "stream":  false
+                                  }
+                              ]
+               },
+    "c4_beep":  {
+                    "sounds":  [
+                                   {
+                                       "name":  "cstmm:c4_beep",
+                                       "stream":  false
+                                   }
+                               ]
+                },
+    "c4_explosion":  {
+                         "sounds":  [
+                                        {
+                                            "name":  "cstmm:c4_explosion",
+                                            "stream":  false
+                                        }
+                                    ]
+                     },
+    "c4_detonation":  {
+                          "sounds":  [
+                                         {
+                                             "name":  "cstmm:c4_detonation",
+                                             "stream":  false
+                                         }
+                                     ]
+                      },
+    "c4_plant":  {
+                     "sounds":  [
+                                    {
+                                        "name":  "cstmm:c4_plant",
+                                        "stream":  false
+                                    }
+                                ]
+                 },
+    "c4_planting":  {
+                        "sounds":  [
+                                       {
+                                           "name":  "cstmm:c4_planting",
+                                           "stream":  false
+                                       }
+                                   ]
+                    },
+    "c4_defuse":  {
+                      "sounds":  [
+                                     {
+                                         "name":  "cstmm:c4_defuse",
+                                         "stream":  false
+                                     }
+                                 ]
+                  },
+    "c4_defused":  {
+                       "sounds":  [
+                                      {
+                                          "name":  "cstmm:c4_defused",
+                                          "stream":  false
+                                      }
+                                  ]
+                   },
+    "c4_defused_announce":  {
+                                "sounds":  [
+                                               {
+                                                   "name":  "cstmm:c4_defused_announce",
+                                                   "stream":  false
+                                               }
+                                           ]
+                            },
+    "t_win":  {
+                  "sounds":  [
+                                 {
+                                     "name":  "cstmm:t_win",
+                                     "stream":  false
+                                 }
+                             ]
+              },
+    "ct_win":  {
+                   "sounds":  [
+                                  {
+                                      "name":  "cstmm:ct_win",
+                                      "stream":  false
+                                  }
+                              ]
+               },
+    "round_draw":  {
+                       "sounds":  [
+                                      {
+                                          "name":  "cstmm:round_draw",
+                                          "stream":  false
+                                      }
+                                  ]
+                   },
+    "grenade.hit":  {
+                        "category":  "player",
+                        "sounds":  [
+                                       "cstmm:common/grenade_hit"
+                                   ]
+                    },
+    "grenade.throw":  {
+                          "category":  "player",
+                          "sounds":  [
+                                         "cstmm:common/grenade_throw"
+                                     ]
+                      },
+    "decoy.draw":  {
+                       "category":  "player",
+                       "sounds":  [
+                                      "cstmm:decoy/decoy_draw"
+                                  ]
+                   },
+    "flashbang.draw":  {
+                           "category":  "player",
+                           "sounds":  [
+                                          "cstmm:flashbang/flashbang_draw"
+                                      ]
+                       },
+    "flashbang.explode":  {
+                              "category":  "ambient",
+                              "sounds":  [
+                                             "cstmm:flashbang/flashbang_explode"
+                                         ]
+                          },
+    "flashbang.explode_distant":  {
+                                      "category":  "ambient",
+                                      "sounds":  [
+                                                     "cstmm:flashbang/flashbang_explode_distant"
+                                                 ]
+                                  },
+    "flashbang.explosion_ring":  {
+                                     "category":  "ambient",
+                                     "sounds":  [
+                                                    "cstmm:flashbang/explosion_ring"
+                                                ]
+                                 },
+    "smokegrenade.draw":  {
+                              "category":  "player",
+                              "sounds":  [
+                                             "cstmm:smokegrenade/smokegrenade_draw"
+                                         ]
+                          },
+    "smokegrenade.smoke_emmit":  {
+                                     "category":  "ambient",
+                                     "sounds":  [
+                                                    "cstmm:smokegrenade/smoke_emit"
+                                                ]
+                                 },
+    "smokegrenade.smoke_explode_distant":  {
+                                               "category":  "ambient",
+                                               "sounds":  [
+                                                              "cstmm:smokegrenade/smokegrenade_explode_distant"
+                                                          ]
+                                           },
+    "hegrenade.draw":  {
+                           "category":  "player",
+                           "sounds":  [
+                                          "cstmm:hegrenade/hegrenade_draw"
+                                      ]
+                       },
+    "hegrenade.bounce":  {
+                             "category":  "player",
+                             "sounds":  [
+                                            "cstmm:hegrenade/hegrenade_bounce"
+                                        ]
+                         },
+    "hegrenade.explode":  {
+                              "category":  "ambient",
+                              "sounds":  [
+                                             "cstmm:hegrenade/hegrenade_explode"
+                                         ]
+                          },
+    "hegrenade.explode_distant":  {
+                                      "category":  "ambient",
+                                      "sounds":  [
+                                                     "cstmm:hegrenade/hegrenade_explode_distant"
+                                                 ]
+                                  },
+    "incendiary.draw":  {
+                            "category":  "player",
+                            "sounds":  [
+                                           "cstmm:incendiary/incendiary_draw"
+                                       ]
+                        },
+    "incendiary.throw":  {
+                             "category":  "player",
+                             "sounds":  [
+                                            "cstmm:incendiary/incendiary_throw"
+                                        ]
+                         },
+    "incendiary.explode":  {
+                               "category":  "ambient",
+                               "sounds":  [
+                                              "cstmm:incendiary/incendiary_explode"
+                                          ]
+                           },
+    "incendiary.explode_distant":  {
+                                       "category":  "ambient",
+                                       "sounds":  [
+                                                      "cstmm:incendiary/incendiary_explode_distant"
+                                                  ]
+                                   },
+    "incendiary.explode_air":  {
+                                   "category":  "ambient",
+                                   "sounds":  [
+                                                  "cstmm:incendiary/incendiary_explode_air"
+                                              ]
+                               },
+    "incendiary.bounce":  {
+                              "category":  "ambient",
+                              "sounds":  [
+                                             "cstmm:incendiary/incendiary_bounce"
+                                         ]
+                          },
+    "incendiary.pop":  {
+                           "category":  "ambient",
+                           "sounds":  [
+                                          "cstmm:incendiary/incendiary_pop"
+                                      ]
+                       }
+}
